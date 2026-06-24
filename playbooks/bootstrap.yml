@@ -1,0 +1,65 @@
+---
+- name: Bootstrap secured administrative access
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Ensure Python is available for Ansible
+      ansible.builtin.raw: test -e /usr/bin/python3 || (apt-get update && apt-get install -y python3-minimal)
+      changed_when: false
+
+    - name: Gather host facts
+      ansible.builtin.setup:
+
+    - name: Install bootstrap packages
+      ansible.builtin.apt:
+        name:
+          - curl
+          - git
+          - gnupg2
+          - sudo
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Create administrative group
+      ansible.builtin.group:
+        name: "{{ admin_username }}"
+        state: present
+
+    - name: Create administrative user
+      ansible.builtin.user:
+        name: "{{ admin_username }}"
+        group: "{{ admin_username }}"
+        groups: sudo
+        append: true
+        shell: /bin/bash
+        create_home: true
+        password_lock: true
+        state: present
+
+    - name: Configure passwordless sudo
+      ansible.builtin.copy:
+        content: "{{ admin_username }} ALL=(ALL) NOPASSWD:ALL\n"
+        dest: "/etc/sudoers.d/{{ admin_username }}"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+
+    - name: Create the administrative SSH directory
+      ansible.builtin.file:
+        path: "/home/{{ admin_username }}/.ssh"
+        state: directory
+        owner: "{{ admin_username }}"
+        group: "{{ admin_username }}"
+        mode: "0700"
+
+    - name: Install the administrative public key
+      ansible.builtin.copy:
+        content: "{{ admin_public_key }}\n"
+        dest: "/home/{{ admin_username }}/.ssh/authorized_keys"
+        owner: "{{ admin_username }}"
+        group: "{{ admin_username }}"
+        mode: "0600"
