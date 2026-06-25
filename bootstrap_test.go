@@ -18,7 +18,7 @@ func TestBootstrapCommandsConfigureAdminAccess(t *testing.T) {
 		"Install administrative public key",
 	})
 	for _, expected := range []string{
-		"apt-get install -y 'curl' 'git' 'gnupg2' 'sudo'",
+		"apt-get -o DPkg::Lock::Timeout=300 install -y 'curl' 'git' 'gnupg2' 'sudo'",
 		"groupadd 'aegisadmin'",
 		"useradd --create-home --shell /bin/bash --gid 'aegisadmin' --groups sudo 'aegisadmin'",
 		"visudo -cf '/etc/sudoers.d/aegisadmin.aegisnode.tmp'",

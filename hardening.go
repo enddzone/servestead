@@ -89,7 +89,7 @@ func hardeningTasks() []Task {
 			aptInstallCommand("crowdsec"),
 			"systemctl enable --now crowdsec",
 			"if iptables -V | grep -qi nf_tables; then bouncer_package=crowdsec-firewall-bouncer-nftables; else bouncer_package=crowdsec-firewall-bouncer-iptables; fi",
-			"DEBIAN_FRONTEND=noninteractive apt-get install -y \"$bouncer_package\"",
+			noninteractiveAptGetCommand("install -y \"$bouncer_package\""),
 			"systemctl enable --now crowdsec-firewall-bouncer",
 			"cscli bouncers list",
 		)},
@@ -100,9 +100,9 @@ func systemUpgradeCommand() string {
 	return commandScript(
 		"export DEBIAN_FRONTEND=noninteractive",
 		"export NEEDRESTART_MODE=a",
-		"apt-get update",
-		"apt-get full-upgrade -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold",
-		"apt-get autoremove -y",
+		aptGetCommand("update"),
+		aptGetCommand("full-upgrade -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"),
+		aptGetCommand("autoremove -y"),
 		"if [ -f /var/run/reboot-required ]; then echo 'reboot required after package upgrades'; fi",
 	)
 }

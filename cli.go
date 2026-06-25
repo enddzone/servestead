@@ -22,6 +22,7 @@ Direct commands:
   aegisnode provision --provider <hetzner|digitalocean> --name <name> --ssh-key <provider-key>
   aegisnode bootstrap --host <ipv4> --admin-public-key <path> --private-key <path>
   aegisnode harden --host <ipv4> --private-key <path>
+  aegisnode network --host <ipv4> --private-key <path>
   aegisnode doctor
 
 Run "aegisnode <command> -help" for command-specific options.
@@ -53,6 +54,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv ge
 		return err
 	case "harden":
 		err := runHarden(ctx, args[1:], stdout, stderr)
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	case "network":
+		err := runNetwork(ctx, args[1:], stdout, stderr)
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}

@@ -50,3 +50,15 @@ func TestRemoteWriteFileCommandEncodesContent(t *testing.T) {
 		}
 	}
 }
+
+func TestAptInstallCommandWaitsForDpkgLock(t *testing.T) {
+	command := aptInstallCommand("curl")
+	for _, expected := range []string{
+		"apt-get -o DPkg::Lock::Timeout=300 update",
+		"DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y 'curl'",
+	} {
+		if !strings.Contains(command, expected) {
+			t.Fatalf("apt install command missing %q:\n%s", expected, command)
+		}
+	}
+}

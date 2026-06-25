@@ -20,6 +20,7 @@ const (
 	setupModeProviderKey setupMode = iota
 	setupModeBootstrapHarden
 	setupModeHardenOnly
+	setupModeNetwork
 	setupModeDoctor
 )
 
@@ -165,6 +166,17 @@ func runSetupPlan(ctx context.Context, config setupConfig, stdout, stderr io.Wri
 		}
 		printSSHLoginGuidance(stdout, config)
 		return nil
+	case setupModeNetwork:
+		fmt.Fprintln(stdout, "Step 1/1: configure Docker networking and UFW.")
+		if err := runNetwork(ctx, []string{
+			"--host", config.Host,
+			"--ssh-user", config.AdminUser,
+			"--private-key", config.PrivateKeyPath,
+		}, stdout, stderr); err != nil {
+			return err
+		}
+		printSSHLoginGuidance(stdout, config)
+		return nil
 	default:
 		return errors.New("unknown setup mode")
 	}
@@ -205,7 +217,7 @@ func preflightChecks(config setupConfig) []preflightCheck {
 	}
 	checks = append(checks, nativeCapabilityCheck("native SSH runner"))
 
-	privateKeyRequired := config.Mode == setupModeBootstrapHarden || config.Mode == setupModeHardenOnly
+	privateKeyRequired := config.Mode == setupModeBootstrapHarden || config.Mode == setupModeHardenOnly || config.Mode == setupModeNetwork
 	checks = append(checks, fileCheck("private key", config.PrivateKeyPath, privateKeyRequired))
 
 	publicKeyRequired := config.Mode == setupModeBootstrapHarden
@@ -467,6 +479,10 @@ func setupModeOptions() []setupModeOption {
 			Description: "Use this when the admin account already exists and you only need baseline security settings.",
 		},
 		{
+			Label:       "Configure Docker networking and UFW",
+			Description: "Install Docker, disable Docker-managed packet filters, and let UFW own ingress and routed traffic.",
+		},
+		{
 			Label:       "Run local preflight checks only",
 			Description: "Checks built-in SSH/key support and local key files without making server changes.",
 		},
@@ -582,6 +598,18 @@ func (model setupModel) configFromInputs() (setupConfig, error) {
 		if !linuxUsername.MatchString(config.AdminUser) {
 			return setupConfig{}, errors.New("admin SSH user must be a valid Linux username")
 		}
+	case setupModeNetwork:
+		if config.Host == "" {
+			return setupConfig{}, errors.New("host is required")
+		}
+		config.AdminUser = firstNonEmpty(value(1), "aegisadmin")
+		config.PrivateKeyPath = expandUserPath(value(2))
+		if config.PrivateKeyPath == "" {
+			return setupConfig{}, errors.New("private key path is required")
+		}
+		if !linuxUsername.MatchString(config.AdminUser) {
+			return setupConfig{}, errors.New("admin SSH user must be a valid Linux username")
+		}
 	default:
 		return setupConfig{}, errors.New("unknown setup mode")
 	}
@@ -627,6 +655,13 @@ func setupPlanSummary(config setupConfig) string {
 		)
 	case setupModeHardenOnly:
 		return fmt.Sprintf("- Harden %s as %s using %s.\n", config.Host, config.AdminUser, config.PrivateKeyPath)
+	case setupModeNetwork:
+		return fmt.Sprintf(
+			"- Connect to %s as %s with %s.\n- Configure Docker networking and UFW policy.\n",
+			config.Host,
+			config.AdminUser,
+			config.PrivateKeyPath,
+		)
 	default:
 		return "- Unknown plan.\n"
 	}

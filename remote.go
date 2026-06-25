@@ -218,7 +218,15 @@ func aptInstallCommand(packages ...string) string {
 	for _, pkg := range packages {
 		quoted = append(quoted, shellQuote(pkg))
 	}
-	return "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y " + strings.Join(quoted, " ")
+	return noninteractiveAptGetCommand("update") + " && " + noninteractiveAptGetCommand("install -y "+strings.Join(quoted, " "))
+}
+
+func aptGetCommand(command string) string {
+	return "apt-get -o DPkg::Lock::Timeout=300 " + command
+}
+
+func noninteractiveAptGetCommand(command string) string {
+	return "DEBIAN_FRONTEND=noninteractive " + aptGetCommand(command)
 }
 
 func systemctlCommand(action, service string) string {

@@ -6,11 +6,12 @@ Source of truth for planned work: `implementation_plan.html`.
 
 ## Current status
 
-- Overall blueprint: **6 of 15 tasks complete (40%)**
+- Overall blueprint: **9 of 15 tasks complete (60%)**
 - Phase 1 — Local CLI Coordinator & VPS Bootstrapping: **complete**
 - Phase 2 — Operating System & Kernel Hardening: **complete**
 - Phase 2.5 — Guided Live-Test UX: **complete**
-- Phases 3–5: **not started**
+- Phase 3 — Resolving Docker & UFW Conflict: **complete**
+- Phases 4–5: **not started**
 
 The interactive HTML checklist uses browser-local storage and was not edited. This file records repository implementation progress independently of browser state.
 
@@ -66,11 +67,19 @@ Verification completed on 2026-06-25:
 - Simplified setup key prompts so the TUI asks for one private key path and derives the matching `.pub` path automatically.
 - The TUI explains each path without exposing implementation phase labels, confirms the selected plan, and reports that preflight checks stop execution before remote changes when required local prerequisites fail.
 
-### Phase 3 — Not started
+### Phase 3 — Complete
 
-- [ ] Configure Docker daemon packet-filter behavior.
-- [ ] Add the required UFW forwarding/NAT rules.
-- [ ] Establish the default-deny UFW policy and explicit routes.
+- [x] Configure Docker daemon packet-filter behavior.
+- [x] Add the required UFW forwarding/NAT rules.
+- [x] Establish the default-deny UFW policy and explicit routes.
+
+Verification completed on 2026-06-25:
+
+- Added the `network` command with native remote Docker/UFW steps separate from `harden`.
+- Docker is installed from Docker's official Ubuntu apt repository using a keyring-backed deb822 source file.
+- The network runner writes `/etc/docker/daemon.json` with `"iptables": false`, ensures the administrative SSH user has passwordless sudo and Docker group membership, enables IPv4 forwarding, replaces only the AegisNode-managed UFW NAT block, preserves SSH access on the configured SSH port, denies incoming and routed traffic by default, allows HTTP/HTTPS ingress, allows routed traffic from Docker bridge CIDRs, enables UFW, and restarts Docker.
+- Added a guided setup path for Docker networking and UFW without adding the step to baseline hardening.
+- Automated verification: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `go build -o /tmp/aegisnode .`.
 
 ### Phase 4 — Not started
 
@@ -86,4 +95,4 @@ Verification completed on 2026-06-25:
 
 ## Next implementation entry point
 
-Phase 3 should add Docker and UFW network/firewall configuration through native remote steps. Keep Docker packet-filter changes and UFW NAT/default policy changes separate from Phase 2 CrowdSec installation so firewall behavior can be tested and rolled back independently.
+Phase 4 should deploy Traefik, Gerbil, Pangolin, and PostgreSQL, configure required DNS records, start the stack, and verify certificate issuance.

@@ -114,3 +114,27 @@ func TestSetupPlanSummaryGivesGuidance(t *testing.T) {
 		t.Fatalf("summary leaks implementation phase language: %q", summary)
 	}
 }
+
+func TestSetupNetworkConfigFromInputs(t *testing.T) {
+	t.Setenv("AEGISNODE_TEST_HOME", "/tmp/aegis-home")
+	model := setupModel{
+		mode:   setupModeNetwork,
+		inputs: setupInputs(setupModeNetwork),
+	}
+	values := []string{
+		"203.0.113.10",
+		"aegisadmin",
+		"$AEGISNODE_TEST_HOME/id_ed25519",
+	}
+	for index, value := range values {
+		model.inputs[index].SetValue(value)
+	}
+
+	config, err := model.configFromInputs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Host != "203.0.113.10" || config.AdminUser != "aegisadmin" || config.PrivateKeyPath != "/tmp/aegis-home/id_ed25519" {
+		t.Fatalf("unexpected config: %+v", config)
+	}
+}
