@@ -52,52 +52,47 @@ func runHarden(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	defer client.Close()
 
 	fmt.Fprintf(stdout, "hardening %s as %s...\n", config.Host, config.SSHUser)
-	if err := runHardeningSteps(ctx, client, config); err != nil {
+	if err := runHardeningSteps(ctx, client, config, stdout); err != nil {
 		return fmt.Errorf("hardening failed: %w", err)
 	}
 	fmt.Fprintf(stdout, "hardening complete: %s\n", config.Host)
 	return nil
 }
 
-func runHardeningSteps(ctx context.Context, client remoteClient, config hardeningConfig) error {
-	for _, command := range hardeningCommands() {
-		if err := client.Run(ctx, privilegedCommand(config.SSHUser, command)); err != nil {
-			return err
-		}
-	}
-	return nil
+func runHardeningSteps(ctx context.Context, client remoteClient, config hardeningConfig, progress io.Writer) error {
+	return runTasks(ctx, client, config.SSHUser, hardeningTasks(), progress)
 }
 
-func hardeningCommands() []string {
+func hardeningTasks() []Task {
 	sysctlContent := strings.Join(sysctlConfigLines(), "\n") + "\n"
-	return []string{
-		supportedUbuntuCommand(),
-		validateSysctlKeysCommand(),
-		systemUpgradeCommand(),
-		commandScript(
+	return []Task{
+		{Name: "Validate supported Ubuntu release", Apply: supportedUbuntuCommand()},
+		{Name: "Validate sysctl keys", Apply: validateSysctlKeysCommand()},
+		{Name: "Apply package upgrades", Apply: systemUpgradeCommand()},
+		{Name: "Install hardening prerequisites", Apply: commandScript(
 			aptInstallCommand("apt-transport-https", "ca-certificates", "curl", "gnupg", "iptables", "unattended-upgrades"),
-		),
-		remoteWriteFileCommand("/etc/ssh/sshd_config.d/99-aegisnode-hardening.conf", sshdHardeningConfig(), "root", "root", 0644),
-		sshHardeningCommand(),
-		remoteWriteFileCommand("/etc/sysctl.d/99-vps-hardening.conf", sysctlContent, "root", "root", 0644),
-		commandScript("sysctl --system"),
-		remoteWriteFileCommand("/etc/apt/apt.conf.d/20auto-upgrades", "APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n", "root", "root", 0644),
-		commandScript(
+		)},
+		{Name: "Write sshd hardening config", Apply: remoteWriteFileCommand("/etc/ssh/sshd_config.d/99-aegisnode-hardening.conf", sshdHardeningConfig(), "root", "root", 0644)},
+		{Name: "Validate and reload SSH", Apply: sshHardeningCommand()},
+		{Name: "Write sysctl hardening config", Apply: remoteWriteFileCommand("/etc/sysctl.d/99-vps-hardening.conf", sysctlContent, "root", "root", 0644)},
+		{Name: "Reload sysctl settings", Apply: commandScript("sysctl --system")},
+		{Name: "Enable unattended upgrades", Apply: remoteWriteFileCommand("/etc/apt/apt.conf.d/20auto-upgrades", "APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n", "root", "root", 0644)},
+		{Name: "Configure CrowdSec keyring", Apply: commandScript(
 			"install -d -m 0755 -o root -g root /etc/apt/keyrings",
 			"curl -fsSL https://packagecloud.io/crowdsec/crowdsec/gpgkey -o /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.key",
 			"gpg --dearmor --yes --output /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.key",
 			"chown root:root /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg",
 			"chmod 0644 /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg",
-		),
-		remoteWriteFileCommand("/etc/apt/sources.list.d/crowdsec_crowdsec.list", "deb [signed-by=/etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg] https://packagecloud.io/crowdsec/crowdsec/any any main\n", "root", "root", 0644),
-		commandScript(
+		)},
+		{Name: "Configure CrowdSec repository", Apply: remoteWriteFileCommand("/etc/apt/sources.list.d/crowdsec_crowdsec.list", "deb [signed-by=/etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg] https://packagecloud.io/crowdsec/crowdsec/any any main\n", "root", "root", 0644)},
+		{Name: "Install CrowdSec and firewall bouncer", Apply: commandScript(
 			aptInstallCommand("crowdsec"),
 			"systemctl enable --now crowdsec",
 			"if iptables -V | grep -qi nf_tables; then bouncer_package=crowdsec-firewall-bouncer-nftables; else bouncer_package=crowdsec-firewall-bouncer-iptables; fi",
 			"DEBIAN_FRONTEND=noninteractive apt-get install -y \"$bouncer_package\"",
 			"systemctl enable --now crowdsec-firewall-bouncer",
 			"cscli bouncers list",
-		),
+		)},
 	}
 }
 

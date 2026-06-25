@@ -8,8 +8,15 @@ import (
 
 func TestBootstrapCommandsConfigureAdminAccess(t *testing.T) {
 	config := bootstrapConfig{SSHUser: "root", AdminUser: "aegisadmin"}
-	commands := bootstrapCommands(config, `ssh-ed25519 AAAAkey admin's key`)
-	joined := strings.Join(commands, "\n")
+	tasks := bootstrapTasks(config, `ssh-ed25519 AAAAkey admin's key`)
+	joined := strings.Join(taskScripts(tasks), "\n")
+	assertTaskNames(t, taskNames(tasks), []string{
+		"Install bootstrap packages",
+		"Create administrative group and user",
+		"Configure passwordless sudo",
+		"Create administrative SSH directory",
+		"Install administrative public key",
+	})
 	for _, expected := range []string{
 		"apt-get install -y 'curl' 'git' 'gnupg2' 'sudo'",
 		"groupadd 'aegisadmin'",
@@ -27,13 +34,25 @@ func TestBootstrapCommandsConfigureAdminAccess(t *testing.T) {
 func TestRunBootstrapStepsUsesPrivilegedCommands(t *testing.T) {
 	client := &recordingRemoteClient{}
 	config := bootstrapConfig{SSHUser: "aegisadmin", AdminUser: "aegisadmin"}
-	if err := runBootstrapSteps(context.Background(), client, config, "ssh-ed25519 AAAATEST user@example"); err != nil {
+	if err := runBootstrapSteps(context.Background(), client, config, "ssh-ed25519 AAAATEST user@example", nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(client.commands) != len(bootstrapCommands(config, "ssh-ed25519 AAAATEST user@example")) {
+	if len(client.commands) != len(bootstrapTasks(config, "ssh-ed25519 AAAATEST user@example")) {
 		t.Fatalf("unexpected command count: %d", len(client.commands))
 	}
 	if !strings.HasPrefix(client.commands[0], "sudo sh -c ") {
 		t.Fatalf("non-root bootstrap did not use sudo: %q", client.commands[0])
+	}
+}
+
+func assertTaskNames(t *testing.T, actual, expected []string) {
+	t.Helper()
+	if len(actual) != len(expected) {
+		t.Fatalf("task names = %#v, want %#v", actual, expected)
+	}
+	for index := range expected {
+		if actual[index] != expected[index] {
+			t.Fatalf("task names = %#v, want %#v", actual, expected)
+		}
 	}
 }

@@ -305,7 +305,7 @@
                 </div>
 
                 <p class="text-slate-400 text-sm leading-relaxed">
-                    Rather than employing manual terminal setups or heavy management servers, our implementation utilizes a statically compiled Go CLI coordinator executing local, cryptographically embedded Ansible playbooks against newly provisioned targets over SSH.
+                    Rather than employing manual terminal setups, local SSH binaries, or Ansible as a required runtime dependency, the current implementation uses a statically compiled Go CLI with native SSH transport, in-process ED25519 key generation, cloud provider API clients, and a small typed task engine for bootstrap and hardening steps.
                 </p>
 
                 <!-- Tasks Checklist -->
@@ -313,7 +313,7 @@
                     <h3 class="text-xs font-bold text-slate-300 tracking-wider uppercase mb-2">Phase 1 Checklist</h3>
                     <label class="flex items-start gap-3 cursor-pointer text-sm text-slate-400 hover:text-slate-200 select-none">
                         <input type="checkbox" id="task-1" onchange="toggleTask('task-1')" class="mt-1 h-4 w-4 rounded border-slate-800 bg-slate-900 text-indigo-500 focus:ring-0 focus:ring-offset-0">
-                        <span>Define the core Go orchestrator file architecture and utilize Go embedding rules (`//go:embed`) to bundle local Ansible YAML playbooks.</span>
+                        <span>Define the core Go coordinator architecture with native SSH transport, no local `ssh`, `ssh-keygen`, or `ansible-playbook` runtime dependency.</span>
                     </label>
                     <label class="flex items-start gap-3 cursor-pointer text-sm text-slate-400 hover:text-slate-200 select-none">
                         <input type="checkbox" id="task-2" onchange="toggleTask('task-2')" class="mt-1 h-4 w-4 rounded border-slate-800 bg-slate-900 text-indigo-500 focus:ring-0 focus:ring-offset-0">
@@ -321,14 +321,14 @@
                     </label>
                     <label class="flex items-start gap-3 cursor-pointer text-sm text-slate-400 hover:text-slate-200 select-none">
                         <input type="checkbox" id="task-3" onchange="toggleTask('task-3')" class="mt-1 h-4 w-4 rounded border-slate-800 bg-slate-900 text-indigo-500 focus:ring-0 focus:ring-offset-0">
-                        <span>Establish the primary Ansible bootstrap file targeting the default root user context to inject administrative public key permissions.</span>
+                        <span>Establish typed bootstrap tasks that install packages, create the administrative user, configure sudo, and install the administrative public key.</span>
                     </label>
                 </div>
 
-                <!-- Code Block 1: Go embed implementation -->
+                <!-- Code Block 1: Native task runner implementation -->
                 <div class="space-y-3">
                     <div class="flex items-center justify-between">
-                        <h4 class="text-xs font-bold text-slate-300 tracking-wider uppercase">Go Coordinator & Playbook Embed (`main.go`)</h4>
+                        <h4 class="text-xs font-bold text-slate-300 tracking-wider uppercase">Native Task Runner (`tasks.go`)</h4>
                         <button onclick="copyToClipboard('code-go-embed', this)" class="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1.5 px-2.5 py-1 bg-indigo-500/10 hover:bg-indigo-500/20 rounded transition font-medium">
                             <i class="fa-regular fa-copy"></i> Copy Code
                         </button>
@@ -336,122 +336,57 @@
                     <pre class="bg-slate-950 border border-slate-850 rounded-xl p-5 overflow-x-auto text-xs font-mono text-slate-300 max-h-96"><code id="code-go-embed">package main
 
 import (
-	"embed"
+	"context"
 	"fmt"
-	"io/fs"
-	"os"
-	"os/exec"
-	"path/filepath"
+	"io"
 )
 
-// Use Go's native embedding system to compile Ansible playbooks 
-// directly into our self-contained CLI runtime.
-//go:embed playbooks/*
-var embeddedPlaybooks embed.FS
+type Task struct {
+	Name  string
+	Apply string
+}
 
-func main() {
-	fmt.Println("AegisNode CLI Orchestrator Starting...")
-	
-	// Create a temp directory to unpack our embedded Ansible configurations safely at runtime
-	tempDir, err := os.MkdirTemp("", "aegisnode-playbooks")
-	if err != nil {
-		fmt.Printf("Error creating isolated environment directory: %v\n", err)
-		os.Exit(1)
+func runTasks(ctx context.Context, client remoteClient, sshUser string, tasks []Task, progress io.Writer) error {
+	for _, task := range tasks {
+		if progress != nil {
+			fmt.Fprintf(progress, "- %s\n", task.Name)
+		}
+		if err := client.Run(ctx, privilegedCommand(sshUser, task.Apply)); err != nil {
+			return fmt.Errorf("task %q failed: %w", task.Name, err)
+		}
 	}
-	defer os.RemoveAll(tempDir)
-
-	// Unpack structural YAML folders recursively
-	err = fs.WalkDir(embeddedPlaybooks, "playbooks", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		targetPath := filepath.Join(tempDir, path)
-		if d.IsDir() {
-			return os.MkdirAll(targetPath, 0755)
-		}
-		data, err := embeddedPlaybooks.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(targetPath, data, 0600)
-	})
-
-	if err != nil {
-		fmt.Printf("Critical error unpacking configuration manifests: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Manifests unpacked to: %s\n", tempDir)
-	fmt.Println("Now execute targeted playbooks using local ansible-playbook runtimes...")
-	
-	// Invoke localized ansible task configurations over native SSH channels
-	// cmd := exec.Command("ansible-playbook", "-i", "vps_ip,", filepath.Join(tempDir, "playbooks/bootstrap.yml"))
+	return nil
 }</code></pre>
                 </div>
 
-                <!-- Code Block 2: Initial Ansible Boostrap configuration -->
+                <!-- Code Block 2: Native bootstrap tasks -->
                 <div class="space-y-3">
                     <div class="flex items-center justify-between">
-                        <h4 class="text-xs font-bold text-slate-300 tracking-wider uppercase">Ansible Root Bootstrap Playbook (`bootstrap.yml`)</h4>
-                        <button onclick="copyToClipboard('code-ansible-boot', this)" class="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1.5 px-2.5 py-1 bg-indigo-500/10 hover:bg-indigo-500/20 rounded transition font-medium">
+                        <h4 class="text-xs font-bold text-slate-300 tracking-wider uppercase">Bootstrap Task Plan (`bootstrap.go`)</h4>
+                        <button onclick="copyToClipboard('code-bootstrap-tasks', this)" class="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1.5 px-2.5 py-1 bg-indigo-500/10 hover:bg-indigo-500/20 rounded transition font-medium">
                             <i class="fa-regular fa-copy"></i> Copy Code
                         </button>
                     </div>
-                    <pre class="bg-slate-950 border border-slate-850 rounded-xl p-5 overflow-x-auto text-xs font-mono text-slate-300 max-h-96"><code id="code-ansible-boot">---
-- name: Initial Root Bootstrapping and Secured Admin Deployment
-  hosts: all
-  become: yes
-  gather_facts: no
-  vars:
-    # Customizable user details populated via local config panel inputs
-    admin_username: "aegisadmin"
-    admin_public_key: "<span class="var-ssh text-indigo-400">ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...</span>"
-
-  tasks:
-    - name: Ensure target Python is present for Ansible interaction
-      raw: test -e /usr/bin/python3 || (apt-get update && apt-get install -y python3-minimal)
-      changed_when: false
-
-    - name: Gather facts after python installation verification
-      setup:
-
-    - name: Core package update and basic utilities installation
-      apt:
-        update_cache: yes
-        upgrade: safe
-        name:
-          - sudo
-          - curl
-          - git
-          - gnupg2
-        state: present
-
-    - name: Create secured administrative user group
-      group:
-        name: "{{ admin_username }}"
-        state: present
-
-    - name: Provision administrative unprivileged shell user
-      user:
-        name: "{{ admin_username }}"
-        group: "{{ admin_username }}"
-        shell: /bin/bash
-        groups: sudo
-        append: yes
-        state: present
-
-    - name: Configure passwordless sudo policy configuration for user
-      copy:
-        content: "{{ admin_username }} ALL=(ALL) NOPASSWD:ALL"
-        dest: "/etc/sudoers.d/{{ admin_username }}"
-        mode: '0440'
-        validate: '/usr/sbin/visudo -cf %s'
-
-    - name: Set authorized public verification key for access authorization
-      authorized_key:
-        user: "{{ admin_username }}"
-        state: present
-        key: "{{ admin_public_key }}"</code></pre>
+                    <pre class="bg-slate-950 border border-slate-850 rounded-xl p-5 overflow-x-auto text-xs font-mono text-slate-300 max-h-96"><code id="code-bootstrap-tasks">func bootstrapTasks(config bootstrapConfig, adminPublicKey string) []Task {
+	sshDirectory := "/home/" + config.AdminUser + "/.ssh"
+	authorizedKeysPath := sshDirectory + "/authorized_keys"
+	return []Task{
+		{Name: "Install bootstrap packages", Apply: commandScript(
+			aptInstallCommand("curl", "git", "gnupg2", "sudo"),
+		)},
+		{Name: "Create administrative group and user", Apply: commandScript(
+			"getent group "+shellQuote(config.AdminUser)+" >/dev/null || groupadd "+shellQuote(config.AdminUser),
+			"id -u "+shellQuote(config.AdminUser)+" >/dev/null 2>&amp;1 || useradd --create-home --shell /bin/bash --gid "+shellQuote(config.AdminUser)+" --groups sudo "+shellQuote(config.AdminUser),
+			"usermod --append --groups sudo "+shellQuote(config.AdminUser),
+			"passwd -l "+shellQuote(config.AdminUser)+" >/dev/null 2>&amp;1 || true",
+		)},
+		{Name: "Configure passwordless sudo", Apply: sudoersCommand(config.AdminUser)},
+		{Name: "Create administrative SSH directory", Apply: commandScript(
+			"install -d -m 0700 -o " + shellQuote(config.AdminUser) + " -g " + shellQuote(config.AdminUser) + " " + shellQuote(sshDirectory),
+		)},
+		{Name: "Install administrative public key", Apply: remoteWriteFileCommand(authorizedKeysPath, adminPublicKey+"\n", config.AdminUser, config.AdminUser, 0600)},
+	}
+}</code></pre>
                 </div>
             </div>
         </div>
@@ -468,7 +403,7 @@ func main() {
                 </div>
 
                 <p class="text-slate-400 text-sm leading-relaxed">
-                    This step moves beyond simple administrative configuration into target kernel-level hardening policies, mitigating network interception, DoS attempts, spoofing exploits, and enabling persistent silent security upgrades.
+                    This step moves beyond administrative bootstrap into named native hardening tasks. The current runner validates Ubuntu 22.04+ and kernel 5.15+, applies package upgrades, installs prerequisites, locks down SSH, validates sysctl keys before writing configuration, enables unattended upgrades, and installs CrowdSec with the correct firewall bouncer package.
                 </p>
 
                 <!-- Tasks Checklist -->
@@ -476,15 +411,15 @@ func main() {
                     <h3 class="text-xs font-bold text-slate-300 tracking-wider uppercase mb-2">Phase 2 Checklist</h3>
                     <label class="flex items-start gap-3 cursor-pointer text-sm text-slate-400 hover:text-slate-200 select-none">
                         <input type="checkbox" id="task-4" onchange="toggleTask('task-4')" class="mt-1 h-4 w-4 rounded border-slate-800 bg-slate-900 text-indigo-500 focus:ring-0 focus:ring-offset-0">
-                        <span>Deploy optimized `/etc/sysctl.d/99-vps-hardening.conf` sysctl runtime settings on the target system.</span>
+                        <span>Validate the target is supported Ubuntu and confirm all configured sysctl keys exist before writing hardening settings.</span>
                     </label>
                     <label class="flex items-start gap-3 cursor-pointer text-sm text-slate-400 hover:text-slate-200 select-none">
                         <input type="checkbox" id="task-5" onchange="toggleTask('task-5')" class="mt-1 h-4 w-4 rounded border-slate-800 bg-slate-900 text-indigo-500 focus:ring-0 focus:ring-offset-0">
-                        <span>Install and configure the local `unattended-upgrades` configuration for silent daily updates.</span>
+                        <span>Apply package upgrades, install hardening prerequisites, and configure `unattended-upgrades` for daily maintenance.</span>
                     </label>
                     <label class="flex items-start gap-3 cursor-pointer text-sm text-slate-400 hover:text-slate-200 select-none">
                         <input type="checkbox" id="task-6" onchange="toggleTask('task-6')" class="mt-1 h-4 w-4 rounded border-slate-800 bg-slate-900 text-indigo-500 focus:ring-0 focus:ring-offset-0">
-                        <span>Install and register CrowdSec on the host instance to act as local threat prevention agent.</span>
+                        <span>Write and validate SSH hardening, lock the root password, then install CrowdSec and the matching firewall bouncer.</span>
                     </label>
                 </div>
 
@@ -496,7 +431,8 @@ func main() {
                             <i class="fa-regular fa-copy"></i> Copy Code
                         </button>
                     </div>
-                    <pre class="bg-slate-950 border border-slate-850 rounded-xl p-5 overflow-x-auto text-xs font-mono text-slate-300 max-h-96"><code id="code-sysctl"># IP Spoofing protection / Source route verification
+                    <pre class="bg-slate-950 border border-slate-850 rounded-xl p-5 overflow-x-auto text-xs font-mono text-slate-300 max-h-96"><code id="code-sysctl"># Managed by AegisNode.
+# IP Spoofing protection / Source route verification
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
 
@@ -523,58 +459,46 @@ kernel.dmesg_restrict = 1
 kernel.unprivileged_bpf_disabled = 1</code></pre>
                 </div>
 
-                <!-- Code Block 2: Hardening Ansible Playbook task -->
+                <!-- Code Block 2: Native hardening task manifest -->
                 <div class="space-y-3">
                     <div class="flex items-center justify-between">
-                        <h4 class="text-xs font-bold text-slate-300 tracking-wider uppercase">Ansible OS Hardening Task Manifest (`hardening.yml`)</h4>
-                        <button onclick="copyToClipboard('code-ansible-hard', this)" class="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1.5 px-2.5 py-1 bg-indigo-500/10 hover:bg-indigo-500/20 rounded transition font-medium">
+                        <h4 class="text-xs font-bold text-slate-300 tracking-wider uppercase">Native OS Hardening Task Manifest (`hardening.go`)</h4>
+                        <button onclick="copyToClipboard('code-hardening-tasks', this)" class="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1.5 px-2.5 py-1 bg-indigo-500/10 hover:bg-indigo-500/20 rounded transition font-medium">
                             <i class="fa-regular fa-copy"></i> Copy Code
                         </button>
                     </div>
-                    <pre class="bg-slate-950 border border-slate-850 rounded-xl p-5 overflow-x-auto text-xs font-mono text-slate-300 max-h-96"><code id="code-ansible-hard">---
-- name: Kernel Hardening and Automated Maintenance Settings
-  hosts: all
-  become: yes
-
-  tasks:
-    - name: Write secured sysctl.d properties configuration 
-      copy:
-        src: files/99-vps-hardening.conf
-        dest: /etc/sysctl.d/99-vps-hardening.conf
-        owner: root
-        group: root
-        mode: '0644'
-      notify: Reload active sysctl variables
-
-    - name: Install unattended-upgrades tools
-      apt:
-        name: unattended-upgrades
-        state: present
-
-    - name: Ensure unattended security configuration upgrades are active
-      copy:
-        content: |
-          APT::Periodic::Update-Package-Lists "1";
-          APT::Periodic::Unattended-Upgrade "1";
-        dest: /etc/apt/apt.conf.dir/20auto-upgrades
-        owner: root
-        group: root
-        mode: '0644'
-
-    - name: Install CrowdSec security agent package repository
-      shell: "curl -s https://packagecloud.io/install/repositories/crowdsecurity/crowdsec/script.deb.sh | bash"
-      args:
-        creates: /etc/apt/sources.list.d/crowdsecurity_crowdsec.list
-
-    - name: Ensure baseline system security monitoring agent is active
-      apt:
-        name: crowdsec
-        state: present
-        update_cache: yes
-
-  handlers:
-    - name: Reload active sysctl variables
-      command: sysctl --system</code></pre>
+                    <pre class="bg-slate-950 border border-slate-850 rounded-xl p-5 overflow-x-auto text-xs font-mono text-slate-300 max-h-96"><code id="code-hardening-tasks">func hardeningTasks() []Task {
+	sysctlContent := strings.Join(sysctlConfigLines(), "\n") + "\n"
+	return []Task{
+		{Name: "Validate supported Ubuntu release", Apply: supportedUbuntuCommand()},
+		{Name: "Validate sysctl keys", Apply: validateSysctlKeysCommand()},
+		{Name: "Apply package upgrades", Apply: systemUpgradeCommand()},
+		{Name: "Install hardening prerequisites", Apply: commandScript(
+			aptInstallCommand("apt-transport-https", "ca-certificates", "curl", "gnupg", "iptables", "unattended-upgrades"),
+		)},
+		{Name: "Write sshd hardening config", Apply: remoteWriteFileCommand("/etc/ssh/sshd_config.d/99-aegisnode-hardening.conf", sshdHardeningConfig(), "root", "root", 0644)},
+		{Name: "Validate and reload SSH", Apply: sshHardeningCommand()},
+		{Name: "Write sysctl hardening config", Apply: remoteWriteFileCommand("/etc/sysctl.d/99-vps-hardening.conf", sysctlContent, "root", "root", 0644)},
+		{Name: "Reload sysctl settings", Apply: commandScript("sysctl --system")},
+		{Name: "Enable unattended upgrades", Apply: remoteWriteFileCommand("/etc/apt/apt.conf.d/20auto-upgrades", "APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n", "root", "root", 0644)},
+		{Name: "Configure CrowdSec keyring", Apply: commandScript(
+			"install -d -m 0755 -o root -g root /etc/apt/keyrings",
+			"curl -fsSL https://packagecloud.io/crowdsec/crowdsec/gpgkey -o /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.key",
+			"gpg --dearmor --yes --output /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.key",
+			"chown root:root /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg",
+			"chmod 0644 /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg",
+		)},
+		{Name: "Configure CrowdSec repository", Apply: remoteWriteFileCommand("/etc/apt/sources.list.d/crowdsec_crowdsec.list", "deb [signed-by=/etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg] https://packagecloud.io/crowdsec/crowdsec/any any main\n", "root", "root", 0644)},
+		{Name: "Install CrowdSec and firewall bouncer", Apply: commandScript(
+			aptInstallCommand("crowdsec"),
+			"systemctl enable --now crowdsec",
+			"if iptables -V | grep -qi nf_tables; then bouncer_package=crowdsec-firewall-bouncer-nftables; else bouncer_package=crowdsec-firewall-bouncer-iptables; fi",
+			"DEBIAN_FRONTEND=noninteractive apt-get install -y \"$bouncer_package\"",
+			"systemctl enable --now crowdsec-firewall-bouncer",
+			"cscli bouncers list",
+		)},
+	}
+}</code></pre>
                 </div>
             </div>
         </div>

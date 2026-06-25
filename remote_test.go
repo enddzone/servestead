@@ -8,11 +8,12 @@ import (
 
 type recordingRemoteClient struct {
 	commands []string
+	err      error
 }
 
 func (client *recordingRemoteClient) Run(_ context.Context, command string) error {
 	client.commands = append(client.commands, command)
-	return nil
+	return client.err
 }
 
 func (client *recordingRemoteClient) Close() error {

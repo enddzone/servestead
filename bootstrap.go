@@ -65,7 +65,7 @@ func runBootstrap(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	defer client.Close()
 
 	fmt.Fprintf(stdout, "bootstrapping %s as %s...\n", config.Host, config.AdminUser)
-	if err := runBootstrapSteps(ctx, client, config, key); err != nil {
+	if err := runBootstrapSteps(ctx, client, config, key, stdout); err != nil {
 		return fmt.Errorf("bootstrap failed: %w", err)
 	}
 	if config.AdminPublicKeyPath == publicKeyPath(config.PrivateKeyPath) {
@@ -76,33 +76,28 @@ func runBootstrap(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	return nil
 }
 
-func runBootstrapSteps(ctx context.Context, client remoteClient, config bootstrapConfig, adminPublicKey string) error {
-	for _, command := range bootstrapCommands(config, adminPublicKey) {
-		if err := client.Run(ctx, privilegedCommand(config.SSHUser, command)); err != nil {
-			return err
-		}
-	}
-	return nil
+func runBootstrapSteps(ctx context.Context, client remoteClient, config bootstrapConfig, adminPublicKey string, progress io.Writer) error {
+	return runTasks(ctx, client, config.SSHUser, bootstrapTasks(config, adminPublicKey), progress)
 }
 
-func bootstrapCommands(config bootstrapConfig, adminPublicKey string) []string {
+func bootstrapTasks(config bootstrapConfig, adminPublicKey string) []Task {
 	sshDirectory := "/home/" + config.AdminUser + "/.ssh"
 	authorizedKeysPath := sshDirectory + "/authorized_keys"
-	return []string{
-		commandScript(
+	return []Task{
+		{Name: "Install bootstrap packages", Apply: commandScript(
 			aptInstallCommand("curl", "git", "gnupg2", "sudo"),
-		),
-		commandScript(
+		)},
+		{Name: "Create administrative group and user", Apply: commandScript(
 			"getent group "+shellQuote(config.AdminUser)+" >/dev/null || groupadd "+shellQuote(config.AdminUser),
 			"id -u "+shellQuote(config.AdminUser)+" >/dev/null 2>&1 || useradd --create-home --shell /bin/bash --gid "+shellQuote(config.AdminUser)+" --groups sudo "+shellQuote(config.AdminUser),
 			"usermod --append --groups sudo "+shellQuote(config.AdminUser),
 			"passwd -l "+shellQuote(config.AdminUser)+" >/dev/null 2>&1 || true",
-		),
-		sudoersCommand(config.AdminUser),
-		commandScript(
+		)},
+		{Name: "Configure passwordless sudo", Apply: sudoersCommand(config.AdminUser)},
+		{Name: "Create administrative SSH directory", Apply: commandScript(
 			"install -d -m 0700 -o " + shellQuote(config.AdminUser) + " -g " + shellQuote(config.AdminUser) + " " + shellQuote(sshDirectory),
-		),
-		remoteWriteFileCommand(authorizedKeysPath, adminPublicKey+"\n", config.AdminUser, config.AdminUser, 0600),
+		)},
+		{Name: "Install administrative public key", Apply: remoteWriteFileCommand(authorizedKeysPath, adminPublicKey+"\n", config.AdminUser, config.AdminUser, 0600)},
 	}
 }
 

@@ -8,7 +8,22 @@ import (
 )
 
 func TestHardeningCommandsContainBaseline(t *testing.T) {
-	joined := strings.Join(hardeningCommands(), "\n")
+	tasks := hardeningTasks()
+	joined := strings.Join(taskScripts(tasks), "\n")
+	assertTaskNames(t, taskNames(tasks), []string{
+		"Validate supported Ubuntu release",
+		"Validate sysctl keys",
+		"Apply package upgrades",
+		"Install hardening prerequisites",
+		"Write sshd hardening config",
+		"Validate and reload SSH",
+		"Write sysctl hardening config",
+		"Reload sysctl settings",
+		"Enable unattended upgrades",
+		"Configure CrowdSec keyring",
+		"Configure CrowdSec repository",
+		"Install CrowdSec and firewall bouncer",
+	})
 	for _, expected := range []string{
 		`test "$ID" = "ubuntu"`,
 		`dpkg --compare-versions "$VERSION_ID" ge 22.04`,
@@ -53,10 +68,10 @@ func TestHardeningCommandsContainBaseline(t *testing.T) {
 func TestRunHardeningStepsUsesPrivilegedCommands(t *testing.T) {
 	client := &recordingRemoteClient{}
 	config := hardeningConfig{SSHUser: "aegisadmin"}
-	if err := runHardeningSteps(context.Background(), client, config); err != nil {
+	if err := runHardeningSteps(context.Background(), client, config, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(client.commands) != len(hardeningCommands()) {
+	if len(client.commands) != len(hardeningTasks()) {
 		t.Fatalf("unexpected command count: %d", len(client.commands))
 	}
 	if !strings.HasPrefix(client.commands[0], "sudo sh -c ") {
