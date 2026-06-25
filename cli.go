@@ -12,11 +12,14 @@ import (
 	"time"
 )
 
-const usage = `AegisNode provisions an Ubuntu VPS and bootstraps its administrative user.
+const usage = `AegisNode provisions and hardens Ubuntu VPS instances.
 
 Usage:
   aegisnode provision --provider <hetzner|digitalocean> --name <name> --ssh-key <provider-key>
   aegisnode bootstrap --host <ipv4> --admin-public-key <path> --private-key <path>
+  aegisnode harden --host <ipv4> --private-key <path>
+  aegisnode setup
+  aegisnode doctor
 
 Run "aegisnode <command> -help" for command-specific options.
 `
@@ -41,6 +44,24 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv ge
 		return err
 	case "bootstrap":
 		err := runBootstrap(ctx, args[1:], stdout, stderr)
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	case "harden":
+		err := runHarden(ctx, args[1:], stdout, stderr)
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	case "setup":
+		err := runSetup(ctx, args[1:], stdout, stderr)
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	case "doctor":
+		err := runDoctor(args[1:], stdout, stderr)
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}

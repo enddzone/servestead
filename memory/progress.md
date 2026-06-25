@@ -1,14 +1,16 @@
 # Implementation Progress
 
-Last updated: 2026-06-23
+Last updated: 2026-06-25
 
 Source of truth for planned work: `implementation_plan.html`.
 
 ## Current status
 
-- Overall blueprint: **3 of 15 tasks complete (20%)**
+- Overall blueprint: **6 of 15 tasks complete (40%)**
 - Phase 1 — Local CLI Coordinator & VPS Bootstrapping: **complete**
-- Phases 2–5: **not started**
+- Phase 2 — Operating System & Kernel Hardening: **complete**
+- Phase 2.5 — Guided Live-Test UX: **complete**
+- Phases 3–5: **not started**
 
 The interactive HTML checklist uses browser-local storage and was not edited. This file records repository implementation progress independently of browser state.
 
@@ -32,11 +34,30 @@ Verification completed on 2026-06-23:
 
 Runtime Ansible execution remains environment-dependent because `ansible-playbook` is not installed in the development environment. A live bootstrap also requires a real Ubuntu target and is intentionally not part of automated tests.
 
-### Phase 2 — Not started
+### Phase 2 — Complete
 
-- [ ] Deploy `/etc/sysctl.d/99-vps-hardening.conf`.
-- [ ] Configure unattended upgrades.
-- [ ] Install and register CrowdSec.
+- [x] Deploy `/etc/sysctl.d/99-vps-hardening.conf`.
+- [x] Configure unattended upgrades.
+- [x] Install and register CrowdSec.
+
+Verification completed on 2026-06-25:
+
+- Added the `harden` command with a separate embedded `hardening.yml` playbook.
+- The playbook validates Ubuntu release, kernel version, and every requested sysctl key before applying sysctl configuration.
+- CrowdSec repository configuration uses an explicit apt keyring and source-list entry instead of a shell-piped installer script.
+- Automated verification: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `go build -o /tmp/aegisnode .`.
+
+### Phase 2.5 — Complete
+
+- [x] Add a Charmbracelet TUI for guided live testing on an existing VPS.
+- [x] Add local preflight checks before remote bootstrap or hardening changes.
+- [x] Provide non-interactive `doctor` preflight output for quick diagnostics.
+
+Verification completed on 2026-06-25:
+
+- Added `setup` for the guided TUI.
+- Added `doctor` for direct local dependency checks.
+- The TUI explains each path, confirms the selected plan, and reports that preflight checks stop execution before remote changes when required local prerequisites fail.
 
 ### Phase 3 — Not started
 
@@ -58,4 +79,4 @@ Runtime Ansible execution remains environment-dependent because `ansible-playboo
 
 ## Next implementation entry point
 
-Phase 2 should add a new embedded playbook rather than expanding `bootstrap.yml`. Before applying sysctl values, validate every setting against the target Ubuntu release and kernel; do not copy the blueprint snippet without checking compatibility. Add idempotence-oriented Ansible checks and Go tests confirming the new playbook is embedded.
+Phase 3 should add Docker and UFW network/firewall configuration in a new embedded playbook. Keep Docker packet-filter changes and UFW NAT/default policy changes separate from Phase 2 CrowdSec installation so firewall behavior can be tested and rolled back independently.
