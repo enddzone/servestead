@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,17 +25,13 @@ func TestRunPreflightPassesWithRequiredKeys(t *testing.T) {
 		AdminPublicKeyPath: publicKey,
 	}
 	var output bytes.Buffer
-	err := runPreflight(config, &output, func(command string) (string, error) {
-		return "/usr/bin/" + command, nil
-	})
+	err := runPreflight(config, &output)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
-		"[ok] ansible-playbook available",
-		"[ok] ssh available",
-		"[ok] embedded bootstrap.yml",
-		"[ok] embedded hardening.yml",
+		"[ok] native ED25519 key generation",
+		"[ok] native SSH runner",
 		"[ok] private key",
 		"[ok] admin public key",
 	} {
@@ -46,19 +41,14 @@ func TestRunPreflightPassesWithRequiredKeys(t *testing.T) {
 	}
 }
 
-func TestRunPreflightFailsWhenRequiredCommandIsMissing(t *testing.T) {
+func TestRunPreflightFailsWhenRequiredKeyIsMissing(t *testing.T) {
 	var output bytes.Buffer
-	err := runPreflight(setupConfig{Mode: setupModeDoctor}, &output, func(command string) (string, error) {
-		if command == "ansible-playbook" {
-			return "", errors.New("missing")
-		}
-		return "/usr/bin/" + command, nil
-	})
+	err := runPreflight(setupConfig{Mode: setupModeHardenOnly}, &output)
 	if err == nil || err.Error() != "preflight checks failed" {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(output.String(), "[fail] ansible-playbook available") {
-		t.Fatalf("missing failed command in output:\n%s", output.String())
+	if !strings.Contains(output.String(), "[fail] private key") {
+		t.Fatalf("missing failed key check in output:\n%s", output.String())
 	}
 }
 
@@ -72,7 +62,6 @@ func TestSetupConfigFromInputs(t *testing.T) {
 		"203.0.113.10",
 		"root",
 		"aegisadmin",
-		"$AEGISNODE_TEST_HOME/id_ed25519.pub",
 		"$AEGISNODE_TEST_HOME/id_ed25519",
 	}
 	for index, value := range values {
@@ -91,14 +80,37 @@ func TestSetupConfigFromInputs(t *testing.T) {
 	}
 }
 
+func TestSetupProviderKeyConfigFromInputs(t *testing.T) {
+	t.Setenv("AEGISNODE_TEST_HOME", "/tmp/aegis-home")
+	model := setupModel{
+		mode:   setupModeProviderKey,
+		inputs: setupInputs(setupModeProviderKey),
+	}
+	model.inputs[0].SetValue("$AEGISNODE_TEST_HOME/provider")
+	model.inputs[1].SetValue("provider-comment")
+
+	config, err := model.configFromInputs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.ProviderKeyPath != "/tmp/aegis-home/provider" || config.ProviderKeyComment != "provider-comment" {
+		t.Fatalf("unexpected config: %+v", config)
+	}
+}
+
 func TestSetupPlanSummaryGivesGuidance(t *testing.T) {
 	summary := setupPlanSummary(setupConfig{
-		Mode:           setupModeBootstrapHarden,
-		Host:           "203.0.113.10",
-		InitialSSHUser: "root",
-		AdminUser:      "aegisadmin",
+		Mode:               setupModeBootstrapHarden,
+		Host:               "203.0.113.10",
+		InitialSSHUser:     "root",
+		AdminUser:          "aegisadmin",
+		PrivateKeyPath:     "/tmp/aegis-key",
+		AdminPublicKeyPath: "/tmp/aegis-key.pub",
 	})
-	if !strings.Contains(summary, "Bootstrap 203.0.113.10") || !strings.Contains(summary, "Apply Phase 2 hardening") {
+	if !strings.Contains(summary, "Connect to 203.0.113.10") || !strings.Contains(summary, "Harden the server") {
 		t.Fatalf("unexpected summary: %q", summary)
+	}
+	if strings.Contains(summary, "Phase") {
+		t.Fatalf("summary leaks implementation phase language: %q", summary)
 	}
 }

@@ -1,56 +1,39 @@
 package main
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"slices"
+	"context"
 	"strings"
 	"testing"
 )
 
-func TestExtractBootstrapPlaybook(t *testing.T) {
-	directory := t.TempDir()
-	path, err := extractBootstrapPlaybook(directory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if path != filepath.Join(directory, "bootstrap.yml") {
-		t.Fatalf("unexpected playbook path: %s", path)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "Install the administrative public key") {
-		t.Fatal("extracted playbook does not contain the bootstrap tasks")
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Fatalf("unexpected playbook permissions: %o", info.Mode().Perm())
+func TestBootstrapCommandsConfigureAdminAccess(t *testing.T) {
+	config := bootstrapConfig{SSHUser: "root", AdminUser: "aegisadmin"}
+	commands := bootstrapCommands(config, `ssh-ed25519 AAAAkey admin's key`)
+	joined := strings.Join(commands, "\n")
+	for _, expected := range []string{
+		"apt-get install -y 'curl' 'git' 'gnupg2' 'sudo'",
+		"groupadd 'aegisadmin'",
+		"useradd --create-home --shell /bin/bash --gid 'aegisadmin' --groups sudo 'aegisadmin'",
+		"visudo -cf '/etc/sudoers.d/aegisadmin.aegisnode.tmp'",
+		"/home/aegisadmin/.ssh/authorized_keys",
+		"c3NoLWVkMjU1MTkgQUFBQWtleSBhZG1pbidzIGtleQo=",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("bootstrap commands missing %q:\n%s", expected, joined)
+		}
 	}
 }
 
-func TestAnsibleArgsEncodeExtraVariablesAsJSON(t *testing.T) {
-	config := bootstrapConfig{
-		Host: "203.0.113.10", SSHUser: "root", AdminUser: "aegisadmin", PrivateKeyPath: "/tmp/id_ed25519",
-	}
-	publicKey := `ssh-ed25519 AAAAkey admin's key`
-	args, err := ansibleArgs(config, publicKey, "/tmp/bootstrap.yml")
-	if err != nil {
+func TestRunBootstrapStepsUsesPrivilegedCommands(t *testing.T) {
+	client := &recordingRemoteClient{}
+	config := bootstrapConfig{SSHUser: "aegisadmin", AdminUser: "aegisadmin"}
+	if err := runBootstrapSteps(context.Background(), client, config, "ssh-ed25519 AAAATEST user@example"); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(args, "-o StrictHostKeyChecking=accept-new") {
-		t.Fatalf("host key policy is missing from arguments: %#v", args)
+	if len(client.commands) != len(bootstrapCommands(config, "ssh-ed25519 AAAATEST user@example")) {
+		t.Fatalf("unexpected command count: %d", len(client.commands))
 	}
-	var extraVars map[string]string
-	if err := json.Unmarshal([]byte(args[len(args)-2]), &extraVars); err != nil {
-		t.Fatalf("extra vars are not valid JSON: %v", err)
-	}
-	if extraVars["admin_username"] != "aegisadmin" || extraVars["admin_public_key"] != publicKey {
-		t.Fatalf("unexpected extra vars: %#v", extraVars)
+	if !strings.HasPrefix(client.commands[0], "sudo sh -c ") {
+		t.Fatalf("non-root bootstrap did not use sudo: %q", client.commands[0])
 	}
 }

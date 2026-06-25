@@ -2,20 +2,13 @@ package main
 
 import (
 	"context"
-	"embed"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 )
-
-//go:embed playbooks/*.yml
-var embeddedPlaybooks embed.FS
 
 type bootstrapConfig struct {
 	Host               string
@@ -23,6 +16,12 @@ type bootstrapConfig struct {
 	AdminUser          string
 	AdminPublicKeyPath string
 	PrivateKeyPath     string
+}
+
+type bootstrapRemoteClientFactory func(context.Context, bootstrapConfig, io.Writer, io.Writer) (remoteClient, error)
+
+var newBootstrapRemoteClient bootstrapRemoteClientFactory = func(ctx context.Context, config bootstrapConfig, stdout, stderr io.Writer) (remoteClient, error) {
+	return newSSHRemoteClient(ctx, config.Host, config.SSHUser, config.PrivateKeyPath, stdout, stderr)
 }
 
 func runBootstrap(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -58,63 +57,65 @@ func runBootstrap(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if _, err := os.Stat(config.PrivateKeyPath); err != nil {
 		return fmt.Errorf("access private key: %w", err)
 	}
-	ansiblePath, err := exec.LookPath("ansible-playbook")
-	if err != nil {
-		return errors.New("ansible-playbook is required; install ansible-core and ensure it is on PATH")
-	}
 
-	tempDir, err := os.MkdirTemp("", "aegisnode-playbooks-")
-	if err != nil {
-		return fmt.Errorf("create temporary playbook directory: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
-	playbookPath, err := extractBootstrapPlaybook(tempDir)
+	client, err := newBootstrapRemoteClient(ctx, config, stdout, stderr)
 	if err != nil {
 		return err
 	}
+	defer client.Close()
 
-	commandArgs, err := ansibleArgs(config, key, playbookPath)
-	if err != nil {
-		return err
-	}
 	fmt.Fprintf(stdout, "bootstrapping %s as %s...\n", config.Host, config.AdminUser)
-	command := exec.CommandContext(ctx, ansiblePath, commandArgs...)
-	command.Stdin = os.Stdin
-	command.Stdout = stdout
-	command.Stderr = stderr
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("ansible bootstrap failed: %w", err)
+	if err := runBootstrapSteps(ctx, client, config, key); err != nil {
+		return fmt.Errorf("bootstrap failed: %w", err)
 	}
-	fmt.Fprintf(stdout, "bootstrap complete: ssh %s@%s\n", config.AdminUser, config.Host)
+	if config.AdminPublicKeyPath == publicKeyPath(config.PrivateKeyPath) {
+		fmt.Fprintf(stdout, "bootstrap complete: ssh -i %s %s@%s\n", shellQuoteForDisplay(config.PrivateKeyPath), config.AdminUser, config.Host)
+	} else {
+		fmt.Fprintf(stdout, "bootstrap complete: ssh %s@%s with the private key matching %s\n", config.AdminUser, config.Host, config.AdminPublicKeyPath)
+	}
 	return nil
 }
 
-func extractBootstrapPlaybook(directory string) (string, error) {
-	data, err := embeddedPlaybooks.ReadFile("playbooks/bootstrap.yml")
-	if err != nil {
-		return "", fmt.Errorf("read embedded bootstrap playbook: %w", err)
+func runBootstrapSteps(ctx context.Context, client remoteClient, config bootstrapConfig, adminPublicKey string) error {
+	for _, command := range bootstrapCommands(config, adminPublicKey) {
+		if err := client.Run(ctx, privilegedCommand(config.SSHUser, command)); err != nil {
+			return err
+		}
 	}
-	path := filepath.Join(directory, "bootstrap.yml")
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return "", fmt.Errorf("write temporary bootstrap playbook: %w", err)
-	}
-	return path, nil
+	return nil
 }
 
-func ansibleArgs(config bootstrapConfig, adminPublicKey, playbookPath string) ([]string, error) {
-	extraVars, err := json.Marshal(map[string]string{
-		"admin_username":   config.AdminUser,
-		"admin_public_key": adminPublicKey,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("encode Ansible variables: %w", err)
-	}
+func bootstrapCommands(config bootstrapConfig, adminPublicKey string) []string {
+	sshDirectory := "/home/" + config.AdminUser + "/.ssh"
+	authorizedKeysPath := sshDirectory + "/authorized_keys"
 	return []string{
-		"--inventory", config.Host + ",",
-		"--user", config.SSHUser,
-		"--private-key", config.PrivateKeyPath,
-		"--ssh-common-args", "-o StrictHostKeyChecking=accept-new",
-		"--extra-vars", string(extraVars),
-		playbookPath,
-	}, nil
+		commandScript(
+			aptInstallCommand("curl", "git", "gnupg2", "sudo"),
+		),
+		commandScript(
+			"getent group "+shellQuote(config.AdminUser)+" >/dev/null || groupadd "+shellQuote(config.AdminUser),
+			"id -u "+shellQuote(config.AdminUser)+" >/dev/null 2>&1 || useradd --create-home --shell /bin/bash --gid "+shellQuote(config.AdminUser)+" --groups sudo "+shellQuote(config.AdminUser),
+			"usermod --append --groups sudo "+shellQuote(config.AdminUser),
+			"passwd -l "+shellQuote(config.AdminUser)+" >/dev/null 2>&1 || true",
+		),
+		sudoersCommand(config.AdminUser),
+		commandScript(
+			"install -d -m 0700 -o " + shellQuote(config.AdminUser) + " -g " + shellQuote(config.AdminUser) + " " + shellQuote(sshDirectory),
+		),
+		remoteWriteFileCommand(authorizedKeysPath, adminPublicKey+"\n", config.AdminUser, config.AdminUser, 0600),
+	}
+}
+
+func sudoersCommand(adminUser string) string {
+	path := "/etc/sudoers.d/" + adminUser
+	temporaryPath := path + ".aegisnode.tmp"
+	content := adminUser + " ALL=(ALL) NOPASSWD:ALL\n"
+	return strings.Join([]string{
+		"set -e",
+		"printf '%s' " + shellQuote(content) + " > " + shellQuote(temporaryPath),
+		"chown root:root " + shellQuote(temporaryPath),
+		"chmod 0440 " + shellQuote(temporaryPath),
+		"visudo -cf " + shellQuote(temporaryPath),
+		"mv " + shellQuote(temporaryPath) + " " + shellQuote(path),
+	}, "\n")
 }

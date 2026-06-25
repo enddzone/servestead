@@ -3,55 +3,64 @@ package main
 import (
 	"bytes"
 	"context"
-	"os"
-	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
 
-func TestExtractHardeningPlaybook(t *testing.T) {
-	directory := t.TempDir()
-	path, err := extractHardeningPlaybook(directory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if path != filepath.Join(directory, "hardening.yml") {
-		t.Fatalf("unexpected playbook path: %s", path)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
+func TestHardeningCommandsContainBaseline(t *testing.T) {
+	joined := strings.Join(hardeningCommands(), "\n")
 	for _, expected := range []string{
-		"Deploy validated sysctl hardening configuration",
-		"unattended-upgrades",
-		"Install CrowdSec security agent",
+		`test "$ID" = "ubuntu"`,
+		`dpkg --compare-versions "$VERSION_ID" ge 22.04`,
+		"sysctl -n 'net.ipv4.conf.all.rp_filter'",
+		"apt-get full-upgrade -y",
+		"apt-get autoremove -y",
+		"apt-get install -y 'apt-transport-https' 'ca-certificates' 'curl' 'gnupg' 'iptables' 'unattended-upgrades'",
+		"/etc/ssh/sshd_config.d/99-aegisnode-hardening.conf",
+		"passwd -l root",
+		"install -d -m 0755 -o root -g root /run/sshd",
+		"/usr/sbin/sshd -t",
+		"systemctl reload ssh || systemctl reload sshd",
+		"/etc/sysctl.d/99-vps-hardening.conf",
+		"packagecloud.io/crowdsec/crowdsec/gpgkey",
+		"systemctl enable --now crowdsec",
+		"crowdsec-firewall-bouncer-nftables",
+		"crowdsec-firewall-bouncer-iptables",
+		"systemctl enable --now crowdsec-firewall-bouncer",
+		"cscli bouncers list",
 	} {
-		if !strings.Contains(content, expected) {
-			t.Fatalf("extracted playbook is missing %q", expected)
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("hardening commands missing %q:\n%s", expected, joined)
 		}
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
+	config := strings.Join(sysctlConfigLines(), "\n")
+	if !strings.Contains(config, "kernel.unprivileged_bpf_disabled = 1") {
+		t.Fatalf("sysctl config missing expected setting:\n%s", config)
 	}
-	if info.Mode().Perm() != 0600 {
-		t.Fatalf("unexpected playbook permissions: %o", info.Mode().Perm())
+	sshdConfig := sshdHardeningConfig()
+	for _, expected := range []string{
+		"PermitRootLogin no",
+		"PasswordAuthentication no",
+		"KbdInteractiveAuthentication no",
+		"PubkeyAuthentication yes",
+	} {
+		if !strings.Contains(sshdConfig, expected) {
+			t.Fatalf("sshd config missing %q:\n%s", expected, sshdConfig)
+		}
 	}
 }
 
-func TestHardeningArgs(t *testing.T) {
-	config := hardeningConfig{
-		Host: "203.0.113.10", SSHUser: "aegisadmin", PrivateKeyPath: "/tmp/id_ed25519",
+func TestRunHardeningStepsUsesPrivilegedCommands(t *testing.T) {
+	client := &recordingRemoteClient{}
+	config := hardeningConfig{SSHUser: "aegisadmin"}
+	if err := runHardeningSteps(context.Background(), client, config); err != nil {
+		t.Fatal(err)
 	}
-	args := hardeningArgs(config, "/tmp/hardening.yml")
-	if !slices.Contains(args, "-o StrictHostKeyChecking=accept-new") {
-		t.Fatalf("host key policy is missing from arguments: %#v", args)
+	if len(client.commands) != len(hardeningCommands()) {
+		t.Fatalf("unexpected command count: %d", len(client.commands))
 	}
-	if args[len(args)-1] != "/tmp/hardening.yml" {
-		t.Fatalf("playbook path is not the final argument: %#v", args)
+	if !strings.HasPrefix(client.commands[0], "sudo sh -c ") {
+		t.Fatalf("non-root hardening did not use sudo: %q", client.commands[0])
 	}
 }
 

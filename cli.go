@@ -15,10 +15,13 @@ import (
 const usage = `AegisNode provisions and hardens Ubuntu VPS instances.
 
 Usage:
+  aegisnode setup
+
+Direct commands:
+  aegisnode keygen
   aegisnode provision --provider <hetzner|digitalocean> --name <name> --ssh-key <provider-key>
   aegisnode bootstrap --host <ipv4> --admin-public-key <path> --private-key <path>
   aegisnode harden --host <ipv4> --private-key <path>
-  aegisnode setup
   aegisnode doctor
 
 Run "aegisnode <command> -help" for command-specific options.
@@ -54,6 +57,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv ge
 			return nil
 		}
 		return err
+	case "keygen":
+		err := runKeygen(ctx, args[1:], stdout, stderr)
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
 	case "setup":
 		err := runSetup(ctx, args[1:], stdout, stderr)
 		if errors.Is(err, flag.ErrHelp) {
@@ -80,7 +89,7 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer, 
 	region := flags.String("region", "", "provider region/location (provider default when omitted)")
 	size := flags.String("size", "", "provider server size (provider default when omitted)")
 	image := flags.String("image", "", "Ubuntu image slug (provider default when omitted)")
-	sshKey := flags.String("ssh-key", "", "existing provider SSH key ID, name, or fingerprint")
+	sshKey := flags.String("ssh-key", "", "existing provider SSH key ID, name, or fingerprint; run keygen first if needed")
 	timeout := flags.Duration("timeout", 5*time.Minute, "maximum time to wait for a public IPv4 address")
 	if err := flags.Parse(args); err != nil {
 		return err

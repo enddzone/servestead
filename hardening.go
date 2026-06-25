@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
@@ -16,6 +14,12 @@ type hardeningConfig struct {
 	Host           string
 	SSHUser        string
 	PrivateKeyPath string
+}
+
+type hardeningRemoteClientFactory func(context.Context, hardeningConfig, io.Writer, io.Writer) (remoteClient, error)
+
+var newHardeningRemoteClient hardeningRemoteClientFactory = func(ctx context.Context, config hardeningConfig, stdout, stderr io.Writer) (remoteClient, error) {
+	return newSSHRemoteClient(ctx, config.Host, config.SSHUser, config.PrivateKeyPath, stdout, stderr)
 }
 
 func runHarden(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -40,52 +44,140 @@ func runHarden(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if _, err := os.Stat(config.PrivateKeyPath); err != nil {
 		return fmt.Errorf("access private key: %w", err)
 	}
-	ansiblePath, err := exec.LookPath("ansible-playbook")
-	if err != nil {
-		return errors.New("ansible-playbook is required; install ansible-core and ensure it is on PATH")
-	}
 
-	tempDir, err := os.MkdirTemp("", "aegisnode-playbooks-")
-	if err != nil {
-		return fmt.Errorf("create temporary playbook directory: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
-	playbookPath, err := extractHardeningPlaybook(tempDir)
+	client, err := newHardeningRemoteClient(ctx, config, stdout, stderr)
 	if err != nil {
 		return err
 	}
+	defer client.Close()
 
-	commandArgs := hardeningArgs(config, playbookPath)
 	fmt.Fprintf(stdout, "hardening %s as %s...\n", config.Host, config.SSHUser)
-	command := exec.CommandContext(ctx, ansiblePath, commandArgs...)
-	command.Stdin = os.Stdin
-	command.Stdout = stdout
-	command.Stderr = stderr
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("ansible hardening failed: %w", err)
+	if err := runHardeningSteps(ctx, client, config); err != nil {
+		return fmt.Errorf("hardening failed: %w", err)
 	}
 	fmt.Fprintf(stdout, "hardening complete: %s\n", config.Host)
 	return nil
 }
 
-func extractHardeningPlaybook(directory string) (string, error) {
-	data, err := embeddedPlaybooks.ReadFile("playbooks/hardening.yml")
-	if err != nil {
-		return "", fmt.Errorf("read embedded hardening playbook: %w", err)
+func runHardeningSteps(ctx context.Context, client remoteClient, config hardeningConfig) error {
+	for _, command := range hardeningCommands() {
+		if err := client.Run(ctx, privilegedCommand(config.SSHUser, command)); err != nil {
+			return err
+		}
 	}
-	path := filepath.Join(directory, "hardening.yml")
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return "", fmt.Errorf("write temporary hardening playbook: %w", err)
-	}
-	return path, nil
+	return nil
 }
 
-func hardeningArgs(config hardeningConfig, playbookPath string) []string {
+func hardeningCommands() []string {
+	sysctlContent := strings.Join(sysctlConfigLines(), "\n") + "\n"
 	return []string{
-		"--inventory", config.Host + ",",
-		"--user", config.SSHUser,
-		"--private-key", config.PrivateKeyPath,
-		"--ssh-common-args", "-o StrictHostKeyChecking=accept-new",
-		playbookPath,
+		supportedUbuntuCommand(),
+		validateSysctlKeysCommand(),
+		systemUpgradeCommand(),
+		commandScript(
+			aptInstallCommand("apt-transport-https", "ca-certificates", "curl", "gnupg", "iptables", "unattended-upgrades"),
+		),
+		remoteWriteFileCommand("/etc/ssh/sshd_config.d/99-aegisnode-hardening.conf", sshdHardeningConfig(), "root", "root", 0644),
+		sshHardeningCommand(),
+		remoteWriteFileCommand("/etc/sysctl.d/99-vps-hardening.conf", sysctlContent, "root", "root", 0644),
+		commandScript("sysctl --system"),
+		remoteWriteFileCommand("/etc/apt/apt.conf.d/20auto-upgrades", "APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n", "root", "root", 0644),
+		commandScript(
+			"install -d -m 0755 -o root -g root /etc/apt/keyrings",
+			"curl -fsSL https://packagecloud.io/crowdsec/crowdsec/gpgkey -o /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.key",
+			"gpg --dearmor --yes --output /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.key",
+			"chown root:root /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg",
+			"chmod 0644 /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg",
+		),
+		remoteWriteFileCommand("/etc/apt/sources.list.d/crowdsec_crowdsec.list", "deb [signed-by=/etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg] https://packagecloud.io/crowdsec/crowdsec/any any main\n", "root", "root", 0644),
+		commandScript(
+			aptInstallCommand("crowdsec"),
+			"systemctl enable --now crowdsec",
+			"if iptables -V | grep -qi nf_tables; then bouncer_package=crowdsec-firewall-bouncer-nftables; else bouncer_package=crowdsec-firewall-bouncer-iptables; fi",
+			"DEBIAN_FRONTEND=noninteractive apt-get install -y \"$bouncer_package\"",
+			"systemctl enable --now crowdsec-firewall-bouncer",
+			"cscli bouncers list",
+		),
 	}
+}
+
+func systemUpgradeCommand() string {
+	return commandScript(
+		"export DEBIAN_FRONTEND=noninteractive",
+		"export NEEDRESTART_MODE=a",
+		"apt-get update",
+		"apt-get full-upgrade -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold",
+		"apt-get autoremove -y",
+		"if [ -f /var/run/reboot-required ]; then echo 'reboot required after package upgrades'; fi",
+	)
+}
+
+func sshHardeningCommand() string {
+	return commandScript(
+		"passwd -l root >/dev/null 2>&1 || true",
+		"install -d -m 0755 -o root -g root /run/sshd",
+		"/usr/sbin/sshd -t",
+		"systemctl reload ssh || systemctl reload sshd",
+	)
+}
+
+func sshdHardeningConfig() string {
+	return strings.Join([]string{
+		"# Managed by AegisNode.",
+		"PermitRootLogin no",
+		"PasswordAuthentication no",
+		"KbdInteractiveAuthentication no",
+		"PubkeyAuthentication yes",
+		"",
+	}, "\n")
+}
+
+func supportedUbuntuCommand() string {
+	return commandScript(
+		". /etc/os-release",
+		`test "$ID" = "ubuntu"`,
+		`dpkg --compare-versions "$VERSION_ID" ge 22.04`,
+		`kernel_version="$(uname -r | cut -d- -f1)"`,
+		`dpkg --compare-versions "$kernel_version" ge 5.15`,
+	)
+}
+
+func validateSysctlKeysCommand() string {
+	lines := []string{}
+	for _, setting := range sysctlSettings() {
+		lines = append(lines, "sysctl -n "+shellQuote(setting.name)+" >/dev/null")
+	}
+	return commandScript(lines...)
+}
+
+type sysctlSetting struct {
+	name  string
+	value string
+}
+
+func sysctlSettings() []sysctlSetting {
+	return []sysctlSetting{
+		{name: "net.ipv4.conf.all.rp_filter", value: "1"},
+		{name: "net.ipv4.conf.default.rp_filter", value: "1"},
+		{name: "net.ipv4.conf.all.accept_source_route", value: "0"},
+		{name: "net.ipv4.conf.default.accept_source_route", value: "0"},
+		{name: "net.ipv4.conf.all.accept_redirects", value: "0"},
+		{name: "net.ipv4.conf.default.accept_redirects", value: "0"},
+		{name: "net.ipv4.conf.all.secure_redirects", value: "0"},
+		{name: "net.ipv4.conf.default.secure_redirects", value: "0"},
+		{name: "net.ipv4.conf.all.send_redirects", value: "0"},
+		{name: "net.ipv4.conf.default.send_redirects", value: "0"},
+		{name: "net.ipv4.tcp_syncookies", value: "1"},
+		{name: "net.ipv4.tcp_synack_retries", value: "5"},
+		{name: "kernel.dmesg_restrict", value: "1"},
+		{name: "kernel.unprivileged_bpf_disabled", value: "1"},
+	}
+}
+
+func sysctlConfigLines() []string {
+	lines := []string{"# Managed by AegisNode."}
+	for _, setting := range sysctlSettings() {
+		lines = append(lines, setting.name+" = "+setting.value)
+	}
+	return lines
 }

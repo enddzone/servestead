@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -18,7 +17,8 @@ import (
 type setupMode int
 
 const (
-	setupModeBootstrapHarden setupMode = iota
+	setupModeProviderKey setupMode = iota
+	setupModeBootstrapHarden
 	setupModeHardenOnly
 	setupModeDoctor
 )
@@ -30,6 +30,8 @@ type setupConfig struct {
 	AdminUser          string
 	AdminPublicKeyPath string
 	PrivateKeyPath     string
+	ProviderKeyPath    string
+	ProviderKeyComment string
 }
 
 type preflightCheck struct {
@@ -39,18 +41,16 @@ type preflightCheck struct {
 	Required bool
 }
 
-type lookPathFunc func(string) (string, error)
-
 const setupUsage = `Usage of setup:
   aegisnode setup
 
-Launches a guided terminal UI for live testing Phase 1 and Phase 2 on an existing Ubuntu VPS. The TUI can bootstrap and harden a server, harden an already-bootstrapped server, or run local preflight checks only.
+Launches the guided terminal UI. This is the recommended workflow for key creation, existing-VPS setup, server hardening, and preflight checks.
 `
 
 const doctorUsage = `Usage of doctor:
   aegisnode doctor [--admin-public-key <path>] [--private-key <path>]
 
-Runs local preflight checks for required tools, embedded playbooks, and optional key files without contacting a server.
+Runs local preflight checks for built-in SSH/key support and optional key files without contacting a server.
 `
 
 func runSetup(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -92,7 +92,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
-	return runPreflight(config, stdout, exec.LookPath)
+	return runPreflight(config, stdout)
 }
 
 func collectSetupConfig(output io.Writer) (setupConfig, error) {
@@ -119,7 +119,7 @@ func runSetupPlan(ctx context.Context, config setupConfig, stdout, stderr io.Wri
 	fmt.Fprintln(stdout, "Selected plan:")
 	fmt.Fprint(stdout, setupPlanSummary(config))
 	fmt.Fprintln(stdout)
-	if err := runPreflight(config, stdout, exec.LookPath); err != nil {
+	if err := runPreflight(config, stdout); err != nil {
 		return err
 	}
 
@@ -127,6 +127,12 @@ func runSetupPlan(ctx context.Context, config setupConfig, stdout, stderr io.Wri
 	case setupModeDoctor:
 		fmt.Fprintln(stdout, "Preflight complete. No remote changes were requested.")
 		return nil
+	case setupModeProviderKey:
+		fmt.Fprintln(stdout, "Step 1/1: generate provider SSH keypair.")
+		return generateProviderKeypair(ctx, keygenConfig{
+			Path:    config.ProviderKeyPath,
+			Comment: config.ProviderKeyComment,
+		}, stdout, stderr)
 	case setupModeBootstrapHarden:
 		fmt.Fprintln(stdout, "Step 1/2: bootstrap administrative access.")
 		if err := runBootstrap(ctx, []string{
@@ -138,26 +144,34 @@ func runSetupPlan(ctx context.Context, config setupConfig, stdout, stderr io.Wri
 		}, stdout, stderr); err != nil {
 			return err
 		}
-		fmt.Fprintln(stdout, "Step 2/2: apply Phase 2 hardening.")
-		return runHarden(ctx, []string{
+		fmt.Fprintln(stdout, "Step 2/2: harden server.")
+		if err := runHarden(ctx, []string{
 			"--host", config.Host,
 			"--ssh-user", config.AdminUser,
 			"--private-key", config.PrivateKeyPath,
-		}, stdout, stderr)
+		}, stdout, stderr); err != nil {
+			return err
+		}
+		printSSHLoginGuidance(stdout, config)
+		return nil
 	case setupModeHardenOnly:
-		fmt.Fprintln(stdout, "Step 1/1: apply Phase 2 hardening.")
-		return runHarden(ctx, []string{
+		fmt.Fprintln(stdout, "Step 1/1: harden server.")
+		if err := runHarden(ctx, []string{
 			"--host", config.Host,
 			"--ssh-user", config.AdminUser,
 			"--private-key", config.PrivateKeyPath,
-		}, stdout, stderr)
+		}, stdout, stderr); err != nil {
+			return err
+		}
+		printSSHLoginGuidance(stdout, config)
+		return nil
 	default:
 		return errors.New("unknown setup mode")
 	}
 }
 
-func runPreflight(config setupConfig, stdout io.Writer, lookPath lookPathFunc) error {
-	checks := preflightChecks(config, lookPath)
+func runPreflight(config setupConfig, stdout io.Writer) error {
+	checks := preflightChecks(config)
 	fmt.Fprintln(stdout, "Preflight checks:")
 	failed := false
 	for _, check := range checks {
@@ -182,13 +196,14 @@ func runPreflight(config setupConfig, stdout io.Writer, lookPath lookPathFunc) e
 	return nil
 }
 
-func preflightChecks(config setupConfig, lookPath lookPathFunc) []preflightCheck {
+func preflightChecks(config setupConfig) []preflightCheck {
 	checks := []preflightCheck{
-		commandCheck("ansible-playbook", true, lookPath),
-		commandCheck("ssh", true, lookPath),
-		embeddedPlaybookCheck("bootstrap.yml", "playbooks/bootstrap.yml"),
-		embeddedPlaybookCheck("hardening.yml", "playbooks/hardening.yml"),
+		nativeCapabilityCheck("native ED25519 key generation"),
 	}
+	if config.Mode == setupModeProviderKey {
+		return checks
+	}
+	checks = append(checks, nativeCapabilityCheck("native SSH runner"))
 
 	privateKeyRequired := config.Mode == setupModeBootstrapHarden || config.Mode == setupModeHardenOnly
 	checks = append(checks, fileCheck("private key", config.PrivateKeyPath, privateKeyRequired))
@@ -198,19 +213,8 @@ func preflightChecks(config setupConfig, lookPath lookPathFunc) []preflightCheck
 	return checks
 }
 
-func commandCheck(command string, required bool, lookPath lookPathFunc) preflightCheck {
-	path, err := lookPath(command)
-	if err != nil {
-		return preflightCheck{Name: command + " available", Detail: "not found on PATH", OK: false, Required: required}
-	}
-	return preflightCheck{Name: command + " available", Detail: path, OK: true, Required: required}
-}
-
-func embeddedPlaybookCheck(name, path string) preflightCheck {
-	if _, err := embeddedPlaybooks.ReadFile(path); err != nil {
-		return preflightCheck{Name: "embedded " + name, Detail: err.Error(), OK: false, Required: true}
-	}
-	return preflightCheck{Name: "embedded " + name, Detail: path, OK: true, Required: true}
+func nativeCapabilityCheck(name string) preflightCheck {
+	return preflightCheck{Name: name, Detail: "built in", OK: true, Required: true}
 }
 
 func fileCheck(name, path string, required bool) preflightCheck {
@@ -395,7 +399,7 @@ func (model setupModel) View() string {
 
 	switch model.step {
 	case setupStepMode:
-		builder.WriteString("Choose a guided path. This setup flow does not create billable cloud resources; use it with an existing disposable Ubuntu VPS for live smoke testing.\n\n")
+		builder.WriteString("Choose what you want to do. Key generation is local only. Server setup paths do not create billable cloud resources; use them with an existing disposable Ubuntu VPS for live smoke testing.\n\n")
 		for index, option := range setupModeOptions() {
 			cursor := " "
 			if index == model.selected {
@@ -411,7 +415,11 @@ func (model setupModel) View() string {
 		builder.WriteString("\n")
 		builder.WriteString(setupHelpStyle.Render(setupModeOptions()[int(model.mode)].Description))
 		builder.WriteString("\n\n")
-		builder.WriteString("Enter the connection details for the target VPS. Preflight checks run before any remote changes are attempted.")
+		if model.mode == setupModeProviderKey {
+			builder.WriteString("AegisNode will write the private key and matching .pub file, then print the public key for Hetzner or DigitalOcean.")
+		} else {
+			builder.WriteString("Enter the target host and confirm the SSH key. AegisNode uses the matching .pub file for the admin account.")
+		}
 		builder.WriteString("\n\n")
 		for _, input := range model.inputs {
 			builder.WriteString(input.View())
@@ -428,7 +436,11 @@ func (model setupModel) View() string {
 		builder.WriteString("Review plan:\n\n")
 		builder.WriteString(setupPlanSummary(model.config))
 		builder.WriteString("\n")
-		builder.WriteString("Before remote changes, AegisNode will check local dependencies, embedded playbooks, and key files. If a required check fails, it stops before contacting the server.\n")
+		if model.mode == setupModeProviderKey {
+			builder.WriteString("AegisNode will create an unencrypted local ED25519 keypair for non-interactive SSH automation. It will not contact your cloud provider; you will copy the printed public key into the provider UI.\n")
+		} else {
+			builder.WriteString("Before remote changes, AegisNode will check built-in SSH/key support and key files. If a required check fails, it stops before contacting the server.\n")
+		}
 		builder.WriteString("\n")
 		builder.WriteString(setupHelpStyle.Render("Enter or y runs it. b edits. n cancels."))
 	}
@@ -443,21 +455,33 @@ type setupModeOption struct {
 func setupModeOptions() []setupModeOption {
 	return []setupModeOption{
 		{
-			Label:       "Bootstrap an existing Ubuntu VPS, then apply Phase 2 hardening",
-			Description: "Use this for the first live server test after a VPS is available and reachable as root or another initial SSH user.",
+			Label:       "Prepare the AegisNode SSH key",
+			Description: "Generate the ED25519 keypair used for provider login and later aegisadmin access.",
 		},
 		{
-			Label:       "Apply Phase 2 hardening to an already-bootstrapped VPS",
-			Description: "Use this when the administrative user already exists and you only need sysctl, unattended upgrades, and CrowdSec.",
+			Label:       "Set up an existing Ubuntu VPS",
+			Description: "Create the admin account, install its key, then apply baseline hardening.",
+		},
+		{
+			Label:       "Harden an already set-up VPS",
+			Description: "Use this when the admin account already exists and you only need baseline security settings.",
 		},
 		{
 			Label:       "Run local preflight checks only",
-			Description: "Checks local tools and embedded playbooks without making server changes.",
+			Description: "Checks built-in SSH/key support and local key files without making server changes.",
 		},
 	}
 }
 
 func setupInputs(mode setupMode) []textinput.Model {
+	if mode == setupModeProviderKey {
+		defaultConfig := defaultKeygenConfig()
+		return newSetupInputs([]setupInputField{
+			{label: "Private key path", placeholder: defaultConfig.Path, value: defaultConfig.Path},
+			{label: "Key comment", placeholder: defaultConfig.Comment, value: defaultConfig.Comment},
+		})
+	}
+
 	fields := []struct {
 		label       string
 		placeholder string
@@ -477,11 +501,6 @@ func setupInputs(mode setupMode) []textinput.Model {
 				placeholder string
 				value       string
 			}{label: "Admin user", value: "aegisadmin"},
-			struct {
-				label       string
-				placeholder string
-				value       string
-			}{label: "Admin public key path", placeholder: "$HOME/.ssh/id_ed25519.pub"},
 		)
 	} else {
 		fields = append(fields, struct {
@@ -494,8 +513,22 @@ func setupInputs(mode setupMode) []textinput.Model {
 		label       string
 		placeholder string
 		value       string
-	}{label: "Private key path", placeholder: "$HOME/.ssh/id_ed25519"})
+	}{label: "AegisNode private key", placeholder: defaultKeygenConfig().Path, value: defaultKeygenConfig().Path})
 
+	setupFields := make([]setupInputField, 0, len(fields))
+	for _, field := range fields {
+		setupFields = append(setupFields, setupInputField(field))
+	}
+	return newSetupInputs(setupFields)
+}
+
+type setupInputField struct {
+	label       string
+	placeholder string
+	value       string
+}
+
+func newSetupInputs(fields []setupInputField) []textinput.Model {
 	inputs := make([]textinput.Model, 0, len(fields))
 	for _, field := range fields {
 		input := textinput.New()
@@ -514,23 +547,33 @@ func (model setupModel) configFromInputs() (setupConfig, error) {
 		return strings.TrimSpace(model.inputs[index].Value())
 	}
 	config := setupConfig{Mode: model.mode, Host: value(0)}
-	if config.Host == "" {
-		return setupConfig{}, errors.New("host is required")
-	}
 
 	switch model.mode {
+	case setupModeProviderKey:
+		config.Host = ""
+		config.ProviderKeyPath = expandUserPath(value(0))
+		config.ProviderKeyComment = value(1)
+		if config.ProviderKeyPath == "" {
+			return setupConfig{}, errors.New("private key path is required")
+		}
 	case setupModeBootstrapHarden:
+		if config.Host == "" {
+			return setupConfig{}, errors.New("host is required")
+		}
 		config.InitialSSHUser = firstNonEmpty(value(1), "root")
 		config.AdminUser = firstNonEmpty(value(2), "aegisadmin")
-		config.AdminPublicKeyPath = expandUserPath(value(3))
-		config.PrivateKeyPath = expandUserPath(value(4))
-		if config.AdminPublicKeyPath == "" || config.PrivateKeyPath == "" {
-			return setupConfig{}, errors.New("admin public key and private key paths are required")
+		config.PrivateKeyPath = expandUserPath(value(3))
+		config.AdminPublicKeyPath = publicKeyPath(config.PrivateKeyPath)
+		if config.PrivateKeyPath == "" {
+			return setupConfig{}, errors.New("private key path is required")
 		}
 		if !linuxUsername.MatchString(config.InitialSSHUser) || !linuxUsername.MatchString(config.AdminUser) {
 			return setupConfig{}, errors.New("SSH users must be valid Linux usernames")
 		}
 	case setupModeHardenOnly:
+		if config.Host == "" {
+			return setupConfig{}, errors.New("host is required")
+		}
 		config.AdminUser = firstNonEmpty(value(1), "aegisadmin")
 		config.PrivateKeyPath = expandUserPath(value(2))
 		if config.PrivateKeyPath == "" {
@@ -565,19 +608,49 @@ func expandUserPath(path string) string {
 
 func setupPlanSummary(config setupConfig) string {
 	switch config.Mode {
+	case setupModeProviderKey:
+		return fmt.Sprintf(
+			"- Generate the AegisNode ED25519 keypair at %s.\n- Print the public key and provider registration guidance.\n",
+			config.ProviderKeyPath,
+		)
 	case setupModeDoctor:
 		return "- Run local preflight checks.\n"
 	case setupModeBootstrapHarden:
 		return fmt.Sprintf(
-			"- Bootstrap %s as %s using initial user %s.\n- Apply Phase 2 hardening as %s.\n",
+			"- Connect to %s as %s with %s.\n- Install %s using %s.\n- Harden the server as %s.\n",
 			config.Host,
-			config.AdminUser,
 			config.InitialSSHUser,
+			config.PrivateKeyPath,
+			config.AdminUser,
+			config.AdminPublicKeyPath,
 			config.AdminUser,
 		)
 	case setupModeHardenOnly:
-		return fmt.Sprintf("- Apply Phase 2 hardening to %s as %s.\n", config.Host, config.AdminUser)
+		return fmt.Sprintf("- Harden %s as %s using %s.\n", config.Host, config.AdminUser, config.PrivateKeyPath)
 	default:
 		return "- Unknown plan.\n"
 	}
+}
+
+func publicKeyPath(privateKeyPath string) string {
+	if privateKeyPath == "" {
+		return ""
+	}
+	return privateKeyPath + ".pub"
+}
+
+func printSSHLoginGuidance(stdout io.Writer, config setupConfig) {
+	if config.Host == "" || config.AdminUser == "" || config.PrivateKeyPath == "" {
+		return
+	}
+	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "Login command:")
+	fmt.Fprintf(stdout, "  ssh -i %s %s@%s\n", shellQuoteForDisplay(config.PrivateKeyPath), config.AdminUser, config.Host)
+}
+
+func shellQuoteForDisplay(value string) string {
+	if value == "" || strings.ContainsAny(value, " \t\n'\"\\$`!") {
+		return shellQuote(value)
+	}
+	return value
 }
