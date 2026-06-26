@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AegisNode UX Overhaul Phased Plan</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ["Inter", "sans-serif"],
+                        mono: ["Fira Code", "monospace"]
+                    },
+                    colors: {
+                        ink: "#172033",
+                        paper: "#f7f8fb",
+                        panel: "#ffffff",
+                        line: "#d8dee9",
+                        harbor: "#16637a",
+                        moss: "#23715b",
+                        marigold: "#a86008",
+                        berry: "#8f315b"
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        html { scroll-behavior: smooth; }
+        body { background: #f7f8fb; color: #172033; }
+        ::selection { background: #16637a; color: white; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #eef2f7; }
+        ::-webkit-scrollbar-thumb { background: #b7c0cf; border-radius: 8px; }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+        .code-scroll { max-height: 360px; }
+    </style>
+</head>
+<body class="min-h-screen font-sans">
+    <header class="sticky top-0 z-40 border-b border-line bg-paper/95 backdrop-blur">
+        <div class="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center gap-3">
+                <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-harbor text-white shadow-sm">
+                    <i class="fa-solid fa-shield-halved"></i>
+                </div>
+                <div>
+                    <p class="text-base font-extrabold tracking-tight text-ink">AegisNode UX Overhaul</p>
+                    <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Phased implementation and product plan</p>
+                </div>
+            </div>
+            <div class="hidden items-center gap-2 rounded-lg border border-line bg-panel px-3 py-2 text-xs font-semibold text-moss shadow-sm sm:flex">
+                <i class="fa-solid fa-route"></i>
+                Single end-to-end setup
+            </div>
+        </div>
+    </header>
+
+    <main class="mx-auto grid max-w-7xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[300px_minmax(0,1fr)] lg:px-8">
+        <aside class="space-y-4 lg:sticky lg:top-24 lg:self-start">
+            <section class="rounded-lg border border-line bg-panel p-5 shadow-sm">
+                <div class="mb-4 flex items-center justify-between">
+                    <h2 class="text-sm font-bold uppercase tracking-wide text-slate-600">Progress</h2>
+                    <span id="overall-percentage" class="font-mono text-xl font-bold text-harbor">0%</span>
+                </div>
+                <div class="h-3 overflow-hidden rounded-full bg-slate-200">
+                    <div id="overall-progress-bar" class="h-full w-0 rounded-full bg-harbor transition-all duration-300"></div>
+                </div>
+                <div class="mt-4 flex items-center justify-between border-t border-line pt-4 text-sm">
+                    <span class="text-slate-500">Checklist</span>
+                    <span id="task-ratio" class="font-mono font-semibold text-ink">0 / 24</span>
+                </div>
+                <button onclick="resetChecklist()" class="mt-4 w-full rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold uppercase tracking-wide text-rose-700 hover:bg-rose-100">
+                    <i class="fa-solid fa-rotate-left mr-1"></i>
+                    Reset plan progress
+                </button>
+            </section>
+
+            <nav class="rounded-lg border border-line bg-panel p-2 shadow-sm" aria-label="Plan sections">
+                <button id="btn-overview" onclick="switchTab('overview')" class="tab-btn flex w-full items-center justify-between rounded-lg bg-harbor px-3 py-3 text-left text-sm font-semibold text-white">
+                    <span><i class="fa-solid fa-compass mr-2"></i>Overview</span>
+                    <i class="fa-solid fa-chevron-right text-xs"></i>
+                </button>
+                <button id="btn-phase1" onclick="switchTab('phase1')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
+                    <span><i class="fa-solid fa-folder-tree mr-2 text-harbor"></i>Profile Store</span>
+                    <i class="fa-solid fa-chevron-right text-xs"></i>
+                </button>
+                <button id="btn-phase2" onclick="switchTab('phase2')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
+                    <span><i class="fa-solid fa-keyboard mr-2 text-moss"></i>Upfront Intake</span>
+                    <i class="fa-solid fa-chevron-right text-xs"></i>
+                </button>
+                <button id="btn-phase3" onclick="switchTab('phase3')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
+                    <span><i class="fa-solid fa-terminal mr-2 text-marigold"></i>Useful TUI</span>
+                    <i class="fa-solid fa-chevron-right text-xs"></i>
+                </button>
+                <button id="btn-phase4" onclick="switchTab('phase4')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
+                    <span><i class="fa-solid fa-gauge-high mr-2 text-berry"></i>Task Events</span>
+                    <i class="fa-solid fa-chevron-right text-xs"></i>
+                </button>
+                <button id="btn-phase5" onclick="switchTab('phase5')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
+                    <span><i class="fa-solid fa-user-secret mr-2 text-harbor"></i>Secrets</span>
+                    <i class="fa-solid fa-chevron-right text-xs"></i>
+                </button>
+                <button id="btn-phase6" onclick="switchTab('phase6')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
+                    <span><i class="fa-solid fa-vial-circle-check mr-2 text-moss"></i>Tests & Docs</span>
+                    <i class="fa-solid fa-chevron-right text-xs"></i>
+                </button>
+            </nav>
+
+            <section class="rounded-lg border border-line bg-panel p-5 text-sm shadow-sm">
+                <h2 class="mb-3 text-sm font-bold uppercase tracking-wide text-slate-600">Primary Flow</h2>
+                <code class="block rounded-lg bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100">aegisnode setup --ip 203.0.113.10</code>
+                <p class="mt-3 text-slate-600">The IP selects or creates a profile, collects all missing values up front, then runs the full setup plan end to end.</p>
+            </section>
+        </aside>
+
+        <section class="min-w-0 space-y-6">
+            <section id="tab-content-overview" class="tab-panel active space-y-6">
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <span class="inline-flex items-center rounded-lg bg-harbor/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-harbor">Plan overview</span>
+                    <h1 class="mt-4 max-w-4xl text-3xl font-extrabold tracking-tight text-ink">Make guided setup one command, profile-aware, and observable.</h1>
+                    <p class="mt-3 max-w-4xl text-base leading-7 text-slate-600">
+                        The current TUI asks for repeated values and runs one selected path at a time. This plan keeps the native Go CLI architecture, adds persistent server profiles, collects all required setup input before remote changes begin, and upgrades setup into a dashboard that executes bootstrap, hardening, networking, and proxy deployment as one observable run.
+                    </p>
+                </div>
+
+                <div class="grid gap-4 md:grid-cols-3">
+                    <div class="rounded-lg border border-line bg-panel p-5 shadow-sm">
+                        <div class="mb-3 flex h-10 w-10 items-center justify-center rounded-lg bg-harbor/10 text-harbor">
+                            <i class="fa-solid fa-circle-question"></i>
+                        </div>
+                        <h2 class="font-bold text-ink">Answered assumption</h2>
+                        <p class="mt-2 text-sm leading-6 text-slate-600">Multiple profiles are required. `setup --ip` selects or creates a profile, then defaults to the full end-to-end server setup plan.</p>
+                    </div>
+                    <div class="rounded-lg border border-line bg-panel p-5 shadow-sm">
+                        <div class="mb-3 flex h-10 w-10 items-center justify-center rounded-lg bg-moss/10 text-moss">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i>
+                        </div>
+                        <h2 class="font-bold text-ink">Upfront intake</h2>
+                        <p class="mt-2 text-sm leading-6 text-slate-600">The user only sees fields that cannot be inferred, defaulted, loaded from the profile, or generated safely, and sees them before execution starts.</p>
+                    </div>
+                    <div class="rounded-lg border border-line bg-panel p-5 shadow-sm">
+                        <div class="mb-3 flex h-10 w-10 items-center justify-center rounded-lg bg-marigold/10 text-marigold">
+                            <i class="fa-solid fa-list-check"></i>
+                        </div>
+                        <h2 class="font-bold text-ink">Verification style</h2>
+                        <p class="mt-2 text-sm leading-6 text-slate-600">Each implementation phase includes product acceptance criteria plus tests that can run without a live VPS where possible.</p>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <h2 class="text-lg font-extrabold text-ink">Target User Journey</h2>
+                    <div class="mt-5 overflow-x-auto">
+                        <table class="w-full min-w-[760px] border-collapse text-left text-sm">
+                            <thead>
+                                <tr class="border-b border-line text-xs uppercase tracking-wide text-slate-500">
+                                    <th class="py-3 pr-4">Moment</th>
+                                    <th class="py-3 pr-4">User sees</th>
+                                    <th class="py-3 pr-4">Inputs requested</th>
+                                    <th class="py-3">State persisted</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-line">
+                                <tr>
+                                    <td class="py-4 pr-4 font-semibold text-ink">First setup with IP</td>
+                                    <td class="py-4 pr-4 text-slate-600">New profile confirmation, upfront intake, full run plan preview.</td>
+                                    <td class="py-4 pr-4 text-slate-600">All missing values needed for the full run before the first remote command.</td>
+                                    <td class="py-4 text-slate-600">Profile metadata, key path, domain/email, generated secrets, planned stages.</td>
+                                </tr>
+                                <tr>
+                                    <td class="py-4 pr-4 font-semibold text-ink">Resume existing server</td>
+                                    <td class="py-4 pr-4 text-slate-600">Dashboard with completed, failed, and remaining stages.</td>
+                                    <td class="py-4 pr-4 text-slate-600">None unless the stored full-run plan is missing required values.</td>
+                                    <td class="py-4 text-slate-600">Stage status, timestamps, log history, generated secrets.</td>
+                                </tr>
+                                <tr>
+                                    <td class="py-4 pr-4 font-semibold text-ink">Switch profile</td>
+                                    <td class="py-4 pr-4 text-slate-600">Profile list with IP, name, last action, last status.</td>
+                                    <td class="py-4 pr-4 text-slate-600">None for stored profiles.</td>
+                                    <td class="py-4 text-slate-600">Active profile pointer only.</td>
+                                </tr>
+                                <tr>
+                                    <td class="py-4 pr-4 font-semibold text-ink">Start over on reused IP</td>
+                                    <td class="py-4 pr-4 text-slate-600">Existing profile warning, option to create a fresh profile version.</td>
+                                    <td class="py-4 pr-4 text-slate-600">Confirmation only.</td>
+                                    <td class="py-4 text-slate-600">Old profile preserved, new profile starts clean.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <h2 class="text-lg font-extrabold text-ink">Upfront Intake Matrix</h2>
+                    <div class="mt-5 overflow-x-auto">
+                        <table class="w-full min-w-[760px] border-collapse text-left text-sm">
+                            <thead>
+                                <tr class="border-b border-line text-xs uppercase tracking-wide text-slate-500">
+                                    <th class="py-3 pr-4">Flow</th>
+                                    <th class="py-3 pr-4">Current prompts</th>
+                                    <th class="py-3 pr-4">Upfront prompts</th>
+                                    <th class="py-3">How prompts disappear</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-line">
+                                <tr>
+                                    <td class="py-4 pr-4 font-semibold text-ink">Bootstrap + harden</td>
+                                    <td class="py-4 pr-4 text-slate-600">Host, initial SSH user, admin user, private key.</td>
+                                    <td class="py-4 pr-4 text-slate-600">Private key only if the default key is missing; optional users in advanced settings.</td>
+                                    <td class="py-4 text-slate-600">IP from flag, users defaulted, key path loaded or generated.</td>
+                                </tr>
+                                <tr>
+                                    <td class="py-4 pr-4 font-semibold text-ink">Network</td>
+                                    <td class="py-4 pr-4 text-slate-600">Host, admin SSH user, private key.</td>
+                                    <td class="py-4 pr-4 text-slate-600">None in the default full run.</td>
+                                    <td class="py-4 text-slate-600">Reuses values collected for bootstrap.</td>
+                                </tr>
+                                <tr>
+                                    <td class="py-4 pr-4 font-semibold text-ink">Proxy</td>
+                                    <td class="py-4 pr-4 text-slate-600">Host, admin user, private key, domain, email, server secret.</td>
+                                    <td class="py-4 pr-4 text-slate-600">Domain and email during the initial intake.</td>
+                                    <td class="py-4 text-slate-600">Server secret is generated and saved before execution, connection values come from profile.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <h2 class="text-lg font-extrabold text-ink">Phased Success Criteria</h2>
+                    <p class="mt-2 text-sm leading-6 text-slate-600">Repository status after the backend pass: tasks 1, 2, 6, 7, 8, 11, and 17-24 are implemented and covered by `go test ./...`. Tasks 3, 5, and 9 are partially implemented by backend profile resolution and `--fresh`, but still need the profile picker/dashboard UI. Task 4 and tasks 10, 12-16 remain the primary UI work.</p>
+                    <div class="mt-4 grid gap-3 md:grid-cols-2">
+                        <label class="flex gap-3 rounded-lg border border-line p-3 text-sm"><input id="task-1" type="checkbox" onchange="toggleTask('task-1')" class="mt-1"> User can run `aegisnode setup --ip X` and execute a full setup plan from one command.</label>
+                        <label class="flex gap-3 rounded-lg border border-line p-3 text-sm"><input id="task-2" type="checkbox" onchange="toggleTask('task-2')" class="mt-1"> All required values are collected before remote execution starts.</label>
+                        <label class="flex gap-3 rounded-lg border border-line p-3 text-sm"><input id="task-3" type="checkbox" onchange="toggleTask('task-3')" class="mt-1"> Multiple profiles can be selected and preserve independent state.</label>
+                        <label class="flex gap-3 rounded-lg border border-line p-3 text-sm"><input id="task-4" type="checkbox" onchange="toggleTask('task-4')" class="mt-1"> Running tasks render progress, current task, and inline logs inside the TUI.</label>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <h2 class="text-lg font-extrabold text-ink">Backend Implementation Handoff</h2>
+                    <div class="mt-4 grid gap-4 md:grid-cols-2">
+                        <div class="rounded-lg border border-moss/30 bg-moss/5 p-4">
+                            <h3 class="font-bold text-moss">Complete backend capabilities</h3>
+                            <ul class="mt-3 space-y-2 text-sm leading-6 text-slate-600">
+                                <li>`setup --ip` creates or reuses a saved profile and runs bootstrap, harden, network, and proxy as one full setup plan.</li>
+                                <li>Profiles are stored under `filepath.Join(os.UserConfigDir(), "aegisnode")` with separate `profile.json`, `state.json`, `secrets.json`, and JSONL run logs.</li>
+                                <li>Profile files, secrets, and log directories use owner-only permissions. JSON save paths are atomic and corrupt JSON errors name the affected file.</li>
+                                <li>`GenerateServerSecret()` uses 32 random bytes encoded as base64url; profile-aware setup saves and reuses the Pangolin server secret without printing it.</li>
+                                <li>`TaskReporter` and `TaskEvent` are wired through bootstrap, harden, network, and proxy stages. Events update run/stage state and append JSONL logs.</li>
+                                <li>Second and later runs skip stages already marked complete in any prior run and print explicit skip messages to the user.</li>
+                                <li>Direct commands remain compatible, including `proxy --server-secret` and deprecated `--postgres-password` alias.</li>
+                            </ul>
+                        </div>
+                        <div class="rounded-lg border border-marigold/30 bg-marigold/5 p-4">
+                            <h3 class="font-bold text-marigold">UI work still needed</h3>
+                            <ul class="mt-3 space-y-2 text-sm leading-6 text-slate-600">
+                                <li>Replace the legacy mode-first setup TUI with a higher-level app model: profile picker, upfront intake, plan review, dashboard, run view, and failure/retry states.</li>
+                                <li>Use `bubbles/list` for profiles and advanced choices, `bubbles/table` for stage state, `bubbles/progress` plus spinner for active runs, `bubbles/viewport` for logs, and `bubbles/help` for key hints.</li>
+                                <li>Expose completed/pending/failed/skipped stages from `ProfileState` instead of parsing human-readable output.</li>
+                                <li>Show idempotent second-run behavior in the dashboard: completed stages should appear as skipped or complete, not as rerun work.</li>
+                                <li>Add an intentional advanced edit path for users who need to change SSH users, private key path, domain, email, skipped stages, or fresh profile creation.</li>
+                                <li>Keep non-interactive/script behavior intact: direct commands and `setup --ip --domain ... --email ... --yes` should not depend on the TUI.</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="tab-content-phase1" class="tab-panel space-y-6">
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <span class="inline-flex items-center rounded-lg bg-harbor/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-harbor">Phase 1</span>
+                    <h1 class="mt-4 text-2xl font-extrabold text-ink">Build the Profile Store</h1>
+                    <p class="mt-3 max-w-4xl leading-7 text-slate-600">Create a small persistence layer before changing the TUI. The store gives every later UX improvement a reliable source of truth for connection values, full-run state, generated secrets, and logs.</p>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <h2 class="text-lg font-bold text-ink">Product Behavior</h2>
+                    <ul class="mt-4 space-y-3 text-sm leading-6 text-slate-600">
+                        <li><i class="fa-solid fa-check mr-2 text-moss"></i>`aegisnode setup --ip 203.0.113.10` creates or selects a profile, collects missing values, then builds the full setup run.</li>
+                        <li><i class="fa-solid fa-check mr-2 text-moss"></i>If more than one profile exists for the same IP, the TUI shows last-used timestamps and asks whether to resume, rerun, or create a fresh profile.</li>
+                        <li><i class="fa-solid fa-check mr-2 text-moss"></i>Running `aegisnode setup` without `--ip` opens a profile picker before the upfront intake.</li>
+                        <li><i class="fa-solid fa-check mr-2 text-moss"></i>Old profiles are never overwritten by "start over"; a new profile ID is created.</li>
+                    </ul>
+                </div>
+
+                <div class="grid gap-4 md:grid-cols-2">
+                    <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                        <h2 class="text-lg font-bold text-ink">Implementation Tasks</h2>
+                        <div class="mt-4 space-y-3 text-sm">
+                            <label class="flex gap-3"><input id="task-5" type="checkbox" onchange="toggleTask('task-5')" class="mt-1"> Add `setup --ip` parsing and keep existing no-arg behavior by launching the profile picker.</label>
+                            <label class="flex gap-3"><input id="task-6" type="checkbox" onchange="toggleTask('task-6')" class="mt-1"> Introduce `profile.go` with load, save, list, select, and create-fresh operations.</label>
+                            <label class="flex gap-3"><input id="task-7" type="checkbox" onchange="toggleTask('task-7')" class="mt-1"> Store profiles under `filepath.Join(os.UserConfigDir(), "aegisnode")` with stable JSON schemas.</label>
+                            <label class="flex gap-3"><input id="task-8" type="checkbox" onchange="toggleTask('task-8')" class="mt-1"> Split profile metadata, setup run state, secrets, and JSONL run logs into separate files.</label>
+                        </div>
+                    </div>
+                    <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                        <h2 class="text-lg font-bold text-ink">Acceptance Criteria</h2>
+                        <ul class="mt-4 space-y-3 text-sm leading-6 text-slate-600">
+                            <li>Profile saves are atomic: write temp file, `fsync` where practical, then rename.</li>
+                            <li>Secrets and profile files are created with owner-only permissions, ideally `0600` for files and `0700` for profile directories.</li>
+                            <li>Corrupt JSON produces a clear error naming the profile path and does not delete data.</li>
+                            <li>The old command runners still accept explicit flags for non-interactive use.</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <div class="flex items-center justify-between gap-3">
+                        <h2 class="text-lg font-bold text-ink">Code Direction</h2>
+                        <button onclick="copyToClipboard('code-profile')" class="rounded-lg bg-harbor px-3 py-2 text-xs font-bold uppercase tracking-wide text-white">Copy</button>
+                    </div>
+                    <pre class="code-scroll mt-4 overflow-auto rounded-lg bg-slate-950 p-4 text-xs text-slate-100"><code id="code-profile">type Profile struct {
+    ID                string    `json:"id"`
+    Name              string    `json:"name"`
+    IP                string    `json:"ip"`
+    InitialSSHUser    string    `json:"initial_ssh_user"`
+    AdminUser         string    `json:"admin_user"`
+    PrivateKeyPath    string    `json:"private_key_path"`
+    BaseDomain        string    `json:"base_domain,omitempty"`
+    LetsEncryptEmail  string    `json:"lets_encrypt_email,omitempty"`
+    CreatedAt         time.Time `json:"created_at"`
+    UpdatedAt         time.Time `json:"updated_at"`
+}
+
+type ProfileState struct {
+    ActiveRunID string                 `json:"active_run_id,omitempty"`
+    Runs        map[string]SetupRun    `json:"runs"`
+}
+
+type SetupRun struct {
+    ID        string                       `json:"id"`
+    Status    string                       `json:"status"` // planned, running, complete, failed
+    Stages    map[string]SetupStageStatus  `json:"stages"`
+    CreatedAt time.Time                    `json:"created_at"`
+    UpdatedAt time.Time                    `json:"updated_at"`
+}
+
+type SetupStageStatus struct {
+    Status      string    `json:"status"` // pending, running, complete, failed, skipped
+    LastStarted time.Time `json:"last_started,omitempty"`
+    LastEnded   time.Time `json:"last_ended,omitempty"`
+    LastError   string    `json:"last_error,omitempty"`
+}
+
+type ProfileStore interface {
+    List() ([]ProfileSummary, error)
+    ResolveByIP(ip string) ([]ProfileSummary, error)
+    Create(Profile) (Profile, error)
+    Load(id string) (Profile, ProfileState, error)
+    Save(Profile, ProfileState) error
+}</code></pre>
+                </div>
+            </section>
+
+            <section id="tab-content-phase2" class="tab-panel space-y-6">
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <span class="inline-flex items-center rounded-lg bg-moss/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-moss">Phase 2</span>
+                    <h1 class="mt-4 text-2xl font-extrabold text-ink">Collect Upfront Inputs and Build the Run Plan</h1>
+                    <p class="mt-3 max-w-4xl leading-7 text-slate-600">Move setup away from a mode-first form and into an upfront intake followed by one full run plan. The user should provide necessary setup values once, review the plan, then let the CLI run start to finish.</p>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <h2 class="text-lg font-bold text-ink">New TUI Screens</h2>
+                    <div class="mt-5 grid gap-4 md:grid-cols-2">
+                        <div class="border-l-4 border-harbor pl-4">
+                            <h3 class="font-bold text-ink">Profile picker</h3>
+                            <p class="mt-1 text-sm leading-6 text-slate-600">Shows saved profiles with IP, name, last stage, and last status. Opens when `setup` has no `--ip` or when an IP has multiple matching profiles.</p>
+                        </div>
+                        <div class="border-l-4 border-moss pl-4">
+                            <h3 class="font-bold text-ink">Upfront setup intake</h3>
+                            <p class="mt-1 text-sm leading-6 text-slate-600">Collects all missing values needed for bootstrap, hardening, networking, and proxy deployment before execution begins.</p>
+                        </div>
+                        <div class="border-l-4 border-marigold pl-4">
+                            <h3 class="font-bold text-ink">Advanced knobs</h3>
+                            <p class="mt-1 text-sm leading-6 text-slate-600">Optional settings for users who need to change defaults such as SSH users, private key path, or skipped stages.</p>
+                        </div>
+                        <div class="border-l-4 border-berry pl-4">
+                            <h3 class="font-bold text-ink">Full plan review and run</h3>
+                            <p class="mt-1 text-sm leading-6 text-slate-600">Summarizes all planned remote changes and asks for confirmation before contacting the server.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid gap-4 md:grid-cols-2">
+                    <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                        <h2 class="text-lg font-bold text-ink">Implementation Tasks</h2>
+                        <div class="mt-4 space-y-3 text-sm">
+                            <label class="flex gap-3"><input id="task-9" type="checkbox" onchange="toggleTask('task-9')" class="mt-1"> Replace `setupStepMode` with a higher-level app model: profile selection, upfront intake, full plan review, run.</label>
+                            <label class="flex gap-3"><input id="task-10" type="checkbox" onchange="toggleTask('task-10')" class="mt-1"> Use `bubbles/list` for profiles and advanced choices, `bubbles/table` for run stages, and `bubbles/help` for key hints.</label>
+                            <label class="flex gap-3"><input id="task-11" type="checkbox" onchange="toggleTask('task-11')" class="mt-1"> Derive required fields from the full setup plan and profile state instead of statically building per-mode inputs.</label>
+                            <label class="flex gap-3"><input id="task-12" type="checkbox" onchange="toggleTask('task-12')" class="mt-1"> Add a small "Edit advanced values" path for intentional changes without cluttering the default path.</label>
+                        </div>
+                    </div>
+                    <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                        <h2 class="text-lg font-bold text-ink">Acceptance Criteria</h2>
+                        <ul class="mt-4 space-y-3 text-sm leading-6 text-slate-600">
+                            <li>A user can launch setup for a new IP, fill required values once, confirm, and run the full setup without returning to forms mid-run.</li>
+                            <li>Domain and email are collected during upfront intake when proxy deployment is included.</li>
+                            <li>Default values and generated values are visible in the review screen so reuse is explicit.</li>
+                            <li>Dangerous actions such as fresh profile creation are confirm-only and never automatic.</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <section id="tab-content-phase3" class="tab-panel space-y-6">
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <span class="inline-flex items-center rounded-lg bg-marigold/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-marigold">Phase 3</span>
+                    <h1 class="mt-4 text-2xl font-extrabold text-ink">Make the TUI Operationally Useful</h1>
+                    <p class="mt-3 max-w-4xl leading-7 text-slate-600">Use Charmbracelet components to render progress, logs, status tables, and action menus inside one coherent terminal experience.</p>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <h2 class="text-lg font-bold text-ink">Charmbracelet Component Map</h2>
+                    <div class="mt-5 overflow-x-auto">
+                        <table class="w-full min-w-[720px] text-left text-sm">
+                            <thead>
+                                <tr class="border-b border-line text-xs uppercase tracking-wide text-slate-500">
+                                    <th class="py-3 pr-4">Need</th>
+                                    <th class="py-3 pr-4">Component</th>
+                                    <th class="py-3">Usage</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-line">
+                                <tr><td class="py-4 pr-4 font-semibold">Profile and advanced selection</td><td class="py-4 pr-4 font-mono text-xs">bubbles/list</td><td class="py-4 text-slate-600">Scrollable list with descriptions and status badges.</td></tr>
+                                <tr><td class="py-4 pr-4 font-semibold">Run stage state</td><td class="py-4 pr-4 font-mono text-xs">bubbles/table</td><td class="py-4 text-slate-600">Rows for bootstrap, harden, network, proxy, and final guidance.</td></tr>
+                                <tr><td class="py-4 pr-4 font-semibold">Run progress</td><td class="py-4 pr-4 font-mono text-xs">bubbles/progress + spinner</td><td class="py-4 text-slate-600">Current task count, active command, and animated running state.</td></tr>
+                                <tr><td class="py-4 pr-4 font-semibold">Logs</td><td class="py-4 pr-4 font-mono text-xs">bubbles/viewport</td><td class="py-4 text-slate-600">Inline stdout/stderr stream with scrollback and status coloring.</td></tr>
+                                <tr><td class="py-4 pr-4 font-semibold">Key hints</td><td class="py-4 pr-4 font-mono text-xs">bubbles/help + key</td><td class="py-4 text-slate-600">Consistent footer for run, edit, back, logs, quit.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="grid gap-4 md:grid-cols-2">
+                    <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                        <h2 class="text-lg font-bold text-ink">Implementation Tasks</h2>
+                        <div class="mt-4 space-y-3 text-sm">
+                            <label class="flex gap-3"><input id="task-13" type="checkbox" onchange="toggleTask('task-13')" class="mt-1"> Add a dashboard view with setup stage table, saved profile summary, and full-run controls.</label>
+                            <label class="flex gap-3"><input id="task-14" type="checkbox" onchange="toggleTask('task-14')" class="mt-1"> Add a run view with spinner, progress bar, task list, and log viewport.</label>
+                            <label class="flex gap-3"><input id="task-15" type="checkbox" onchange="toggleTask('task-15')" class="mt-1"> Add style primitives in one file using `lipgloss` and keep text readable in narrow terminals.</label>
+                            <label class="flex gap-3"><input id="task-16" type="checkbox" onchange="toggleTask('task-16')" class="mt-1"> Provide a non-interactive fallback path when stdout/stderr is not a TTY.</label>
+                        </div>
+                    </div>
+                    <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                        <h2 class="text-lg font-bold text-ink">Acceptance Criteria</h2>
+                        <ul class="mt-4 space-y-3 text-sm leading-6 text-slate-600">
+                            <li>The run view always shows the current stage, current task name, and completed task count.</li>
+                            <li>Logs are visible while commands run, not only after failure.</li>
+                            <li>Failed runs leave the user on a useful screen with error text, last logs, and retry/back actions.</li>
+                            <li>The TUI avoids long paragraphs and keeps high-frequency screens scannable.</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <section id="tab-content-phase4" class="tab-panel space-y-6">
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <span class="inline-flex items-center rounded-lg bg-berry/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-berry">Phase 4</span>
+                    <h1 class="mt-4 text-2xl font-extrabold text-ink">Convert Task Execution to Structured Events</h1>
+                    <p class="mt-3 max-w-4xl leading-7 text-slate-600">The current `runTasks` function writes simple lines to an `io.Writer`. The TUI needs structured events so it can update full-run progress, save stage state, render logs, and recover cleanly from failures.</p>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <div class="flex items-center justify-between gap-3">
+                        <h2 class="text-lg font-bold text-ink">Code Direction</h2>
+                        <button onclick="copyToClipboard('code-events')" class="rounded-lg bg-harbor px-3 py-2 text-xs font-bold uppercase tracking-wide text-white">Copy</button>
+                    </div>
+                    <pre class="code-scroll mt-4 overflow-auto rounded-lg bg-slate-950 p-4 text-xs text-slate-100"><code id="code-events">type TaskEventType string
+
+const (
+    TaskRunStarted   TaskEventType = "run_started"
+    TaskStarted      TaskEventType = "task_started"
+    TaskLogLine      TaskEventType = "log_line"
+    TaskSucceeded    TaskEventType = "task_succeeded"
+    TaskFailed       TaskEventType = "task_failed"
+    TaskRunCompleted TaskEventType = "run_completed"
+)
+
+type TaskEvent struct {
+    Type      TaskEventType `json:"type"`
+    RunID     string        `json:"run_id"`
+    Stage     string        `json:"stage"`
+    TaskIndex int           `json:"task_index,omitempty"`
+    TaskTotal int           `json:"task_total,omitempty"`
+    TaskName  string        `json:"task_name,omitempty"`
+    Stream    string        `json:"stream,omitempty"` // stdout or stderr
+    Line      string        `json:"line,omitempty"`
+    Error     string        `json:"error,omitempty"`
+    Time      time.Time     `json:"time"`
+}
+
+type TaskReporter interface {
+    Report(TaskEvent)
+}
+
+func runStageWithReporter(ctx context.Context, client remoteClient, sshUser string, runID string, stage string, tasks []Task, reporter TaskReporter) error {
+    reporter.Report(TaskEvent{Type: TaskRunStarted, RunID: runID, Stage: stage, TaskTotal: len(tasks), Time: time.Now()})
+    for index, task := range tasks {
+        reporter.Report(TaskEvent{Type: TaskStarted, RunID: runID, Stage: stage, TaskIndex: index + 1, TaskTotal: len(tasks), TaskName: task.Name, Time: time.Now()})
+        if err := client.Run(ctx, privilegedCommand(sshUser, task.Apply)); err != nil {
+            reporter.Report(TaskEvent{Type: TaskFailed, RunID: runID, Stage: stage, TaskName: task.Name, Error: err.Error(), Time: time.Now()})
+            return fmt.Errorf("task %q failed: %w", task.Name, err)
+        }
+        reporter.Report(TaskEvent{Type: TaskSucceeded, RunID: runID, Stage: stage, TaskIndex: index + 1, TaskTotal: len(tasks), TaskName: task.Name, Time: time.Now()})
+    }
+    reporter.Report(TaskEvent{Type: TaskRunCompleted, RunID: runID, Stage: stage, TaskTotal: len(tasks), Time: time.Now()})
+    return nil
+}</code></pre>
+                </div>
+
+                <div class="grid gap-4 md:grid-cols-2">
+                    <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                        <h2 class="text-lg font-bold text-ink">Implementation Tasks</h2>
+                        <div class="mt-4 space-y-3 text-sm">
+                            <label class="flex gap-3"><input id="task-17" type="checkbox" onchange="toggleTask('task-17')" class="mt-1"> Add `TaskReporter` and structured `TaskEvent` types without breaking existing command output.</label>
+                            <label class="flex gap-3"><input id="task-18" type="checkbox" onchange="toggleTask('task-18')" class="mt-1"> Thread reporters through the end-to-end setup runner and each bootstrap, harden, network, and proxy stage.</label>
+                            <label class="flex gap-3"><input id="task-19" type="checkbox" onchange="toggleTask('task-19')" class="mt-1"> Persist JSONL events under the profile run log directory.</label>
+                            <label class="flex gap-3"><input id="task-20" type="checkbox" onchange="toggleTask('task-20')" class="mt-1"> Update run and stage state on start, success, failure, and retry.</label>
+                        </div>
+                    </div>
+                    <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                        <h2 class="text-lg font-bold text-ink">Acceptance Criteria</h2>
+                        <ul class="mt-4 space-y-3 text-sm leading-6 text-slate-600">
+                            <li>CLI output remains usable in scripts and tests.</li>
+                            <li>The TUI can render progress without parsing human-readable text.</li>
+                            <li>Every failed run records the stage, task name, error, and recent log lines.</li>
+                            <li>Profile state is updated even when an end-to-end run fails midway.</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <section id="tab-content-phase5" class="tab-panel space-y-6">
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <span class="inline-flex items-center rounded-lg bg-harbor/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-harbor">Phase 5</span>
+                    <h1 class="mt-4 text-2xl font-extrabold text-ink">Generate and Persist Secrets Safely</h1>
+                    <p class="mt-3 max-w-4xl leading-7 text-slate-600">The current proxy flow asks for `--server-secret` and stores it in a field named `PostgresPassword`. That value is written to Pangolin's `server.secret`. It should be generated once per profile during upfront intake and reused for every proxy deployment on that profile.</p>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <h2 class="text-lg font-bold text-ink">Server Secret Decision</h2>
+                    <p class="mt-3 leading-7 text-slate-600">
+                        The server secret is an application secret for the Pangolin server configuration, not a user-facing account password. The user should not invent it. Generate a high-entropy random value with `crypto/rand`, save it in the profile's secrets file before the full run starts, and pass it into proxy deployment automatically. Keep the existing `--server-secret` flag for scripts and backward compatibility.
+                    </p>
+                </div>
+
+                <div class="grid gap-4 md:grid-cols-2">
+                    <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                        <h2 class="text-lg font-bold text-ink">Implementation Tasks</h2>
+                        <div class="mt-4 space-y-3 text-sm">
+                            <label class="flex gap-3"><input id="task-21" type="checkbox" onchange="toggleTask('task-21')" class="mt-1"> Rename internal `PostgresPassword` usage to `ServerSecret` while keeping deprecated flag aliases.</label>
+                            <label class="flex gap-3"><input id="task-22" type="checkbox" onchange="toggleTask('task-22')" class="mt-1"> Add `GenerateServerSecret()` using at least 32 random bytes encoded with base64url or hex.</label>
+                            <label class="flex gap-3"><input id="task-23" type="checkbox" onchange="toggleTask('task-23')" class="mt-1"> Store generated secrets in `secrets.json` with owner-only permissions and never print the raw value in normal output.</label>
+                            <label class="flex gap-3"><input id="task-24" type="checkbox" onchange="toggleTask('task-24')" class="mt-1"> Remove server secret from setup TUI inputs; show only "generated and saved" in the full plan review.</label>
+                        </div>
+                    </div>
+                    <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                        <h2 class="text-lg font-bold text-ink">Acceptance Criteria</h2>
+                        <ul class="mt-4 space-y-3 text-sm leading-6 text-slate-600">
+                            <li>A full setup run on a new profile creates the proxy secret automatically before execution.</li>
+                            <li>A full rerun or proxy retry on the same profile reuses the same secret.</li>
+                            <li>Deleting only `secrets.json` fails with a clear recovery message or regenerates only after explicit confirmation.</li>
+                            <li>Tests verify the secret generator length, randomness shape, persistence, and no accidental log exposure.</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <div class="flex items-center justify-between gap-3">
+                        <h2 class="text-lg font-bold text-ink">Code Direction</h2>
+                        <button onclick="copyToClipboard('code-secret')" class="rounded-lg bg-harbor px-3 py-2 text-xs font-bold uppercase tracking-wide text-white">Copy</button>
+                    </div>
+                    <pre class="code-scroll mt-4 overflow-auto rounded-lg bg-slate-950 p-4 text-xs text-slate-100"><code id="code-secret">func generateServerSecret() (string, error) {
+    raw := make([]byte, 32)
+    if _, err := rand.Read(raw); err != nil {
+        return "", err
+    }
+    return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+type ProfileSecrets struct {
+    ServerSecret string `json:"server_secret"`
+}
+
+func (secrets *ProfileSecrets) EnsureServerSecret() error {
+    if secrets.ServerSecret != "" {
+        return nil
+    }
+    generated, err := generateServerSecret()
+    if err != nil {
+        return err
+    }
+    secrets.ServerSecret = generated
+    return nil
+}</code></pre>
+                </div>
+            </section>
+
+            <section id="tab-content-phase6" class="tab-panel space-y-6">
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <span class="inline-flex items-center rounded-lg bg-moss/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-moss">Phase 6</span>
+                    <h1 class="mt-4 text-2xl font-extrabold text-ink">Verification, Documentation, and Release Path</h1>
+                    <p class="mt-3 max-w-4xl leading-7 text-slate-600">Finish with regression tests, scripted non-TUI behavior, and docs that explain the new profile model without making setup feel more complicated.</p>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <h2 class="text-lg font-bold text-ink">Test Plan</h2>
+                    <div class="mt-5 grid gap-4 md:grid-cols-2">
+                        <div class="border-l-4 border-harbor pl-4">
+                            <h3 class="font-bold text-ink">Unit tests</h3>
+                            <p class="mt-1 text-sm leading-6 text-slate-600">Profile path resolution, atomic saves, JSON load errors, full-run field derivation, secret generation, and run/stage transitions.</p>
+                        </div>
+                        <div class="border-l-4 border-moss pl-4">
+                            <h3 class="font-bold text-ink">TUI model tests</h3>
+                            <p class="mt-1 text-sm leading-6 text-slate-600">Bubble Tea update flows for profile picker, upfront intake, advanced settings, full plan review, failure, retry, and cancel.</p>
+                        </div>
+                        <div class="border-l-4 border-marigold pl-4">
+                            <h3 class="font-bold text-ink">Runner tests</h3>
+                            <p class="mt-1 text-sm leading-6 text-slate-600">Fake remote client emits full-run and stage task events in order and persists state correctly on success and failure.</p>
+                        </div>
+                        <div class="border-l-4 border-berry pl-4">
+                            <h3 class="font-bold text-ink">CLI compatibility</h3>
+                            <p class="mt-1 text-sm leading-6 text-slate-600">Existing direct commands continue working with explicit flags, including `proxy --server-secret`.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <h2 class="text-lg font-bold text-ink">Documentation Updates</h2>
+                    <ul class="mt-4 space-y-3 text-sm leading-6 text-slate-600">
+                        <li><i class="fa-solid fa-file-lines mr-2 text-harbor"></i>README guided setup section: lead with `aegisnode setup --ip 203.0.113.10`.</li>
+                        <li><i class="fa-solid fa-file-lines mr-2 text-harbor"></i>Describe setup as one command that collects all required values up front, then runs the complete plan.</li>
+                        <li><i class="fa-solid fa-file-lines mr-2 text-harbor"></i>Explain where profiles are stored using `os.UserConfigDir()` language instead of hard-coding one OS path.</li>
+                        <li><i class="fa-solid fa-file-lines mr-2 text-harbor"></i>Document profile switching, fresh profile creation, and old profile preservation.</li>
+                        <li><i class="fa-solid fa-file-lines mr-2 text-harbor"></i>Document that Pangolin server secret is generated automatically and should not be manually managed in normal setup.</li>
+                    </ul>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <h2 class="text-lg font-bold text-ink">Release Sequence</h2>
+                    <p class="mt-3 text-sm leading-6 text-slate-600">Current release status: steps 1, 2, 3, and 5 are complete for the backend implementation. Step 4 is the next chat session's primary entry point.</p>
+                    <ol class="mt-4 space-y-3 text-sm leading-6 text-slate-600">
+                        <li><span class="font-bold text-ink">1.</span> Merge the profile store and tests while keeping the old setup UI functional.</li>
+                        <li><span class="font-bold text-ink">2.</span> Add profile-aware full-run field derivation and generated server secrets.</li>
+                        <li><span class="font-bold text-ink">3.</span> Convert task runners to structured events with stdout compatibility.</li>
+                        <li><span class="font-bold text-ink">4.</span> Replace the setup UI with profile picking, upfront intake, full plan review, and the run view.</li>
+                        <li><span class="font-bold text-ink">5.</span> Update README and run the full Go test suite.</li>
+                    </ol>
+                </div>
+            </section>
+        </section>
+    </main>
+
+    <div id="toast" class="pointer-events-none fixed bottom-5 right-5 z-50 hidden rounded-lg border border-line bg-ink px-4 py-3 text-sm font-semibold text-white shadow-lg"></div>
+
+    <script>
+        const totalTasks = 24;
+        const backendCompletedTasks = new Set(["task-1", "task-2", "task-6", "task-7", "task-8", "task-11", "task-17", "task-18", "task-19", "task-20", "task-21", "task-22", "task-23", "task-24"]);
+        let checklistState = {};
+
+        function switchTab(tab) {
+            document.querySelectorAll(".tab-panel").forEach(panel => panel.classList.remove("active"));
+            const target = document.getElementById(`tab-content-${tab}`);
+            if (target) target.classList.add("active");
+
+            document.querySelectorAll(".tab-btn").forEach(button => {
+                button.classList.remove("bg-harbor", "text-white");
+                button.classList.add("text-slate-600", "hover:bg-slate-100");
+            });
+            const activeButton = document.getElementById(`btn-${tab}`);
+            if (activeButton) {
+                activeButton.classList.add("bg-harbor", "text-white");
+                activeButton.classList.remove("text-slate-600", "hover:bg-slate-100");
+            }
+            window.scrollTo({ top: 0, behavior: "smooth" });
+        }
+
+        function loadChecklist() {
+            try {
+                const savedState = localStorage.getItem("aegisnode_ux_plan_checklist");
+                checklistState = savedState ? JSON.parse(savedState) : Object.fromEntries([...backendCompletedTasks].map(taskId => [taskId, true]));
+            } catch (error) {
+                checklistState = {};
+            }
+            for (let i = 1; i <= totalTasks; i++) {
+                const checkbox = document.getElementById(`task-${i}`);
+                if (checkbox) checkbox.checked = !!checklistState[`task-${i}`];
+            }
+            updateProgress();
+        }
+
+        function toggleTask(taskId) {
+            const checkbox = document.getElementById(taskId);
+            if (!checkbox) return;
+            checklistState[taskId] = checkbox.checked;
+            localStorage.setItem("aegisnode_ux_plan_checklist", JSON.stringify(checklistState));
+            updateProgress();
+        }
+
+        function resetChecklist() {
+            checklistState = {};
+            localStorage.removeItem("aegisnode_ux_plan_checklist");
+            for (let i = 1; i <= totalTasks; i++) {
+                const checkbox = document.getElementById(`task-${i}`);
+                if (checkbox) checkbox.checked = false;
+            }
+            updateProgress();
+            showToast("Progress reset");
+        }
+
+        function updateProgress() {
+            let completed = 0;
+            for (let i = 1; i <= totalTasks; i++) {
+                if (checklistState[`task-${i}`]) completed++;
+            }
+            const percentage = Math.round((completed / totalTasks) * 100);
+            document.getElementById("overall-percentage").textContent = `${percentage}%`;
+            document.getElementById("overall-progress-bar").style.width = `${percentage}%`;
+            document.getElementById("task-ratio").textContent = `${completed} / ${totalTasks}`;
+        }
+
+        async function copyToClipboard(id) {
+            const element = document.getElementById(id);
+            if (!element) return;
+            const text = element.innerText || element.textContent || "";
+            try {
+                await navigator.clipboard.writeText(text);
+                showToast("Copied");
+            } catch (error) {
+                const textArea = document.createElement("textarea");
+                textArea.value = text;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand("copy");
+                document.body.removeChild(textArea);
+                showToast("Copied");
+            }
+        }
+
+        function showToast(message) {
+            const toast = document.getElementById("toast");
+            toast.textContent = message;
+            toast.classList.remove("hidden");
+            setTimeout(() => toast.classList.add("hidden"), 1600);
+        }
+
+        loadChecklist();
+    </script>
+</body>
+</html>

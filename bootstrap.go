@@ -80,6 +80,10 @@ func runBootstrapSteps(ctx context.Context, client remoteClient, config bootstra
 	return runTasks(ctx, client, config.SSHUser, bootstrapTasks(config, adminPublicKey), progress)
 }
 
+func runBootstrapStepsWithReporter(ctx context.Context, client remoteClient, config bootstrapConfig, adminPublicKey string, runID string, reporter TaskReporter, progress io.Writer) error {
+	return runTasksWithReporter(ctx, client, config.SSHUser, runID, "bootstrap", bootstrapTasks(config, adminPublicKey), progress, reporter)
+}
+
 func bootstrapTasks(config bootstrapConfig, adminPublicKey string) []Task {
 	sshDirectory := "/home/" + config.AdminUser + "/.ssh"
 	authorizedKeysPath := sshDirectory + "/authorized_keys"

@@ -22,7 +22,7 @@ type proxyConfig struct {
 	PrivateKeyPath   string
 	BaseDomain       string
 	LetsEncryptEmail string
-	PostgresPassword string
+	ServerSecret     string
 }
 
 type proxyRemoteClientFactory func(context.Context, proxyConfig, io.Writer, io.Writer) (remoteClient, error)
@@ -40,8 +40,8 @@ func runProxy(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	flags.StringVar(&config.PrivateKeyPath, "private-key", "", "path to the administrative private key")
 	flags.StringVar(&config.BaseDomain, "domain", "", "base domain for Pangolin, for example example.com")
 	flags.StringVar(&config.LetsEncryptEmail, "email", "", "Let's Encrypt account email")
-	flags.StringVar(&config.PostgresPassword, "server-secret", "", "Pangolin server secret")
-	flags.StringVar(&config.PostgresPassword, "postgres-password", "", "deprecated alias for --server-secret")
+	flags.StringVar(&config.ServerSecret, "server-secret", "", "Pangolin server secret")
+	flags.StringVar(&config.ServerSecret, "postgres-password", "", "deprecated alias for --server-secret")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -71,7 +71,7 @@ func runProxy(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 }
 
 func validateProxyConfig(config proxyConfig) error {
-	if config.Host == "" || config.PrivateKeyPath == "" || config.BaseDomain == "" || config.LetsEncryptEmail == "" || config.PostgresPassword == "" {
+	if config.Host == "" || config.PrivateKeyPath == "" || config.BaseDomain == "" || config.LetsEncryptEmail == "" || config.ServerSecret == "" {
 		return errors.New("--host, --private-key, --domain, --email, and --server-secret are required")
 	}
 	if !linuxUsername.MatchString(config.SSHUser) {
@@ -83,7 +83,7 @@ func validateProxyConfig(config proxyConfig) error {
 	if strings.ContainsAny(config.LetsEncryptEmail, " \t\r\n") || !strings.Contains(config.LetsEncryptEmail, "@") {
 		return errors.New("--email must be a valid email address")
 	}
-	if strings.ContainsAny(config.PostgresPassword, "\r\n") {
+	if strings.ContainsAny(config.ServerSecret, "\r\n") {
 		return errors.New("--server-secret must not contain newlines")
 	}
 	return nil
@@ -91,6 +91,10 @@ func validateProxyConfig(config proxyConfig) error {
 
 func runProxySteps(ctx context.Context, client remoteClient, config proxyConfig, progress io.Writer) error {
 	return runTasks(ctx, client, config.SSHUser, proxyTasks(config), progress)
+}
+
+func runProxyStepsWithReporter(ctx context.Context, client remoteClient, config proxyConfig, runID string, reporter TaskReporter, progress io.Writer) error {
+	return runTasksWithReporter(ctx, client, config.SSHUser, runID, "proxy", proxyTasks(config), progress, reporter)
 }
 
 func proxyTasks(config proxyConfig) []Task {
@@ -345,7 +349,7 @@ func pangolinConfigFile(config proxyConfig) string {
 		"  domain1:",
 		"    base_domain: " + yamlSingleQuote(config.BaseDomain),
 		"server:",
-		"  secret: " + yamlSingleQuote(config.PostgresPassword),
+		"  secret: " + yamlSingleQuote(config.ServerSecret),
 		"  cors:",
 		"    origins:",
 		"      - " + yamlSingleQuote("https://"+dashboardHost),

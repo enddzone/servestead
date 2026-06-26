@@ -3,10 +3,12 @@
 Last updated: 2026-06-26
 
 Source of truth for planned work: `implementation_plan.html`.
+UX overhaul handoff source: `ux_overhaul_plan.html`.
 
 ## Current status
 
 - Overall blueprint: **12 of 15 repository tasks implemented (80%)**
+- UX overhaul backend: **complete enough for UI work to begin**
 - Phase 1 — Local CLI Coordinator & VPS Bootstrapping: **complete**
 - Phase 2 — Operating System & Kernel Hardening: **complete**
 - Phase 2.5 — Guided Live-Test UX: **complete**
@@ -14,7 +16,38 @@ Source of truth for planned work: `implementation_plan.html`.
 - Phase 4 — Pangolin & Reverse Proxy: **complete for repository automation; live DNS/ACME validation requires an external domain**
 - Phase 5: **not started**
 
-The interactive HTML checklist uses browser-local storage and was not edited. This file records repository implementation progress independently of browser state.
+The interactive HTML checklist uses browser-local storage. `ux_overhaul_plan.html` now defaults backend-complete UX tasks to checked when no browser-local checklist exists. This file records repository implementation progress independently of browser state.
+
+## UX overhaul backend handoff — 2026-06-26
+
+Implemented backend pieces from `ux_overhaul_plan.html`:
+
+- `aegisnode setup --ip <host>` creates or reuses a saved profile and runs bootstrap, harden, network, and proxy as one full setup plan.
+- Profiles are stored under `filepath.Join(os.UserConfigDir(), "aegisnode")`.
+- Profile data is split into `profile.json`, `state.json`, `secrets.json`, and per-run JSONL logs.
+- Profile directories use `0700`; JSON files and secrets use `0600`; JSON saves are atomic.
+- Corrupt JSON load errors include the affected file path and do not delete data.
+- `GenerateServerSecret()` uses 32 random bytes encoded as base64url.
+- Profile-aware setup generates, saves, and reuses the Pangolin `server.secret` without printing it.
+- Internal proxy config now uses `ServerSecret`; direct `proxy --server-secret` and deprecated `--postgres-password` remain compatible.
+- `TaskReporter` and structured `TaskEvent` are wired through bootstrap, harden, network, and proxy stage execution.
+- Run/stage state is updated on start, success, failure, retry, and skip/resume.
+- Second and later profile-aware setup runs skip any stage marked complete in prior profile state and print explicit messages such as `bootstrap administrative access already complete; skipping.`
+- `setup --ip --domain ... --email ... --yes` supports non-interactive scripted execution when all required values are available.
+
+Backend verification:
+
+- `go test ./...` passes.
+- Tests cover profile persistence/permissions/corrupt JSON, generated secret shape and reuse, structured task event order, full-run execution, state persistence, no secret exposure in normal output, and second-run skip behavior.
+
+Remaining UI/dashboard work:
+
+- Replace the legacy mode-first setup TUI with a higher-level app model: profile picker, upfront intake, full plan review, dashboard, run view, failure/retry states, and advanced edit path.
+- Use `bubbles/list` for profile and advanced selections, `bubbles/table` for stage state, `bubbles/progress` plus spinner for active runs, `bubbles/viewport` for logs, and `bubbles/help` for key hints.
+- Render profile summaries from `ProfileStore.List()` and stage status from `ProfileState`; do not parse human-readable command output.
+- In the dashboard, show completed stages as complete/skipped on later runs so users understand idempotent resume behavior.
+- Add intentional controls for fresh profile creation, profile switching, rerun/retry, and advanced value edits.
+- Preserve direct command compatibility and scripted setup behavior while replacing the interactive UI.
 
 ## Phase checklist
 

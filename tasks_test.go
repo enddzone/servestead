@@ -50,3 +50,46 @@ func TestRunTasksWrapsErrorsWithTaskName(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestRunTasksWithReporterEmitsStructuredEvents(t *testing.T) {
+	client := &recordingRemoteClient{}
+	events := []TaskEvent{}
+	reporter := TaskReporterFunc(func(event TaskEvent) {
+		events = append(events, event)
+	})
+	var progress bytes.Buffer
+
+	err := runTasksWithReporter(context.Background(), client, "root", "run-1", "bootstrap", []Task{
+		{Name: "First", Apply: "true"},
+		{Name: "Second", Apply: "true"},
+	}, &progress, reporter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.String() != "- First\n- Second\n" {
+		t.Fatalf("unexpected progress output: %q", progress.String())
+	}
+	actualTypes := []TaskEventType{}
+	for _, event := range events {
+		actualTypes = append(actualTypes, event.Type)
+		if event.RunID != "run-1" || event.Stage != "bootstrap" {
+			t.Fatalf("event missing run context: %+v", event)
+		}
+	}
+	expectedTypes := []TaskEventType{
+		TaskRunStarted,
+		TaskStarted,
+		TaskSucceeded,
+		TaskStarted,
+		TaskSucceeded,
+		TaskRunCompleted,
+	}
+	if len(actualTypes) != len(expectedTypes) {
+		t.Fatalf("event types = %#v, want %#v", actualTypes, expectedTypes)
+	}
+	for index := range expectedTypes {
+		if actualTypes[index] != expectedTypes[index] {
+			t.Fatalf("event types = %#v, want %#v", actualTypes, expectedTypes)
+		}
+	}
+}

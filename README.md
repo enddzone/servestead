@@ -52,13 +52,32 @@ Provider defaults target Ubuntu 24.04 and can be overridden with `--region`, `--
 
 ## Guided setup
 
-For guided setup on an existing disposable Ubuntu VPS, use the terminal UI:
+For guided setup on an existing disposable Ubuntu VPS, lead with the server IP:
 
 ```sh
-bin/aegisnode setup
+bin/aegisnode setup --ip 203.0.113.10
 ```
 
-The guided flow explains each path before it runs anything. It can prepare the AegisNode SSH key, set up an existing VPS and then harden it, harden an already set-up VPS, configure Docker networking and UFW, deploy the Pangolin reverse proxy stack, or run local preflight checks only. It does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
+With `--ip`, AegisNode creates or selects a saved profile, collects the missing full-run values up front, generates and stores the Pangolin server secret, checks local prerequisites, then runs bootstrap, hardening, Docker networking, and reverse proxy deployment as one setup plan. Saved profiles live under the directory returned by `os.UserConfigDir()` in an `aegisnode` subdirectory. Each profile keeps metadata, run state, secrets, and JSONL run logs in separate files with owner-only permissions.
+
+Profiles are keyed by generated profile IDs, so starting fresh for a reused IP preserves old profile data instead of overwriting it:
+
+```sh
+bin/aegisnode setup --ip 203.0.113.10 --fresh
+```
+
+For scripts or repeatable smoke tests, provide all upfront values explicitly:
+
+```sh
+bin/aegisnode setup \
+  --ip 203.0.113.10 \
+  --private-key "$HOME/.ssh/id_ed25519" \
+  --domain example.com \
+  --email admin@example.com \
+  --yes
+```
+
+Running `setup` without `--ip` still opens the terminal UI for the older guided paths: prepare the AegisNode SSH key, set up and harden an existing VPS, harden an already set-up VPS, configure Docker networking and UFW, deploy the Pangolin reverse proxy stack, or run local preflight checks only. Setup does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
 
 For a quick preflight check without opening the TUI:
 
@@ -118,4 +137,4 @@ bin/aegisnode proxy \
   --server-secret 'replace-with-a-long-random-secret'
 ```
 
-The proxy runner writes `/opt/aegisnode/proxy/docker-compose.yml`, Pangolin application config, and Traefik config files, prepares persistent data directories, opens TCP/80, TCP/443, UDP/51820, and UDP/21820 for Traefik and Gerbil/Pangolin ingress, starts Traefik, Pangolin, and Gerbil with Docker Compose, and verifies all three services are running. DNS registrar changes remain external; create `A example.com -> 203.0.113.10` and `A *.example.com -> 203.0.113.10` before expecting Let's Encrypt HTTP-01 issuance to complete. On first boot, open `https://pangolin.example.com/auth/initial-setup` and replace `example.com` with your domain.
+The direct proxy command keeps `--server-secret` for scripts. Normal profile-aware setup generates this value automatically and reuses it from the profile secrets file. The proxy runner writes `/opt/aegisnode/proxy/docker-compose.yml`, Pangolin application config, and Traefik config files, prepares persistent data directories, opens TCP/80, TCP/443, UDP/51820, and UDP/21820 for Traefik and Gerbil/Pangolin ingress, starts Traefik, Pangolin, and Gerbil with Docker Compose, and verifies all three services are running. DNS registrar changes remain external; create `A example.com -> 203.0.113.10` and `A *.example.com -> 203.0.113.10` before expecting Let's Encrypt HTTP-01 issuance to complete. On first boot, open `https://pangolin.example.com/auth/initial-setup` and replace `example.com` with your domain.

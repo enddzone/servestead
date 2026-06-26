@@ -63,6 +63,10 @@ func runHardeningSteps(ctx context.Context, client remoteClient, config hardenin
 	return runTasks(ctx, client, config.SSHUser, hardeningTasks(), progress)
 }
 
+func runHardeningStepsWithReporter(ctx context.Context, client remoteClient, config hardeningConfig, runID string, reporter TaskReporter, progress io.Writer) error {
+	return runTasksWithReporter(ctx, client, config.SSHUser, runID, "harden", hardeningTasks(), progress, reporter)
+}
+
 func hardeningTasks() []Task {
 	sysctlContent := strings.Join(sysctlConfigLines(), "\n") + "\n"
 	return []Task{

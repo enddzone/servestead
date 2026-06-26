@@ -1,0 +1,131 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestProfileStoreCreatesPrivateProfileFiles(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+
+	profile, err := store.Create(Profile{
+		IP:             "203.0.113.10",
+		PrivateKeyPath: "/tmp/aegis-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.ID == "" || profile.InitialSSHUser != "root" || profile.AdminUser != "aegisadmin" {
+		t.Fatalf("unexpected profile defaults: %+v", profile)
+	}
+
+	secrets := ProfileSecrets{}
+	if err := secrets.EnsureServerSecret(); err != nil {
+		t.Fatal(err)
+	}
+	if len(secrets.ServerSecret) < 40 || strings.ContainsAny(secrets.ServerSecret, "\r\n") {
+		t.Fatalf("unexpected generated secret shape: %q", secrets.ServerSecret)
+	}
+	if err := store.SaveSecrets(profile.ID, secrets); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, state, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.IP != "203.0.113.10" || state.Runs == nil {
+		t.Fatalf("unexpected loaded profile/state: %+v %+v", loaded, state)
+	}
+	assertFileMode(t, store.profileDirectory(profile.ID), 0700)
+	assertFileMode(t, store.profilePath(profile.ID), 0600)
+	assertFileMode(t, store.statePath(profile.ID), 0600)
+	assertFileMode(t, store.secretsPath(profile.ID), 0600)
+}
+
+func TestProfileStoreResolveByIPSortsNewestFirst(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	older, err := store.Create(Profile{IP: "203.0.113.10", Name: "older"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer, err := store.Create(Profile{IP: "203.0.113.10", Name: "newer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	older.UpdatedAt = time.Now().Add(-time.Hour)
+	newer.UpdatedAt = time.Now()
+	if err := store.Save(older, ProfileState{Runs: map[string]SetupRun{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(newer, ProfileState{Runs: map[string]SetupRun{}}); err != nil {
+		t.Fatal(err)
+	}
+
+	matches, err := store.ResolveByIP("203.0.113.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 2 || matches[0].ID != newer.ID {
+		t.Fatalf("unexpected matches: %+v", matches)
+	}
+}
+
+func TestProfileStoreCorruptJSONNamesPath(t *testing.T) {
+	root := t.TempDir()
+	store := newFileProfileStore(root)
+	profileDirectory := filepath.Join(root, "profiles", "broken")
+	if err := os.MkdirAll(profileDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	profilePath := filepath.Join(profileDirectory, "profile.json")
+	if err := os.WriteFile(profilePath, []byte("{broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profileDirectory, "state.json"), []byte(`{"runs":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := store.Load("broken")
+	if err == nil || !strings.Contains(err.Error(), profilePath) {
+		t.Fatalf("corrupt JSON error did not name path: %v", err)
+	}
+}
+
+func TestProfileStoreAppendsJSONLEvents(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{IP: "203.0.113.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := TaskEvent{Type: TaskStarted, RunID: "run-1", Stage: "bootstrap", TaskName: "Example", Time: time.Now()}
+	if err := store.AppendRunEvent(profile.ID, "run-1", event); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(store.profileDirectory(profile.ID), "logs", "run-1.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded TaskEvent
+	if err := json.Unmarshal(data[:len(data)-1], &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Type != TaskStarted || decoded.TaskName != "Example" {
+		t.Fatalf("unexpected event: %+v", decoded)
+	}
+}
+
+func assertFileMode(t *testing.T, path string, expected os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != expected {
+		t.Fatalf("%s mode = %v, want %v", path, info.Mode().Perm(), expected)
+	}
+}

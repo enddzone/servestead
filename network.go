@@ -70,6 +70,10 @@ func runNetworkSteps(ctx context.Context, client remoteClient, config networkCon
 	return runTasks(ctx, client, config.SSHUser, networkTasks(config), progress)
 }
 
+func runNetworkStepsWithReporter(ctx context.Context, client remoteClient, config networkConfig, runID string, reporter TaskReporter, progress io.Writer) error {
+	return runTasksWithReporter(ctx, client, config.SSHUser, runID, "network", networkTasks(config), progress, reporter)
+}
+
 func networkTasks(config networkConfig) []Task {
 	sshPort := firstNonEmpty(config.SSHPort, defaultSSHPort)
 	tasks := []Task{

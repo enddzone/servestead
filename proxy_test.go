@@ -15,7 +15,7 @@ func TestProxyCommandsDeployPhase4Stack(t *testing.T) {
 		SSHUser:          "aegisadmin",
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
-		PostgresPassword: "secret password",
+		ServerSecret:     "secret password",
 	}
 	tasks := proxyTasks(config)
 	joined := strings.Join(taskScripts(tasks), "\n")
@@ -69,7 +69,7 @@ func TestPangolinComposeFileContainsConfiguredServices(t *testing.T) {
 	compose := pangolinComposeFile(proxyConfig{
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
-		PostgresPassword: "secret password",
+		ServerSecret:     "secret password",
 	})
 	for _, expected := range []string{
 		"image: docker.io/fosrl/pangolin:latest",
@@ -139,8 +139,8 @@ func TestTraefikConfigFilesContainPangolinRoutes(t *testing.T) {
 
 func TestPangolinConfigFileContainsDashboardSettings(t *testing.T) {
 	config := pangolinConfigFile(proxyConfig{
-		BaseDomain:       "example.com",
-		PostgresPassword: "secret",
+		BaseDomain:   "example.com",
+		ServerSecret: "secret",
 	})
 	for _, expected := range []string{
 		"base_endpoint: 'pangolin.example.com'",
@@ -162,7 +162,7 @@ func TestRunProxyStepsUsesPrivilegedCommands(t *testing.T) {
 		SSHUser:          "aegisadmin",
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
-		PostgresPassword: "secret",
+		ServerSecret:     "secret",
 	}
 	if err := runProxySteps(context.Background(), client, config, nil); err != nil {
 		t.Fatal(err)
@@ -208,7 +208,7 @@ func TestRunProxyUsesRemoteClientAndPrintsDNSGuidance(t *testing.T) {
 			t.Fatalf("proxy output missing %q:\n%s", expected, stdout.String())
 		}
 	}
-	if len(client.commands) != len(proxyTasks(proxyConfig{SSHUser: "aegisadmin", BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com", PostgresPassword: "secret"})) {
+	if len(client.commands) != len(proxyTasks(proxyConfig{SSHUser: "aegisadmin", BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com", ServerSecret: "secret"})) {
 		t.Fatalf("unexpected command count: %d", len(client.commands))
 	}
 }
@@ -228,7 +228,7 @@ func TestValidateProxyConfigRejectsInvalidDomain(t *testing.T) {
 		PrivateKeyPath:   "/tmp/key",
 		BaseDomain:       "https://example.com",
 		LetsEncryptEmail: "admin@example.com",
-		PostgresPassword: "secret",
+		ServerSecret:     "secret",
 	})
 	if err == nil || err.Error() != "--domain must be a valid base domain such as example.com" {
 		t.Fatalf("unexpected error: %v", err)

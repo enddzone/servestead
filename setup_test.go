@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/charmbracelet/bubbles/textinput"
 )
 
 func TestRunPreflightPassesWithRequiredKeys(t *testing.T) {
@@ -166,7 +164,6 @@ func TestSetupProxyConfigFromInputs(t *testing.T) {
 		"$AEGISNODE_TEST_HOME/id_ed25519",
 		"example.com",
 		"admin@example.com",
-		"secret",
 	}
 	for index, value := range values {
 		model.inputs[index].SetValue(value)
@@ -179,11 +176,11 @@ func TestSetupProxyConfigFromInputs(t *testing.T) {
 	if config.Host != "203.0.113.10" || config.AdminUser != "aegisadmin" || config.PrivateKeyPath != "/tmp/aegis-home/id_ed25519" {
 		t.Fatalf("unexpected SSH config: %+v", config)
 	}
-	if config.BaseDomain != "example.com" || config.LetsEncryptEmail != "admin@example.com" || config.PostgresPassword != "secret" {
+	if config.BaseDomain != "example.com" || config.LetsEncryptEmail != "admin@example.com" || config.ServerSecret == "" {
 		t.Fatalf("unexpected proxy config: %+v", config)
 	}
-	if model.inputs[5].EchoMode != textinput.EchoPassword {
-		t.Fatalf("server secret input is not masked")
+	if strings.Contains(setupPlanSummary(config), config.ServerSecret) {
+		t.Fatalf("setup summary exposes generated server secret")
 	}
 }
 
@@ -195,7 +192,7 @@ func TestSetupPlanSummaryIncludesProxyGuidance(t *testing.T) {
 		PrivateKeyPath:   "/tmp/aegis-key",
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
-		PostgresPassword: "secret",
+		ServerSecret:     "secret",
 	})
 	for _, expected := range []string{
 		"Deploy Traefik, Pangolin, and Gerbil",
@@ -218,7 +215,7 @@ func TestRunSetupPlanRunsProxyMode(t *testing.T) {
 	}
 	client := &recordingRemoteClient{}
 	newProxyRemoteClient = func(_ context.Context, config proxyConfig, _, _ io.Writer) (remoteClient, error) {
-		if config.BaseDomain != "example.com" || config.LetsEncryptEmail != "admin@example.com" || config.PostgresPassword != "secret" {
+		if config.BaseDomain != "example.com" || config.LetsEncryptEmail != "admin@example.com" || config.ServerSecret != "secret" {
 			t.Fatalf("unexpected proxy config: %+v", config)
 		}
 		return client, nil
@@ -232,15 +229,160 @@ func TestRunSetupPlanRunsProxyMode(t *testing.T) {
 		PrivateKeyPath:   privateKey,
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
-		PostgresPassword: "secret",
+		ServerSecret:     "secret",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(client.commands) != len(proxyTasks(proxyConfig{SSHUser: "aegisadmin", BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com", PostgresPassword: "secret"})) {
+	if len(client.commands) != len(proxyTasks(proxyConfig{SSHUser: "aegisadmin", BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com", ServerSecret: "secret"})) {
 		t.Fatalf("unexpected proxy command count: %d", len(client.commands))
 	}
 	if !strings.Contains(stdout.String(), "Step 1/1: deploy Pangolin and reverse proxy stack.") {
 		t.Fatalf("missing setup step output:\n%s", stdout.String())
+	}
+}
+
+func TestPrepareProfileSetupGeneratesPersistentSecret(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+
+	profile, state, config, err := prepareProfileSetup(setupCLIOptions{
+		IP:               "203.0.113.10",
+		PrivateKeyPath:   "/tmp/aegis-key",
+		BaseDomain:       "example.com",
+		LetsEncryptEmail: "admin@example.com",
+	}, store, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.ID == "" || state.Runs == nil {
+		t.Fatalf("unexpected profile/state: %+v %+v", profile, state)
+	}
+	if config.Mode != setupModeFullRun || config.ServerSecret == "" {
+		t.Fatalf("unexpected full-run config: %+v", config)
+	}
+	if strings.Contains(setupPlanSummary(config), config.ServerSecret) {
+		t.Fatalf("full-run summary exposes generated server secret")
+	}
+
+	_, _, secondConfig, err := prepareProfileSetup(setupCLIOptions{
+		IP:               "203.0.113.10",
+		BaseDomain:       "example.com",
+		LetsEncryptEmail: "admin@example.com",
+	}, store, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondConfig.ServerSecret != config.ServerSecret {
+		t.Fatalf("setup did not reuse saved secret")
+	}
+}
+
+func TestRunProfileSetupPlanExecutesFullRunAndPersistsState(t *testing.T) {
+	originalBootstrap := newBootstrapRemoteClient
+	originalHardening := newHardeningRemoteClient
+	originalNetwork := newNetworkRemoteClient
+	originalProxy := newProxyRemoteClient
+	defer func() {
+		newBootstrapRemoteClient = originalBootstrap
+		newHardeningRemoteClient = originalHardening
+		newNetworkRemoteClient = originalNetwork
+		newProxyRemoteClient = originalProxy
+	}()
+
+	directory := t.TempDir()
+	privateKey := filepath.Join(directory, "id_ed25519")
+	publicKey := filepath.Join(directory, "id_ed25519.pub")
+	if err := os.WriteFile(privateKey, []byte("private"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(publicKey, []byte("ssh-ed25519 AAAATEST user@example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	clients := []*recordingRemoteClient{
+		{}, {}, {}, {},
+	}
+	newBootstrapRemoteClient = func(_ context.Context, _ bootstrapConfig, _, _ io.Writer) (remoteClient, error) {
+		return clients[0], nil
+	}
+	newHardeningRemoteClient = func(_ context.Context, _ hardeningConfig, _, _ io.Writer) (remoteClient, error) {
+		return clients[1], nil
+	}
+	newNetworkRemoteClient = func(_ context.Context, _ networkConfig, _, _ io.Writer) (remoteClient, error) {
+		return clients[2], nil
+	}
+	newProxyRemoteClient = func(_ context.Context, _ proxyConfig, _, _ io.Writer) (remoteClient, error) {
+		return clients[3], nil
+	}
+
+	store := newFileProfileStore(t.TempDir())
+	profile, state, config, err := prepareProfileSetup(setupCLIOptions{
+		IP:               "203.0.113.10",
+		PrivateKeyPath:   privateKey,
+		BaseDomain:       "example.com",
+		LetsEncryptEmail: "admin@example.com",
+	}, store, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runProfileSetupPlan(context.Background(), store, profile, state, config, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	for index, client := range clients {
+		if len(client.commands) == 0 {
+			t.Fatalf("stage %d did not run", index)
+		}
+	}
+	_, loadedState, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := loadedState.Runs[loadedState.ActiveRunID]
+	if run.Status != runStatusComplete {
+		t.Fatalf("unexpected run state: %+v", run)
+	}
+	for _, stage := range []string{"bootstrap", "harden", "network", "proxy"} {
+		if run.Stages[stage].Status != stageStatusComplete {
+			t.Fatalf("stage %s not complete: %+v", stage, run.Stages[stage])
+		}
+	}
+	if strings.Contains(stdout.String(), config.ServerSecret) {
+		t.Fatalf("stdout exposed generated server secret")
+	}
+
+	commandCounts := make([]int, len(clients))
+	for index, client := range clients {
+		commandCounts[index] = len(client.commands)
+	}
+	profile, state, config, err = prepareProfileSetup(setupCLIOptions{
+		IP:               "203.0.113.10",
+		PrivateKeyPath:   privateKey,
+		BaseDomain:       "example.com",
+		LetsEncryptEmail: "admin@example.com",
+	}, store, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := runProfileSetupPlan(context.Background(), store, profile, state, config, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	for index, client := range clients {
+		if len(client.commands) != commandCounts[index] {
+			t.Fatalf("stage %d reran on completed profile", index)
+		}
+	}
+	for _, expected := range []string{
+		"Step 1/4: bootstrap administrative access already complete; skipping.",
+		"Step 2/4: harden server already complete; skipping.",
+		"Step 3/4: configure Docker networking and UFW already complete; skipping.",
+		"Step 4/4: deploy Pangolin and reverse proxy stack already complete; skipping.",
+	} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Fatalf("second run output missing %q:\n%s", expected, stdout.String())
+		}
 	}
 }
