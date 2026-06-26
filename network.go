@@ -145,7 +145,8 @@ func dockerDaemonConfig() string {
 		`    "max-size": "50m",`,
 		`    "max-file": "3"`,
 		`  },`,
-		`  "iptables": false,`,
+		`  "iptables": true,`,
+		`  "ip-forward-no-drop": true,`,
 		`  "no-new-privileges": true`,
 		"}",
 		"",
@@ -170,22 +171,34 @@ func ufwMasqueradeCommand() string {
 	return commandScript(
 		`egress_interface="$(ip -4 route show default 0.0.0.0/0 | awk '{print $5; exit}')"`,
 		`test -n "$egress_interface"`,
+		installUFWMasqueradeBlockCommand("AegisNode UFW MASQUERADE TRANSLATIONS", "172.17.0.0/16", "172.18.0.0/16"),
+	)
+}
+
+func installUFWMasqueradeBlockCommand(marker string, subnets ...string) string {
+	startMarker := "# START " + marker
+	endMarker := "# END " + marker
+	commands := []string{
 		"test -f /etc/ufw/before.rules",
 		`tmp="$(mktemp)"`,
-		`awk 'BEGIN { skip = 0 } /# START AegisNode UFW MASQUERADE TRANSLATIONS/ { skip = 1; next } /# END AegisNode UFW MASQUERADE TRANSLATIONS/ { skip = 0; next } !skip { print }' /etc/ufw/before.rules > "$tmp"`,
-		`cat > /etc/ufw/before.rules <<EOF
-# START AegisNode UFW MASQUERADE TRANSLATIONS
-*nat
-:POSTROUTING ACCEPT [0:0]
--A POSTROUTING -s 172.17.0.0/16 -o ${egress_interface} -j MASQUERADE
--A POSTROUTING -s 172.18.0.0/16 -o ${egress_interface} -j MASQUERADE
-COMMIT
-# END AegisNode UFW MASQUERADE TRANSLATIONS
-
-EOF`,
+		"awk -v start=" + shellQuote(startMarker) + " -v end=" + shellQuote(endMarker) + ` 'BEGIN { skip = 0 } $0 == start { skip = 1; next } $0 == end { skip = 0; next } !skip { print }' /etc/ufw/before.rules > "$tmp"`,
+		`cat > /etc/ufw/before.rules <<EOF`,
+		startMarker,
+		"*nat",
+		":POSTROUTING ACCEPT [0:0]",
+	}
+	for _, subnet := range subnets {
+		commands = append(commands, "-A POSTROUTING -s "+subnet+" -o ${egress_interface} -j MASQUERADE")
+	}
+	commands = append(commands,
+		"COMMIT",
+		endMarker,
+		"",
+		"EOF",
 		`cat "$tmp" >> /etc/ufw/before.rules`,
 		`rm -f "$tmp"`,
 	)
+	return strings.Join(commands, "\n")
 }
 
 func sshPortForHost(host string) (string, error) {

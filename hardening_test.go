@@ -39,7 +39,7 @@ func TestHardeningCommandsContainBaseline(t *testing.T) {
 		"passwd -l root",
 		"install -d -m 0755 -o root -g root /run/sshd",
 		"/usr/sbin/sshd -t",
-		"systemctl reload ssh || systemctl reload sshd",
+		"systemctl reload-or-restart ssh || systemctl reload-or-restart sshd",
 		"/etc/sysctl.d/99-vps-hardening.conf",
 		"packagecloud.io/crowdsec/crowdsec/gpgkey",
 		"systemctl enable --now crowdsec",

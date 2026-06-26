@@ -58,10 +58,13 @@ func TestNetworkCommandsContainPhase3Baseline(t *testing.T) {
 		}
 	}
 	daemonConfig := dockerDaemonConfig()
-	for _, expected := range []string{`"iptables": false`, `"no-new-privileges": true`} {
+	for _, expected := range []string{`"iptables": true`, `"ip-forward-no-drop": true`, `"no-new-privileges": true`} {
 		if !strings.Contains(daemonConfig, expected) {
 			t.Fatalf("Docker daemon config missing %q:\n%s", expected, daemonConfig)
 		}
+	}
+	if strings.Contains(daemonConfig, `"iptables": false`) {
+		t.Fatalf("Docker daemon config disables Docker bridge networking firewall rules:\n%s", daemonConfig)
 	}
 }
 

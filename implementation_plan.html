@@ -277,7 +277,7 @@
                     <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 hover:border-emerald-500/30 transition-all">
                         <div class="h-9 w-9 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center font-bold mb-3">2</div>
                         <h4 class="font-bold text-slate-200">Docker Network Encapsulation</h4>
-                        <p class="text-xs text-slate-400 mt-1 leading-relaxed">Modifies the central Docker daemon configuration to completely disable raw iptables hijacking. Automatically creates explicit UFW routing paths for outgoing traffic.</p>
+                        <p class="text-xs text-slate-400 mt-1 leading-relaxed">Modifies the central Docker daemon configuration to preserve bridge NAT while UFW owns host ingress and explicit routed traffic.</p>
                     </div>
                     <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 hover:border-violet-500/30 transition-all">
                         <div class="h-9 w-9 rounded-lg bg-violet-500/10 text-violet-400 flex items-center justify-center font-bold mb-3">3</div>
@@ -515,7 +515,7 @@ kernel.unprivileged_bpf_disabled = 1</code></pre>
                 </div>
 
                 <p class="text-slate-400 text-sm leading-relaxed">
-                    By default, when a Docker container exposes ports, it automatically injects custom `iptables` routes that entirely bypass system-level UFW controls. We eliminate this vulnerability by disabling automatic iptables modifications inside the Docker engine, while manually crafting UFW outbound masquerading routes to maintain internet connectivity for running containers.
+                    Docker bridge networking depends on daemon-managed firewall and NAT rules for reliable container egress. We keep Docker bridge NAT enabled, constrain host ingress with UFW, and explicitly allow only the routed paths required by AegisNode-managed networks.
                 </p>
 
                 <!-- Tasks Checklist -->
@@ -523,7 +523,7 @@ kernel.unprivileged_bpf_disabled = 1</code></pre>
                     <h3 class="text-xs font-bold text-slate-300 tracking-wider uppercase mb-2">Phase 3 Checklist</h3>
                     <label class="flex items-start gap-3 cursor-pointer text-sm text-slate-400 hover:text-slate-200 select-none">
                         <input type="checkbox" id="task-7" onchange="toggleTask('task-7')" class="mt-1 h-4 w-4 rounded border-slate-800 bg-slate-900 text-indigo-500 focus:ring-0 focus:ring-offset-0">
-                        <span>Deploy isolated `/etc/docker/daemon.json` configuration file with `"iptables": false` defined.</span>
+                        <span>Deploy isolated `/etc/docker/daemon.json` configuration file with Docker bridge firewall and NAT support enabled.</span>
                     </label>
                     <label class="flex items-start gap-3 cursor-pointer text-sm text-slate-400 hover:text-slate-200 select-none">
                         <input type="checkbox" id="task-8" onchange="toggleTask('task-8')" class="mt-1 h-4 w-4 rounded border-slate-800 bg-slate-900 text-indigo-500 focus:ring-0 focus:ring-offset-0">
@@ -550,7 +550,8 @@ kernel.unprivileged_bpf_disabled = 1</code></pre>
     "max-size": "50m",
     "max-file": "3"
   },
-  "iptables": false,
+  "iptables": true,
+  "ip-forward-no-drop": true,
   "no-new-privileges": true
 }</code></pre>
                 </div>

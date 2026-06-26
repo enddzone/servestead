@@ -1,17 +1,18 @@
 # Implementation Progress
 
-Last updated: 2026-06-25
+Last updated: 2026-06-26
 
 Source of truth for planned work: `implementation_plan.html`.
 
 ## Current status
 
-- Overall blueprint: **9 of 15 tasks complete (60%)**
+- Overall blueprint: **12 of 15 repository tasks implemented (80%)**
 - Phase 1 — Local CLI Coordinator & VPS Bootstrapping: **complete**
 - Phase 2 — Operating System & Kernel Hardening: **complete**
 - Phase 2.5 — Guided Live-Test UX: **complete**
 - Phase 3 — Resolving Docker & UFW Conflict: **complete**
-- Phases 4–5: **not started**
+- Phase 4 — Pangolin & Reverse Proxy: **complete for repository automation; live DNS/ACME validation requires an external domain**
+- Phase 5: **not started**
 
 The interactive HTML checklist uses browser-local storage and was not edited. This file records repository implementation progress independently of browser state.
 
@@ -77,15 +78,26 @@ Verification completed on 2026-06-25:
 
 - Added the `network` command with native remote Docker/UFW steps separate from `harden`.
 - Docker is installed from Docker's official Ubuntu apt repository using a keyring-backed deb822 source file.
-- The network runner writes `/etc/docker/daemon.json` with `"iptables": false`, ensures the administrative SSH user has passwordless sudo and Docker group membership, enables IPv4 forwarding, replaces only the AegisNode-managed UFW NAT block, preserves SSH access on the configured SSH port, denies incoming and routed traffic by default, allows HTTP/HTTPS ingress, allows routed traffic from Docker bridge CIDRs, enables UFW, and restarts Docker.
+- The network runner writes `/etc/docker/daemon.json` with Docker bridge firewall/NAT support enabled, ensures the administrative SSH user has passwordless sudo and Docker group membership, enables IPv4 forwarding, replaces only the AegisNode-managed UFW NAT block, preserves SSH access on the configured SSH port, denies incoming and routed traffic by default, allows HTTP/HTTPS ingress, allows routed traffic from Docker bridge CIDRs, enables UFW, and restarts Docker.
 - Added a guided setup path for Docker networking and UFW without adding the step to baseline hardening.
 - Automated verification: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `go build -o /tmp/aegisnode .`.
 
-### Phase 4 — Not started
+### Phase 4 — Complete
 
-- [ ] Deploy Traefik, Gerbil, Pangolin, and PostgreSQL.
-- [ ] Configure required DNS records.
-- [ ] Start the stack and verify certificate issuance.
+- [x] Deploy Traefik, Gerbil, and Pangolin.
+- [x] Configure required DNS records by printing the exact apex and wildcard records the operator must create at their registrar.
+- [x] Start the stack and verify the container services are running.
+
+Verification completed on 2026-06-26:
+
+- Added the `proxy` command with native remote deployment steps separate from `network`.
+- Added a guided setup path for the proxy deployment with domain, Let's Encrypt email, and masked server secret prompts.
+- The proxy runner validates domain, email, password, SSH user, and private key inputs before connecting.
+- The deployment writes `/opt/aegisnode/proxy/docker-compose.yml`, Pangolin application config, and Traefik config files, prepares persistent Pangolin and Traefik data directories, opens TCP/80, TCP/443, UDP/51820, and UDP/21820 in UFW, pulls and starts the Compose stack, and verifies Traefik, Pangolin, and Gerbil are running.
+- Dashboard routing sends UI traffic to Pangolin port 3002 and API traffic under `/api/v1` to Pangolin port 3000.
+- The generated Compose file follows Pangolin's manual community layout with Gerbil enabled, uses Traefik file/http providers, and avoids Docker provider socket access.
+- Actual DNS propagation and Let's Encrypt issuance are live-environment checks and are not performed by automated tests.
+- Automated verification: `go test ./...`.
 
 ### Phase 5 — Not started
 
@@ -95,4 +107,4 @@ Verification completed on 2026-06-25:
 
 ## Next implementation entry point
 
-Phase 4 should deploy Traefik, Gerbil, Pangolin, and PostgreSQL, configure required DNS records, start the stack, and verify certificate issuance.
+Phase 5 should harden sshd access, block external SSH after tunnel verification, and verify Pangolin client tunnel access.

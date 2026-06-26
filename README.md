@@ -58,7 +58,7 @@ For guided setup on an existing disposable Ubuntu VPS, use the terminal UI:
 bin/aegisnode setup
 ```
 
-The guided flow explains each path before it runs anything. It can prepare the AegisNode SSH key, set up an existing VPS and then harden it, harden an already set-up VPS, configure Docker networking and UFW, or run local preflight checks only. It does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
+The guided flow explains each path before it runs anything. It can prepare the AegisNode SSH key, set up an existing VPS and then harden it, harden an already set-up VPS, configure Docker networking and UFW, deploy the Pangolin reverse proxy stack, or run local preflight checks only. It does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
 
 For a quick preflight check without opening the TUI:
 
@@ -101,6 +101,21 @@ bin/aegisnode network \
   --private-key "$HOME/.ssh/id_ed25519"
 ```
 
-The network runner installs Docker from Docker's official Ubuntu apt repository, ensures the administrative SSH user has passwordless sudo, adds that user to the `docker` group for Docker commands without `sudo`, writes `/etc/docker/daemon.json` with Docker-managed iptables disabled, enables IPv4 forwarding, injects AegisNode-managed Docker masquerade translations into `/etc/ufw/before.rules`, preserves SSH access on the configured SSH port, sets UFW to deny incoming and routed traffic by default, explicitly allows HTTP/HTTPS ingress, allows routed traffic from the default Docker bridge networks, enables UFW, and restarts Docker. Apt operations wait up to 300 seconds for an existing dpkg frontend lock before failing.
+The network runner installs Docker from Docker's official Ubuntu apt repository, ensures the administrative SSH user has passwordless sudo, adds that user to the `docker` group for Docker commands without `sudo`, writes `/etc/docker/daemon.json` with Docker bridge firewall/NAT support enabled, enables IPv4 forwarding, injects AegisNode-managed Docker masquerade translations into `/etc/ufw/before.rules`, preserves SSH access on the configured SSH port, sets UFW to deny incoming and routed traffic by default, explicitly allows HTTP/HTTPS ingress, allows routed traffic from the default Docker bridge networks, enables UFW, and restarts Docker. Apt operations wait up to 300 seconds for an existing dpkg frontend lock before failing.
 
 Docker group membership applies to new login sessions. After `network` completes, disconnect and reconnect before running `docker ps` without `sudo`.
+
+## Deploy Pangolin and the reverse proxy stack
+
+After DNS records point the apex domain and wildcard subdomains to the VPS, deploy the Phase 4 Pangolin stack:
+
+```sh
+bin/aegisnode proxy \
+  --host 203.0.113.10 \
+  --private-key "$HOME/.ssh/id_ed25519" \
+  --domain example.com \
+  --email admin@example.com \
+  --server-secret 'replace-with-a-long-random-secret'
+```
+
+The proxy runner writes `/opt/aegisnode/proxy/docker-compose.yml`, Pangolin application config, and Traefik config files, prepares persistent data directories, opens TCP/80, TCP/443, UDP/51820, and UDP/21820 for Traefik and Gerbil/Pangolin ingress, starts Traefik, Pangolin, and Gerbil with Docker Compose, and verifies all three services are running. DNS registrar changes remain external; create `A example.com -> 203.0.113.10` and `A *.example.com -> 203.0.113.10` before expecting Let's Encrypt HTTP-01 issuance to complete. On first boot, open `https://pangolin.example.com/auth/initial-setup` and replace `example.com` with your domain.

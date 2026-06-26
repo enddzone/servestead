@@ -21,6 +21,7 @@ const (
 	setupModeBootstrapHarden
 	setupModeHardenOnly
 	setupModeNetwork
+	setupModeProxy
 	setupModeDoctor
 )
 
@@ -33,6 +34,9 @@ type setupConfig struct {
 	PrivateKeyPath     string
 	ProviderKeyPath    string
 	ProviderKeyComment string
+	BaseDomain         string
+	LetsEncryptEmail   string
+	PostgresPassword   string
 }
 
 type preflightCheck struct {
@@ -45,7 +49,7 @@ type preflightCheck struct {
 const setupUsage = `Usage of setup:
   aegisnode setup
 
-Launches the guided terminal UI. This is the recommended workflow for key creation, existing-VPS setup, server hardening, and preflight checks.
+Launches the guided terminal UI. This is the recommended workflow for key creation, existing-VPS setup, server hardening, Docker networking, reverse proxy deployment, and preflight checks.
 `
 
 const doctorUsage = `Usage of doctor:
@@ -177,6 +181,16 @@ func runSetupPlan(ctx context.Context, config setupConfig, stdout, stderr io.Wri
 		}
 		printSSHLoginGuidance(stdout, config)
 		return nil
+	case setupModeProxy:
+		fmt.Fprintln(stdout, "Step 1/1: deploy Pangolin and reverse proxy stack.")
+		return runProxy(ctx, []string{
+			"--host", config.Host,
+			"--ssh-user", config.AdminUser,
+			"--private-key", config.PrivateKeyPath,
+			"--domain", config.BaseDomain,
+			"--email", config.LetsEncryptEmail,
+			"--server-secret", config.PostgresPassword,
+		}, stdout, stderr)
 	default:
 		return errors.New("unknown setup mode")
 	}
@@ -217,7 +231,7 @@ func preflightChecks(config setupConfig) []preflightCheck {
 	}
 	checks = append(checks, nativeCapabilityCheck("native SSH runner"))
 
-	privateKeyRequired := config.Mode == setupModeBootstrapHarden || config.Mode == setupModeHardenOnly || config.Mode == setupModeNetwork
+	privateKeyRequired := config.Mode == setupModeBootstrapHarden || config.Mode == setupModeHardenOnly || config.Mode == setupModeNetwork || config.Mode == setupModeProxy
 	checks = append(checks, fileCheck("private key", config.PrivateKeyPath, privateKeyRequired))
 
 	publicKeyRequired := config.Mode == setupModeBootstrapHarden
@@ -429,6 +443,8 @@ func (model setupModel) View() string {
 		builder.WriteString("\n\n")
 		if model.mode == setupModeProviderKey {
 			builder.WriteString("AegisNode will write the private key and matching .pub file, then print the public key for Hetzner or DigitalOcean.")
+		} else if model.mode == setupModeProxy {
+			builder.WriteString("Enter the target host, domain, Let's Encrypt email, and database password for the reverse proxy stack.")
 		} else {
 			builder.WriteString("Enter the target host and confirm the SSH key. AegisNode uses the matching .pub file for the admin account.")
 		}
@@ -480,7 +496,11 @@ func setupModeOptions() []setupModeOption {
 		},
 		{
 			Label:       "Configure Docker networking and UFW",
-			Description: "Install Docker, disable Docker-managed packet filters, and let UFW own ingress and routed traffic.",
+			Description: "Install Docker, preserve bridge NAT, and configure UFW host ingress and routed traffic.",
+		},
+		{
+			Label:       "Deploy Pangolin and reverse proxy",
+			Description: "Write and start the Traefik, Pangolin, and Gerbil Compose stack.",
 		},
 		{
 			Label:       "Run local preflight checks only",
@@ -498,50 +518,33 @@ func setupInputs(mode setupMode) []textinput.Model {
 		})
 	}
 
-	fields := []struct {
-		label       string
-		placeholder string
-		value       string
-	}{
+	fields := []setupInputField{
 		{label: "Host", placeholder: "203.0.113.10"},
 	}
 	if mode == setupModeBootstrapHarden {
 		fields = append(fields,
-			struct {
-				label       string
-				placeholder string
-				value       string
-			}{label: "Initial SSH user", value: "root"},
-			struct {
-				label       string
-				placeholder string
-				value       string
-			}{label: "Admin user", value: "aegisadmin"},
+			setupInputField{label: "Initial SSH user", value: "root"},
+			setupInputField{label: "Admin user", value: "aegisadmin"},
 		)
 	} else {
-		fields = append(fields, struct {
-			label       string
-			placeholder string
-			value       string
-		}{label: "Admin SSH user", value: "aegisadmin"})
+		fields = append(fields, setupInputField{label: "Admin SSH user", value: "aegisadmin"})
 	}
-	fields = append(fields, struct {
-		label       string
-		placeholder string
-		value       string
-	}{label: "AegisNode private key", placeholder: defaultKeygenConfig().Path, value: defaultKeygenConfig().Path})
-
-	setupFields := make([]setupInputField, 0, len(fields))
-	for _, field := range fields {
-		setupFields = append(setupFields, setupInputField(field))
+	fields = append(fields, setupInputField{label: "AegisNode private key", placeholder: defaultKeygenConfig().Path, value: defaultKeygenConfig().Path})
+	if mode == setupModeProxy {
+		fields = append(fields,
+			setupInputField{label: "Base domain", placeholder: "example.com"},
+			setupInputField{label: "Let's Encrypt email", placeholder: "admin@example.com"},
+			setupInputField{label: "Server secret", placeholder: "long random secret", secret: true},
+		)
 	}
-	return newSetupInputs(setupFields)
+	return newSetupInputs(fields)
 }
 
 type setupInputField struct {
 	label       string
 	placeholder string
 	value       string
+	secret      bool
 }
 
 func newSetupInputs(fields []setupInputField) []textinput.Model {
@@ -553,6 +556,9 @@ func newSetupInputs(fields []setupInputField) []textinput.Model {
 		input.SetValue(field.value)
 		input.CharLimit = 256
 		input.Width = 72
+		if field.secret {
+			input.EchoMode = textinput.EchoPassword
+		}
 		inputs = append(inputs, input)
 	}
 	return inputs
@@ -610,6 +616,31 @@ func (model setupModel) configFromInputs() (setupConfig, error) {
 		if !linuxUsername.MatchString(config.AdminUser) {
 			return setupConfig{}, errors.New("admin SSH user must be a valid Linux username")
 		}
+	case setupModeProxy:
+		if config.Host == "" {
+			return setupConfig{}, errors.New("host is required")
+		}
+		config.AdminUser = firstNonEmpty(value(1), "aegisadmin")
+		config.PrivateKeyPath = expandUserPath(value(2))
+		config.BaseDomain = value(3)
+		config.LetsEncryptEmail = value(4)
+		config.PostgresPassword = value(5)
+		if config.PrivateKeyPath == "" {
+			return setupConfig{}, errors.New("private key path is required")
+		}
+		if !linuxUsername.MatchString(config.AdminUser) {
+			return setupConfig{}, errors.New("admin SSH user must be a valid Linux username")
+		}
+		if err := validateProxyConfig(proxyConfig{
+			Host:             config.Host,
+			SSHUser:          config.AdminUser,
+			PrivateKeyPath:   config.PrivateKeyPath,
+			BaseDomain:       config.BaseDomain,
+			LetsEncryptEmail: config.LetsEncryptEmail,
+			PostgresPassword: config.PostgresPassword,
+		}); err != nil {
+			return setupConfig{}, err
+		}
 	default:
 		return setupConfig{}, errors.New("unknown setup mode")
 	}
@@ -661,6 +692,18 @@ func setupPlanSummary(config setupConfig) string {
 			config.Host,
 			config.AdminUser,
 			config.PrivateKeyPath,
+		)
+	case setupModeProxy:
+		return fmt.Sprintf(
+			"- Connect to %s as %s with %s.\n- Deploy Traefik, Pangolin, and Gerbil for %s.\n- Required DNS: A %s -> %s and A *.%s -> %s.\n",
+			config.Host,
+			config.AdminUser,
+			config.PrivateKeyPath,
+			config.BaseDomain,
+			config.BaseDomain,
+			config.Host,
+			config.BaseDomain,
+			config.Host,
 		)
 	default:
 		return "- Unknown plan.\n"

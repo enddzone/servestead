@@ -23,6 +23,7 @@ Direct commands:
   aegisnode bootstrap --host <ipv4> --admin-public-key <path> --private-key <path>
   aegisnode harden --host <ipv4> --private-key <path>
   aegisnode network --host <ipv4> --private-key <path>
+  aegisnode proxy --host <ipv4> --private-key <path> --domain <domain> --email <email> --server-secret <secret>
   aegisnode doctor
 
 Run "aegisnode <command> -help" for command-specific options.
@@ -60,6 +61,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv ge
 		return err
 	case "network":
 		err := runNetwork(ctx, args[1:], stdout, stderr)
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	case "proxy":
+		err := runProxy(ctx, args[1:], stdout, stderr)
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
