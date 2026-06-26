@@ -10,9 +10,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-isatty"
 )
 
 type setupMode int
@@ -44,6 +51,7 @@ type setupConfig struct {
 
 type setupCLIOptions struct {
 	IP               string
+	ProfileID        string
 	Name             string
 	Fresh            bool
 	Yes              bool
@@ -109,14 +117,28 @@ func runSetup(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return runProfileSetupPlan(ctx, store, profile, state, config, stdout, stderr)
 	}
 
-	config, err := collectSetupConfig(stderr)
+	store, err := newDefaultProfileStore()
 	if err != nil {
 		return err
 	}
-	if err := runSetupPlan(ctx, config, stdout, stderr); err != nil {
+	if !isInteractiveWriter(stderr) {
+		return errors.New("interactive setup requires a terminal; use setup --ip with --domain, --email, and --yes for scripts")
+	}
+	request, err := collectSetupRequest(store, stderr)
+	if err != nil {
 		return err
 	}
-	return nil
+	if request.Legacy {
+		if err := runSetupPlan(ctx, request.LegacyConfig, stdout, stderr); err != nil {
+			return err
+		}
+		return nil
+	}
+	profile, state, config, err := prepareProfileSetup(request.ProfileOptions, store, stderr)
+	if err != nil {
+		return err
+	}
+	return runProfileSetupPlan(ctx, store, profile, state, config, stdout, stderr)
 }
 
 func runDoctor(args []string, stdout, stderr io.Writer) error {
@@ -138,7 +160,50 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 	return runPreflight(config, stdout)
 }
 
-func collectSetupConfig(output io.Writer) (setupConfig, error) {
+func collectSetupRequest(store ProfileStore, output io.Writer) (setupRequest, error) {
+	for {
+		profiles, err := loadProfileChoices(store)
+		if err != nil {
+			return setupRequest{}, err
+		}
+		model := newProfileSetupModel(profiles)
+		program := tea.NewProgram(model, tea.WithOutput(output))
+		finalModel, err := program.Run()
+		if err != nil {
+			return setupRequest{}, fmt.Errorf("run setup TUI: %w", err)
+		}
+		result, ok := finalModel.(profileSetupModel)
+		if !ok {
+			return setupRequest{}, errors.New("setup TUI returned an unexpected model")
+		}
+		if result.cancelled {
+			return setupRequest{}, errors.New("setup cancelled")
+		}
+		if result.deleteProfileID != "" {
+			if err := store.Delete(result.deleteProfileID); err != nil {
+				return setupRequest{}, err
+			}
+			continue
+		}
+		if result.legacy {
+			config, err := collectLegacySetupConfig(output)
+			if err != nil {
+				return setupRequest{}, err
+			}
+			return setupRequest{Legacy: true, LegacyConfig: config}, nil
+		}
+		if !result.done {
+			return setupRequest{}, errors.New("setup did not complete")
+		}
+		options, err := result.optionsFromInputs()
+		if err != nil {
+			return setupRequest{}, err
+		}
+		return setupRequest{ProfileOptions: options}, nil
+	}
+}
+
+func collectLegacySetupConfig(output io.Writer) (setupConfig, error) {
 	model := newSetupModel()
 	program := tea.NewProgram(model, tea.WithOutput(output))
 	finalModel, err := program.Run()
@@ -156,6 +221,724 @@ func collectSetupConfig(output io.Writer) (setupConfig, error) {
 		return setupConfig{}, errors.New("setup did not complete")
 	}
 	return result.config, nil
+}
+
+type setupRequest struct {
+	Legacy         bool
+	LegacyConfig   setupConfig
+	ProfileOptions setupCLIOptions
+}
+
+type profileChoice struct {
+	Profile Profile
+	State   ProfileState
+}
+
+func loadProfileChoices(store ProfileStore) ([]profileChoice, error) {
+	summaries, err := store.List()
+	if err != nil {
+		return nil, err
+	}
+	choices := make([]profileChoice, 0, len(summaries))
+	for _, summary := range summaries {
+		profile, state, err := store.Load(summary.ID)
+		if err != nil {
+			return nil, err
+		}
+		choices = append(choices, profileChoice{Profile: profile, State: state})
+	}
+	return choices, nil
+}
+
+type profileSetupScreen int
+
+const (
+	profileSetupScreenPicker profileSetupScreen = iota
+	profileSetupScreenDashboard
+	profileSetupScreenIntake
+	profileSetupScreenAdvanced
+	profileSetupScreenReview
+	profileSetupScreenDeleteConfirm
+)
+
+type profileListItem struct {
+	kind        string
+	index       int
+	title       string
+	description string
+}
+
+func (item profileListItem) Title() string       { return item.title }
+func (item profileListItem) Description() string { return item.description }
+func (item profileListItem) FilterValue() string { return item.title + " " + item.description }
+
+type profileSetupModel struct {
+	screen          profileSetupScreen
+	profiles        []profileChoice
+	profileList     list.Model
+	stageTable      table.Model
+	progress        progress.Model
+	planViewport    viewport.Model
+	help            help.Model
+	selectedIndex   int
+	deleteProfileID string
+	fresh           bool
+	inputs          []textinput.Model
+	advanced        []textinput.Model
+	focus           int
+	err             string
+	width           int
+	height          int
+	done            bool
+	legacy          bool
+	cancelled       bool
+}
+
+func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
+	items := make([]list.Item, 0, len(profiles)+2)
+	for index, choice := range profiles {
+		status := latestProfileStatus(choice.State)
+		if status == "" {
+			status = "no runs yet"
+		}
+		items = append(items, profileListItem{
+			kind:        "profile",
+			index:       index,
+			title:       firstNonEmpty(choice.Profile.Name, choice.Profile.IP),
+			description: fmt.Sprintf("%s - %s - updated %s", choice.Profile.IP, status, choice.Profile.UpdatedAt.Local().Format("2006-01-02 15:04")),
+		})
+	}
+	items = append(items,
+		profileListItem{kind: "new", title: "Set up a new server profile", description: "Collect IP, SSH key, domain, and email before running the full setup plan."},
+		profileListItem{kind: "legacy", title: "Advanced legacy setup paths", description: "Open key generation, one-off hardening, network, proxy, or doctor modes."},
+	)
+
+	delegate := list.NewDefaultDelegate()
+	delegate.SetHeight(2)
+	profileList := list.New(items, delegate, 82, 14)
+	profileList.Title = "AegisNode profiles"
+	profileList.SetShowStatusBar(false)
+	profileList.SetFilteringEnabled(false)
+	profileList.DisableQuitKeybindings()
+
+	model := profileSetupModel{
+		screen:        profileSetupScreenPicker,
+		profiles:      profiles,
+		profileList:   profileList,
+		stageTable:    newProfileStageTable(nil),
+		progress:      progress.New(progress.WithWidth(42)),
+		planViewport:  viewport.New(82, 10),
+		help:          help.New(),
+		selectedIndex: -1,
+		width:         82,
+		height:        24,
+	}
+	model.inputs = setupProfileInputs(setupCLIOptions{})
+	model.advanced = setupAdvancedInputs(setupCLIOptions{})
+	model.inputs[0].Focus()
+	return model
+}
+
+func setupProfileInputs(options setupCLIOptions) []textinput.Model {
+	return newSetupInputs([]setupInputField{
+		{label: "Server IP or hostname", placeholder: "203.0.113.10", value: options.IP},
+		{label: "AegisNode private key", placeholder: defaultKeygenConfig().Path, value: firstNonEmpty(options.PrivateKeyPath, defaultKeygenConfig().Path)},
+		{label: "Base domain", placeholder: "example.com", value: options.BaseDomain},
+		{label: "Let's Encrypt email", placeholder: "admin@example.com", value: options.LetsEncryptEmail},
+	})
+}
+
+func setupAdvancedInputs(options setupCLIOptions) []textinput.Model {
+	return newSetupInputs([]setupInputField{
+		{label: "Profile name", placeholder: "production-vps", value: options.Name},
+		{label: "Initial SSH user", value: firstNonEmpty(options.InitialSSHUser, "root")},
+		{label: "Admin SSH user", value: firstNonEmpty(options.AdminUser, "aegisadmin")},
+	})
+}
+
+func newProfileStageTable(state *ProfileState) table.Model {
+	return table.New(
+		table.WithColumns([]table.Column{
+			{Title: "Stage", Width: 16},
+			{Title: "Status", Width: 12},
+			{Title: "Last error", Width: 42},
+		}),
+		table.WithRows(profileStageRows(state)),
+		table.WithHeight(7),
+		table.WithWidth(78),
+	)
+}
+
+func profileStageRows(state *ProfileState) []table.Row {
+	labels := map[string]string{
+		"bootstrap": "Bootstrap",
+		"harden":    "Harden",
+		"network":   "Network",
+		"proxy":     "Proxy",
+	}
+	completed := map[string]bool{}
+	if state != nil {
+		completed = completedSetupStages(*state)
+	}
+	activeStages := map[string]SetupStageStatus{}
+	if state != nil {
+		if run, ok := state.Runs[state.ActiveRunID]; ok {
+			activeStages = run.Stages
+		}
+	}
+	rows := []table.Row{}
+	for _, stage := range []string{"bootstrap", "harden", "network", "proxy"} {
+		status := stageStatusPending
+		lastError := ""
+		if completed[stage] {
+			status = stageStatusComplete
+		}
+		if stageStatus, ok := activeStages[stage]; ok && stageStatus.Status != "" {
+			status = stageStatus.Status
+			lastError = stageStatus.LastError
+		}
+		rows = append(rows, table.Row{labels[stage], status, truncateForTable(lastError, 42)})
+	}
+	return rows
+}
+
+func truncateForTable(value string, width int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= width {
+		return value
+	}
+	if width <= 1 {
+		return value[:width]
+	}
+	return value[:width-1] + "."
+}
+
+func latestProfileStatus(state ProfileState) string {
+	if state.ActiveRunID == "" {
+		return ""
+	}
+	run, ok := state.Runs[state.ActiveRunID]
+	if !ok {
+		return ""
+	}
+	return run.Status
+}
+
+func profileCompletion(state *ProfileState) float64 {
+	if state == nil {
+		return 0
+	}
+	completed := 0
+	for _, done := range completedSetupStages(*state) {
+		if done {
+			completed++
+		}
+	}
+	return float64(completed) / 4
+}
+
+func (model profileSetupModel) Init() tea.Cmd {
+	return textinput.Blink
+}
+
+func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		model.width = msg.Width
+		model.height = msg.Height
+		model.profileList.SetSize(clampInt(msg.Width-4, 40, 100), clampInt(msg.Height-8, 8, 18))
+		model.planViewport.Width = clampInt(msg.Width-4, 40, 100)
+		model.progress.Width = clampInt(msg.Width-8, 24, 64)
+		return model, nil
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c":
+			model.cancelled = true
+			return model, tea.Quit
+		case "esc":
+			if model.screen == profileSetupScreenPicker {
+				model.cancelled = true
+				return model, tea.Quit
+			}
+			if model.screen == profileSetupScreenDeleteConfirm {
+				model.screen = profileSetupScreenDashboard
+				model.err = ""
+				return model, nil
+			}
+			model.screen = profileSetupScreenPicker
+			model.err = ""
+			return model, nil
+		}
+
+		switch model.screen {
+		case profileSetupScreenPicker:
+			return model.updateProfilePicker(msg)
+		case profileSetupScreenDashboard:
+			return model.updateProfileDashboard(msg)
+		case profileSetupScreenIntake:
+			return model.updateProfileInput(msg, false)
+		case profileSetupScreenAdvanced:
+			return model.updateProfileInput(msg, true)
+		case profileSetupScreenReview:
+			return model.updateProfileReview(msg)
+		case profileSetupScreenDeleteConfirm:
+			return model.updateProfileDeleteConfirm(msg)
+		default:
+			return model, nil
+		}
+	default:
+		return model, nil
+	}
+}
+
+func (model profileSetupModel) updateProfilePicker(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "enter":
+		selected, ok := model.profileList.SelectedItem().(profileListItem)
+		if !ok {
+			return model, nil
+		}
+		switch selected.kind {
+		case "legacy":
+			model.legacy = true
+			return model, tea.Quit
+		case "new":
+			model.selectedIndex = -1
+			model.fresh = false
+			model.setInputsFromOptions(setupCLIOptions{})
+			model.screen = profileSetupScreenIntake
+			return model, nil
+		case "profile":
+			model.selectedIndex = selected.index
+			model.fresh = false
+			model.setInputsFromChoice(false)
+			model.refreshDashboard()
+			model.screen = profileSetupScreenDashboard
+			return model, nil
+		}
+	}
+	var cmd tea.Cmd
+	model.profileList, cmd = model.profileList.Update(key)
+	return model, cmd
+}
+
+func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "enter", "r", "R":
+		model.err = ""
+		model.refreshPlanPreview()
+		model.screen = profileSetupScreenReview
+	case "e", "E":
+		model.err = ""
+		model.screen = profileSetupScreenIntake
+	case "a", "A":
+		model.err = ""
+		model.screen = profileSetupScreenAdvanced
+	case "f", "F":
+		model.fresh = true
+		model.setInputsFromChoice(true)
+		model.screen = profileSetupScreenIntake
+	case "x", "X":
+		model.err = ""
+		model.screen = profileSetupScreenDeleteConfirm
+	}
+	return model, nil
+}
+
+func (model profileSetupModel) updateProfileInput(key tea.KeyMsg, advanced bool) (tea.Model, tea.Cmd) {
+	inputs := model.inputs
+	if advanced {
+		inputs = model.advanced
+	}
+	switch key.String() {
+	case "tab", "down":
+		inputs[model.focus].Blur()
+		model.focus = (model.focus + 1) % len(inputs)
+		inputs[model.focus].Focus()
+		model.storeFocusedInputs(inputs, advanced)
+		return model, nil
+	case "shift+tab", "up":
+		inputs[model.focus].Blur()
+		model.focus--
+		if model.focus < 0 {
+			model.focus = len(inputs) - 1
+		}
+		inputs[model.focus].Focus()
+		model.storeFocusedInputs(inputs, advanced)
+		return model, nil
+	case "ctrl+a":
+		if !advanced {
+			model.blurInputs(false)
+			model.focus = 0
+			model.advanced[0].Focus()
+			model.screen = profileSetupScreenAdvanced
+			return model, nil
+		}
+	case "ctrl+e":
+		if advanced {
+			model.blurInputs(true)
+			model.focus = 0
+			model.inputs[0].Focus()
+			model.screen = profileSetupScreenIntake
+			return model, nil
+		}
+	case "enter":
+		if model.focus < len(inputs)-1 {
+			inputs[model.focus].Blur()
+			model.focus++
+			inputs[model.focus].Focus()
+			model.storeFocusedInputs(inputs, advanced)
+			return model, nil
+		}
+		model.storeFocusedInputs(inputs, advanced)
+		if _, err := model.optionsFromInputs(); err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		model.err = ""
+		model.refreshPlanPreview()
+		model.screen = profileSetupScreenReview
+		return model, nil
+	}
+	var cmd tea.Cmd
+	inputs[model.focus], cmd = inputs[model.focus].Update(key)
+	model.storeFocusedInputs(inputs, advanced)
+	return model, cmd
+}
+
+func (model profileSetupModel) updateProfileReview(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "enter", "y", "Y":
+		if _, err := model.optionsFromInputs(); err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		model.done = true
+		return model, tea.Quit
+	case "b", "B", "e", "E":
+		model.err = ""
+		model.focus = 0
+		model.inputs[0].Focus()
+		model.screen = profileSetupScreenIntake
+	case "a", "A":
+		model.err = ""
+		model.focus = 0
+		model.advanced[0].Focus()
+		model.screen = profileSetupScreenAdvanced
+	case "d", "D":
+		if model.selectedIndex >= 0 {
+			model.screen = profileSetupScreenDashboard
+		}
+	case "n", "N", "q":
+		model.cancelled = true
+		return model, tea.Quit
+	}
+	return model, nil
+}
+
+func (model profileSetupModel) updateProfileDeleteConfirm(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "y", "Y":
+		if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+			model.err = "no profile selected"
+			model.screen = profileSetupScreenPicker
+			return model, nil
+		}
+		model.deleteProfileID = model.profiles[model.selectedIndex].Profile.ID
+		return model, tea.Quit
+	case "n", "N", "q":
+		model.screen = profileSetupScreenDashboard
+	}
+	return model, nil
+}
+
+func (model *profileSetupModel) setInputsFromChoice(fresh bool) {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		return
+	}
+	choice := model.profiles[model.selectedIndex]
+	options := setupCLIOptions{
+		IP:               choice.Profile.IP,
+		ProfileID:        choice.Profile.ID,
+		Name:             choice.Profile.Name,
+		InitialSSHUser:   choice.Profile.InitialSSHUser,
+		AdminUser:        choice.Profile.AdminUser,
+		PrivateKeyPath:   choice.Profile.PrivateKeyPath,
+		BaseDomain:       choice.Profile.BaseDomain,
+		LetsEncryptEmail: choice.Profile.LetsEncryptEmail,
+		Fresh:            fresh,
+	}
+	if fresh {
+		options.ProfileID = ""
+		options.Name = choice.Profile.Name + " fresh"
+		if completedSetupStages(choice.State)["bootstrap"] && options.AdminUser != "" {
+			options.InitialSSHUser = options.AdminUser
+		}
+	}
+	model.setInputsFromOptions(options)
+}
+
+func (model *profileSetupModel) setInputsFromOptions(options setupCLIOptions) {
+	model.inputs = setupProfileInputs(options)
+	model.advanced = setupAdvancedInputs(options)
+	model.focus = 0
+	model.inputs[0].Focus()
+}
+
+func (model *profileSetupModel) blurInputs(advanced bool) {
+	inputs := model.inputs
+	if advanced {
+		inputs = model.advanced
+	}
+	for index := range inputs {
+		inputs[index].Blur()
+	}
+	model.storeFocusedInputs(inputs, advanced)
+}
+
+func (model *profileSetupModel) storeFocusedInputs(inputs []textinput.Model, advanced bool) {
+	if advanced {
+		model.advanced = inputs
+		return
+	}
+	model.inputs = inputs
+}
+
+func (model *profileSetupModel) refreshDashboard() {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		model.stageTable = newProfileStageTable(nil)
+		return
+	}
+	state := model.profiles[model.selectedIndex].State
+	model.stageTable = newProfileStageTable(&state)
+}
+
+func (model *profileSetupModel) refreshPlanPreview() {
+	options, err := model.optionsFromInputs()
+	if err != nil {
+		model.planViewport.SetContent(err.Error())
+		return
+	}
+	config := setupConfig{
+		Mode:               setupModeFullRun,
+		Host:               options.IP,
+		InitialSSHUser:     firstNonEmpty(options.InitialSSHUser, "root"),
+		AdminUser:          firstNonEmpty(options.AdminUser, "aegisadmin"),
+		PrivateKeyPath:     expandUserPath(firstNonEmpty(options.PrivateKeyPath, defaultKeygenConfig().Path)),
+		AdminPublicKeyPath: publicKeyPath(expandUserPath(firstNonEmpty(options.PrivateKeyPath, defaultKeygenConfig().Path))),
+		BaseDomain:         options.BaseDomain,
+		LetsEncryptEmail:   options.LetsEncryptEmail,
+		ProfileID:          "(new profile)",
+		ServerSecret:       "generated-placeholder",
+	}
+	if !options.Fresh {
+		config.ProfileID = firstNonEmpty(options.ProfileID, "(new profile)")
+	}
+	model.planViewport.SetContent(setupPlanSummary(config))
+	model.planViewport.GotoTop()
+}
+
+func (model profileSetupModel) optionsFromInputs() (setupCLIOptions, error) {
+	value := func(inputs []textinput.Model, index int) string {
+		return strings.TrimSpace(inputs[index].Value())
+	}
+	options := setupCLIOptions{
+		IP:               value(model.inputs, 0),
+		PrivateKeyPath:   expandUserPath(value(model.inputs, 1)),
+		BaseDomain:       value(model.inputs, 2),
+		LetsEncryptEmail: value(model.inputs, 3),
+		Name:             value(model.advanced, 0),
+		InitialSSHUser:   firstNonEmpty(value(model.advanced, 1), "root"),
+		AdminUser:        firstNonEmpty(value(model.advanced, 2), "aegisadmin"),
+		Fresh:            model.fresh,
+	}
+	if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
+		options.ProfileID = model.profiles[model.selectedIndex].Profile.ID
+		options.IP = model.profiles[model.selectedIndex].Profile.IP
+	}
+	config := setupConfig{
+		Mode:               setupModeFullRun,
+		Host:               options.IP,
+		InitialSSHUser:     options.InitialSSHUser,
+		AdminUser:          options.AdminUser,
+		PrivateKeyPath:     options.PrivateKeyPath,
+		AdminPublicKeyPath: publicKeyPath(options.PrivateKeyPath),
+		BaseDomain:         options.BaseDomain,
+		LetsEncryptEmail:   options.LetsEncryptEmail,
+		ServerSecret:       "generated-placeholder",
+	}
+	if err := validateFullRunConfig(config); err != nil {
+		return setupCLIOptions{}, err
+	}
+	return options, nil
+}
+
+func (model profileSetupModel) View() string {
+	var builder strings.Builder
+	builder.WriteString(setupTitleStyle.Render("AegisNode setup"))
+	builder.WriteString("\n")
+	builder.WriteString(setupHelpStyle.Render("Profile-aware full setup runs bootstrap, hardening, networking, and proxy deployment end to end."))
+	builder.WriteString("\n\n")
+
+	switch model.screen {
+	case profileSetupScreenPicker:
+		builder.WriteString(model.profileList.View())
+	case profileSetupScreenDashboard:
+		builder.WriteString(model.dashboardView())
+	case profileSetupScreenIntake:
+		builder.WriteString(model.inputView(false))
+	case profileSetupScreenAdvanced:
+		builder.WriteString(model.inputView(true))
+	case profileSetupScreenReview:
+		builder.WriteString(model.reviewView())
+	case profileSetupScreenDeleteConfirm:
+		builder.WriteString(model.deleteConfirmView())
+	}
+	if model.err != "" {
+		builder.WriteString("\n\n")
+		builder.WriteString(setupErrorStyle.Render(model.err))
+	}
+	builder.WriteString("\n\n")
+	builder.WriteString(model.help.View(profileSetupHelp{screen: model.screen, hasProfile: model.selectedIndex >= 0}))
+	return builder.String()
+}
+
+func (model profileSetupModel) dashboardView() string {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		return "No profile selected."
+	}
+	choice := model.profiles[model.selectedIndex]
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("Dashboard for %s (%s)\n\n", firstNonEmpty(choice.Profile.Name, choice.Profile.IP), choice.Profile.IP))
+	builder.WriteString(fmt.Sprintf("Domain: %s\n", firstNonEmpty(choice.Profile.BaseDomain, "(missing)")))
+	builder.WriteString(fmt.Sprintf("Email:  %s\n\n", firstNonEmpty(choice.Profile.LetsEncryptEmail, "(missing)")))
+	builder.WriteString(model.progress.ViewAs(profileCompletion(&choice.State)))
+	builder.WriteString("\n\n")
+	builder.WriteString(model.stageTable.View())
+	return builder.String()
+}
+
+func (model profileSetupModel) inputView(advanced bool) string {
+	var builder strings.Builder
+	if advanced {
+		builder.WriteString("Advanced values\n")
+		builder.WriteString(setupHelpStyle.Render("Use this only when defaults need to change."))
+		builder.WriteString("\n\n")
+		for _, input := range model.advanced {
+			builder.WriteString(input.View())
+			builder.WriteString("\n")
+		}
+		return builder.String()
+	}
+	builder.WriteString("Upfront setup intake\n")
+	builder.WriteString(setupHelpStyle.Render("All required values are collected before any remote command runs."))
+	builder.WriteString("\n\n")
+	for _, input := range model.inputs {
+		builder.WriteString(input.View())
+		builder.WriteString("\n")
+	}
+	builder.WriteString("\n")
+	builder.WriteString("Server secret: generated and saved in the profile secrets file.\n")
+	return builder.String()
+}
+
+func (model profileSetupModel) reviewView() string {
+	var builder strings.Builder
+	builder.WriteString("Review full setup plan\n\n")
+	builder.WriteString(model.planViewport.View())
+	builder.WriteString("\n")
+	if model.selectedIndex >= 0 && !model.fresh {
+		builder.WriteString("Profile action: resume selected profile.\n")
+	} else if model.fresh {
+		builder.WriteString("Profile action: create a fresh profile for this server.\n")
+	} else {
+		builder.WriteString("Profile action: create a new profile.\n")
+	}
+	builder.WriteString("Remote execution starts only after confirmation.\n")
+	return builder.String()
+}
+
+func (model profileSetupModel) deleteConfirmView() string {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		return "No profile selected."
+	}
+	profile := model.profiles[model.selectedIndex].Profile
+	var builder strings.Builder
+	builder.WriteString("Delete saved profile?\n\n")
+	builder.WriteString(fmt.Sprintf("Profile: %s\n", firstNonEmpty(profile.Name, profile.IP)))
+	builder.WriteString(fmt.Sprintf("IP:      %s\n", profile.IP))
+	builder.WriteString("\nThis removes only local profile files, saved secrets, state, and run logs. It does not change the remote server.\n")
+	return builder.String()
+}
+
+type profileSetupHelp struct {
+	screen     profileSetupScreen
+	hasProfile bool
+}
+
+func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
+	switch helpMap.screen {
+	case profileSetupScreenPicker:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "select")),
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "quit")),
+		}
+	case profileSetupScreenDashboard:
+		bindings := []key.Binding{
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "review")),
+			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
+			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "advanced")),
+		}
+		if helpMap.hasProfile {
+			bindings = append(bindings, key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "fresh")))
+			bindings = append(bindings, key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete")))
+		}
+		return bindings
+	case profileSetupScreenIntake:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "next")),
+			key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "field")),
+			key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("ctrl+a", "advanced")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	case profileSetupScreenAdvanced:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "review")),
+			key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "field")),
+			key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("ctrl+e", "intake")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	case profileSetupScreenReview:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "run")),
+			key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "edit")),
+			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "advanced")),
+			key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "cancel")),
+		}
+	case profileSetupScreenDeleteConfirm:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "delete")),
+			key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "keep")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	default:
+		return nil
+	}
+}
+
+func (helpMap profileSetupHelp) FullHelp() [][]key.Binding {
+	return [][]key.Binding{helpMap.ShortHelp()}
+}
+
+func clampInt(value, minimum, maximum int) int {
+	if value < minimum {
+		return minimum
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
 }
 
 func collectFullRunConfig(output io.Writer, config setupConfig) (setupConfig, error) {
@@ -275,7 +1058,7 @@ func (model fullRunModel) configFromInputs() (setupConfig, error) {
 }
 
 func prepareProfileSetup(options setupCLIOptions, store ProfileStore, output io.Writer) (Profile, ProfileState, setupConfig, error) {
-	if options.IP == "" {
+	if options.IP == "" && options.ProfileID == "" {
 		return Profile{}, ProfileState{}, setupConfig{}, errors.New("--ip is required for profile-aware setup")
 	}
 
@@ -297,7 +1080,7 @@ func prepareProfileSetup(options setupCLIOptions, store ProfileStore, output io.
 		ProfileID:          profile.ID,
 	}
 	if config.BaseDomain == "" || config.LetsEncryptEmail == "" {
-		if options.Yes {
+		if options.Yes || !isInteractiveWriter(output) {
 			return Profile{}, ProfileState{}, setupConfig{}, validateFullRunConfig(config)
 		}
 		var err error
@@ -335,17 +1118,82 @@ func prepareProfileSetup(options setupCLIOptions, store ProfileStore, output io.
 }
 
 func resolveSetupProfile(options setupCLIOptions, store ProfileStore) (Profile, ProfileState, error) {
+	if options.ProfileID != "" && !options.Fresh {
+		return store.Load(options.ProfileID)
+	}
 	matches, err := store.ResolveByIP(options.IP)
 	if err != nil {
 		return Profile{}, ProfileState{}, err
 	}
 	if len(matches) == 0 || options.Fresh {
-		return createSetupProfile(options, store)
+		if options.Fresh {
+			sourceProfile, sourceState, found, err := freshProfileSource(options, matches, store)
+			if err != nil {
+				return Profile{}, ProfileState{}, err
+			}
+			if found {
+				options = inheritFreshSetupOptions(options, sourceProfile, sourceState)
+				return createSetupProfile(options, store, freshProfileSeedState(sourceState))
+			}
+		}
+		return createSetupProfile(options, store, ProfileState{})
 	}
 	return store.Load(matches[0].ID)
 }
 
-func createSetupProfile(options setupCLIOptions, store ProfileStore) (Profile, ProfileState, error) {
+func freshProfileSource(options setupCLIOptions, matches []ProfileSummary, store ProfileStore) (Profile, ProfileState, bool, error) {
+	if options.ProfileID != "" {
+		profile, state, err := store.Load(options.ProfileID)
+		if err != nil {
+			return Profile{}, ProfileState{}, false, err
+		}
+		return profile, state, true, nil
+	}
+	if len(matches) == 0 {
+		return Profile{}, ProfileState{}, false, nil
+	}
+	profile, state, err := store.Load(matches[0].ID)
+	if err != nil {
+		return Profile{}, ProfileState{}, false, err
+	}
+	return profile, state, true, nil
+}
+
+func inheritFreshSetupOptions(options setupCLIOptions, source Profile, sourceState ProfileState) setupCLIOptions {
+	options.IP = firstNonEmpty(options.IP, source.IP)
+	options.AdminUser = firstNonEmpty(options.AdminUser, source.AdminUser, "aegisadmin")
+	if completedSetupStages(sourceState)["bootstrap"] {
+		options.InitialSSHUser = firstNonEmpty(options.InitialSSHUser, options.AdminUser, source.AdminUser, source.InitialSSHUser, "root")
+	} else {
+		options.InitialSSHUser = firstNonEmpty(options.InitialSSHUser, source.InitialSSHUser, "root")
+	}
+	options.PrivateKeyPath = firstNonEmpty(options.PrivateKeyPath, source.PrivateKeyPath)
+	options.BaseDomain = firstNonEmpty(options.BaseDomain, source.BaseDomain)
+	options.LetsEncryptEmail = firstNonEmpty(options.LetsEncryptEmail, source.LetsEncryptEmail)
+	return options
+}
+
+func freshProfileSeedState(sourceState ProfileState) ProfileState {
+	if !completedSetupStages(sourceState)["bootstrap"] {
+		return ProfileState{}
+	}
+	runID := "seed-" + newSetupRunID()
+	now := time.Now().UTC()
+	return ProfileState{
+		ActiveRunID: runID,
+		Runs: map[string]SetupRun{
+			runID: {
+				ID:        runID,
+				Status:    runStatusComplete,
+				Stages:    map[string]SetupStageStatus{"bootstrap": {Status: stageStatusComplete, LastEnded: now}},
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+	}
+}
+
+func createSetupProfile(options setupCLIOptions, store ProfileStore, seedState ProfileState) (Profile, ProfileState, error) {
 	profile, err := store.Create(Profile{
 		Name:             firstNonEmpty(options.Name, options.IP),
 		IP:               options.IP,
@@ -361,6 +1209,15 @@ func createSetupProfile(options setupCLIOptions, store ProfileStore) (Profile, P
 	loadedProfile, state, err := store.Load(profile.ID)
 	if err != nil {
 		return Profile{}, ProfileState{}, err
+	}
+	if len(seedState.Runs) > 0 {
+		state = seedState
+		if state.Runs == nil {
+			state.Runs = map[string]SetupRun{}
+		}
+		if err := store.Save(loadedProfile, state); err != nil {
+			return Profile{}, ProfileState{}, err
+		}
 	}
 	return loadedProfile, state, nil
 }
@@ -715,6 +1572,14 @@ func runPreflight(config setupConfig, stdout io.Writer) error {
 		return errors.New("preflight checks failed")
 	}
 	return nil
+}
+
+func isInteractiveWriter(writer io.Writer) bool {
+	file, ok := writer.(*os.File)
+	if !ok {
+		return false
+	}
+	return isatty.IsTerminal(file.Fd()) || isatty.IsCygwinTerminal(file.Fd())
 }
 
 func preflightChecks(config setupConfig) []preflightCheck {

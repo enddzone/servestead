@@ -39,6 +39,20 @@
         .tab-panel { display: none; }
         .tab-panel.active { display: block; }
         .code-scroll { max-height: 360px; }
+        .tab-btn:focus-visible,
+        button:focus-visible,
+        input[type="checkbox"]:focus-visible {
+            outline: 3px solid rgba(22, 99, 122, 0.35);
+            outline-offset: 2px;
+        }
+        label:has(input[type="checkbox"]:checked) {
+            border-color: rgba(35, 113, 91, 0.35);
+            background: rgba(35, 113, 91, 0.06);
+        }
+        label:has(input[type="checkbox"]:checked) input + span,
+        label:has(input[type="checkbox"]:checked) {
+            color: #172033;
+        }
     </style>
 </head>
 <body class="min-h-screen font-sans">
@@ -74,38 +88,42 @@
                     <span class="text-slate-500">Checklist</span>
                     <span id="task-ratio" class="font-mono font-semibold text-ink">0 / 24</span>
                 </div>
-                <button onclick="resetChecklist()" class="mt-4 w-full rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold uppercase tracking-wide text-rose-700 hover:bg-rose-100">
+                <button onclick="restoreBaseline()" class="mt-4 w-full rounded-lg border border-moss/30 bg-moss/10 px-3 py-2 text-xs font-bold uppercase tracking-wide text-moss hover:bg-moss/15">
                     <i class="fa-solid fa-rotate-left mr-1"></i>
-                    Reset plan progress
+                    Restore implementation baseline
+                </button>
+                <button onclick="clearChecklist()" class="mt-2 w-full rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold uppercase tracking-wide text-rose-700 hover:bg-rose-100">
+                    <i class="fa-solid fa-rotate-left mr-1"></i>
+                    Clear all progress
                 </button>
             </section>
 
-            <nav class="rounded-lg border border-line bg-panel p-2 shadow-sm" aria-label="Plan sections">
-                <button id="btn-overview" onclick="switchTab('overview')" class="tab-btn flex w-full items-center justify-between rounded-lg bg-harbor px-3 py-3 text-left text-sm font-semibold text-white">
+            <nav class="rounded-lg border border-line bg-panel p-2 shadow-sm" role="tablist" aria-label="Plan sections">
+                <button id="btn-overview" role="tab" aria-selected="true" aria-controls="tab-content-overview" onclick="switchTab('overview')" class="tab-btn flex w-full items-center justify-between rounded-lg bg-harbor px-3 py-3 text-left text-sm font-semibold text-white">
                     <span><i class="fa-solid fa-compass mr-2"></i>Overview</span>
                     <i class="fa-solid fa-chevron-right text-xs"></i>
                 </button>
-                <button id="btn-phase1" onclick="switchTab('phase1')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
+                <button id="btn-phase1" role="tab" aria-selected="false" aria-controls="tab-content-phase1" onclick="switchTab('phase1')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
                     <span><i class="fa-solid fa-folder-tree mr-2 text-harbor"></i>Profile Store</span>
                     <i class="fa-solid fa-chevron-right text-xs"></i>
                 </button>
-                <button id="btn-phase2" onclick="switchTab('phase2')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
+                <button id="btn-phase2" role="tab" aria-selected="false" aria-controls="tab-content-phase2" onclick="switchTab('phase2')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
                     <span><i class="fa-solid fa-keyboard mr-2 text-moss"></i>Upfront Intake</span>
                     <i class="fa-solid fa-chevron-right text-xs"></i>
                 </button>
-                <button id="btn-phase3" onclick="switchTab('phase3')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
+                <button id="btn-phase3" role="tab" aria-selected="false" aria-controls="tab-content-phase3" onclick="switchTab('phase3')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
                     <span><i class="fa-solid fa-terminal mr-2 text-marigold"></i>Useful TUI</span>
                     <i class="fa-solid fa-chevron-right text-xs"></i>
                 </button>
-                <button id="btn-phase4" onclick="switchTab('phase4')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
+                <button id="btn-phase4" role="tab" aria-selected="false" aria-controls="tab-content-phase4" onclick="switchTab('phase4')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
                     <span><i class="fa-solid fa-gauge-high mr-2 text-berry"></i>Task Events</span>
                     <i class="fa-solid fa-chevron-right text-xs"></i>
                 </button>
-                <button id="btn-phase5" onclick="switchTab('phase5')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
+                <button id="btn-phase5" role="tab" aria-selected="false" aria-controls="tab-content-phase5" onclick="switchTab('phase5')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
                     <span><i class="fa-solid fa-user-secret mr-2 text-harbor"></i>Secrets</span>
                     <i class="fa-solid fa-chevron-right text-xs"></i>
                 </button>
-                <button id="btn-phase6" onclick="switchTab('phase6')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
+                <button id="btn-phase6" role="tab" aria-selected="false" aria-controls="tab-content-phase6" onclick="switchTab('phase6')" class="tab-btn mt-1 flex w-full items-center justify-between rounded-lg px-3 py-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-100">
                     <span><i class="fa-solid fa-vial-circle-check mr-2 text-moss"></i>Tests & Docs</span>
                     <i class="fa-solid fa-chevron-right text-xs"></i>
                 </button>
@@ -119,7 +137,7 @@
         </aside>
 
         <section class="min-w-0 space-y-6">
-            <section id="tab-content-overview" class="tab-panel active space-y-6">
+            <section id="tab-content-overview" role="tabpanel" aria-labelledby="btn-overview" class="tab-panel active space-y-6">
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
                     <span class="inline-flex items-center rounded-lg bg-harbor/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-harbor">Plan overview</span>
                     <h1 class="mt-4 max-w-4xl text-3xl font-extrabold tracking-tight text-ink">Make guided setup one command, profile-aware, and observable.</h1>
@@ -149,6 +167,33 @@
                         </div>
                         <h2 class="font-bold text-ink">Verification style</h2>
                         <p class="mt-2 text-sm leading-6 text-slate-600">Each implementation phase includes product acceptance criteria plus tests that can run without a live VPS where possible.</p>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                            <h2 class="text-lg font-extrabold text-ink">Final Implementation Snapshot</h2>
+                            <p class="mt-2 max-w-3xl text-sm leading-6 text-slate-600">The backend foundation and profile-first setup TUI are in place. The remaining product gap is a fully live Bubble Tea run screen; remote execution still streams through the existing synchronous runner while structured events persist profile state and logs.</p>
+                        </div>
+                        <span class="inline-flex shrink-0 items-center rounded-lg bg-marigold/10 px-3 py-2 text-xs font-bold uppercase tracking-wide text-marigold">
+                            <i class="fa-solid fa-location-dot mr-2"></i>
+                            Next: live run view
+                        </span>
+                    </div>
+                    <div class="mt-5 grid gap-3 md:grid-cols-3">
+                        <div class="rounded-lg border border-moss/30 bg-moss/5 p-4">
+                            <p class="text-xs font-bold uppercase tracking-wide text-moss">Backend ready</p>
+                            <p class="mt-2 text-sm leading-6 text-slate-600">Profile storage, full-run setup, structured events, secrets, state updates, logs, and compatibility tests.</p>
+                        </div>
+                        <div class="rounded-lg border border-marigold/30 bg-marigold/5 p-4">
+                            <p class="text-xs font-bold uppercase tracking-wide text-marigold">TUI ready</p>
+                            <p class="mt-2 text-sm leading-6 text-slate-600">No-arg setup now opens profile picking, dashboard, upfront intake, advanced edits, and full plan review.</p>
+                        </div>
+                        <div class="rounded-lg border border-berry/30 bg-berry/5 p-4">
+                            <p class="text-xs font-bold uppercase tracking-wide text-berry">Residual gap</p>
+                            <p class="mt-2 text-sm leading-6 text-slate-600">The run itself is still synchronous stdout/stderr output rather than a live spinner/log viewport owned by Bubble Tea.</p>
+                        </div>
                     </div>
                 </div>
 
@@ -232,7 +277,7 @@
 
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
                     <h2 class="text-lg font-extrabold text-ink">Phased Success Criteria</h2>
-                    <p class="mt-2 text-sm leading-6 text-slate-600">Repository status after the backend pass: tasks 1, 2, 6, 7, 8, 11, and 17-24 are implemented and covered by `go test ./...`. Tasks 3, 5, and 9 are partially implemented by backend profile resolution and `--fresh`, but still need the profile picker/dashboard UI. Task 4 and tasks 10, 12-16 remain the primary UI work.</p>
+                    <p class="mt-2 text-sm leading-6 text-slate-600">Repository status after the implementation pass: 22 of 24 checklist items are implemented and covered by `go test ./...`. The open items are the fully live in-TUI run screen and inline log viewport; execution currently uses the existing synchronous runner/output path while persisting structured task events.</p>
                     <div class="mt-4 grid gap-3 md:grid-cols-2">
                         <label class="flex gap-3 rounded-lg border border-line p-3 text-sm"><input id="task-1" type="checkbox" onchange="toggleTask('task-1')" class="mt-1"> User can run `aegisnode setup --ip X` and execute a full setup plan from one command.</label>
                         <label class="flex gap-3 rounded-lg border border-line p-3 text-sm"><input id="task-2" type="checkbox" onchange="toggleTask('task-2')" class="mt-1"> All required values are collected before remote execution starts.</label>
@@ -257,21 +302,35 @@
                             </ul>
                         </div>
                         <div class="rounded-lg border border-marigold/30 bg-marigold/5 p-4">
-                            <h3 class="font-bold text-marigold">UI work still needed</h3>
+                            <h3 class="font-bold text-marigold">Implemented UI capabilities</h3>
                             <ul class="mt-3 space-y-2 text-sm leading-6 text-slate-600">
-                                <li>Replace the legacy mode-first setup TUI with a higher-level app model: profile picker, upfront intake, plan review, dashboard, run view, and failure/retry states.</li>
-                                <li>Use `bubbles/list` for profiles and advanced choices, `bubbles/table` for stage state, `bubbles/progress` plus spinner for active runs, `bubbles/viewport` for logs, and `bubbles/help` for key hints.</li>
-                                <li>Expose completed/pending/failed/skipped stages from `ProfileState` instead of parsing human-readable output.</li>
-                                <li>Show idempotent second-run behavior in the dashboard: completed stages should appear as skipped or complete, not as rerun work.</li>
-                                <li>Add an intentional advanced edit path for users who need to change SSH users, private key path, domain, email, skipped stages, or fresh profile creation.</li>
-                                <li>Keep non-interactive/script behavior intact: direct commands and `setup --ip --domain ... --email ... --yes` should not depend on the TUI.</li>
+                                <li>No-arg `setup` now opens a profile-first app model with profile picker, dashboard, upfront intake, advanced edit path, and full plan review.</li>
+                                <li>The TUI uses `bubbles/list`, `bubbles/table`, `bubbles/progress`, `bubbles/viewport`, and `bubbles/help`/`key` components.</li>
+                                <li>Dashboard stage rows are rendered from `ProfileState` rather than parsing human-readable output.</li>
+                                <li>Fresh profile creation, profile switching, and advanced SSH/profile edits are intentional user actions.</li>
+                                <li>Direct commands and scripted `setup --ip --domain ... --email ... --yes` remain independent of the TUI.</li>
+                                <li>Non-TTY callers receive a clear scripted-use error instead of a broken interactive session.</li>
                             </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
+                    <h2 class="text-lg font-extrabold text-ink">Remaining Hardening</h2>
+                    <div class="mt-4 grid gap-4 md:grid-cols-2">
+                        <div class="rounded-lg border border-line p-4">
+                            <h3 class="font-bold text-ink">Start here</h3>
+                            <p class="mt-2 text-sm leading-6 text-slate-600">Move remote execution into a Bubble Tea command loop if a live spinner, task list, and scrollback log viewport are required during the run.</p>
+                        </div>
+                        <div class="rounded-lg border border-line p-4">
+                            <h3 class="font-bold text-ink">Verify here</h3>
+                            <p class="mt-2 text-sm leading-6 text-slate-600">Keep using fake profile stores and fake task reporters so live-run UI behavior can be tested without a VPS. Keep `go test ./...` as the release gate.</p>
                         </div>
                     </div>
                 </div>
             </section>
 
-            <section id="tab-content-phase1" class="tab-panel space-y-6">
+            <section id="tab-content-phase1" role="tabpanel" aria-labelledby="btn-phase1" class="tab-panel space-y-6">
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
                     <span class="inline-flex items-center rounded-lg bg-harbor/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-harbor">Phase 1</span>
                     <h1 class="mt-4 text-2xl font-extrabold text-ink">Build the Profile Store</h1>
@@ -312,7 +371,7 @@
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
                     <div class="flex items-center justify-between gap-3">
                         <h2 class="text-lg font-bold text-ink">Code Direction</h2>
-                        <button onclick="copyToClipboard('code-profile')" class="rounded-lg bg-harbor px-3 py-2 text-xs font-bold uppercase tracking-wide text-white">Copy</button>
+                        <button onclick="copyToClipboard('code-profile')" aria-label="Copy profile code" class="rounded-lg bg-harbor px-3 py-2 text-xs font-bold uppercase tracking-wide text-white">Copy</button>
                     </div>
                     <pre class="code-scroll mt-4 overflow-auto rounded-lg bg-slate-950 p-4 text-xs text-slate-100"><code id="code-profile">type Profile struct {
     ID                string    `json:"id"`
@@ -357,7 +416,7 @@ type ProfileStore interface {
                 </div>
             </section>
 
-            <section id="tab-content-phase2" class="tab-panel space-y-6">
+            <section id="tab-content-phase2" role="tabpanel" aria-labelledby="btn-phase2" class="tab-panel space-y-6">
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
                     <span class="inline-flex items-center rounded-lg bg-moss/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-moss">Phase 2</span>
                     <h1 class="mt-4 text-2xl font-extrabold text-ink">Collect Upfront Inputs and Build the Run Plan</h1>
@@ -408,7 +467,7 @@ type ProfileStore interface {
                 </div>
             </section>
 
-            <section id="tab-content-phase3" class="tab-panel space-y-6">
+            <section id="tab-content-phase3" role="tabpanel" aria-labelledby="btn-phase3" class="tab-panel space-y-6">
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
                     <span class="inline-flex items-center rounded-lg bg-marigold/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-marigold">Phase 3</span>
                     <h1 class="mt-4 text-2xl font-extrabold text-ink">Make the TUI Operationally Useful</h1>
@@ -459,7 +518,7 @@ type ProfileStore interface {
                 </div>
             </section>
 
-            <section id="tab-content-phase4" class="tab-panel space-y-6">
+            <section id="tab-content-phase4" role="tabpanel" aria-labelledby="btn-phase4" class="tab-panel space-y-6">
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
                     <span class="inline-flex items-center rounded-lg bg-berry/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-berry">Phase 4</span>
                     <h1 class="mt-4 text-2xl font-extrabold text-ink">Convert Task Execution to Structured Events</h1>
@@ -469,7 +528,7 @@ type ProfileStore interface {
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
                     <div class="flex items-center justify-between gap-3">
                         <h2 class="text-lg font-bold text-ink">Code Direction</h2>
-                        <button onclick="copyToClipboard('code-events')" class="rounded-lg bg-harbor px-3 py-2 text-xs font-bold uppercase tracking-wide text-white">Copy</button>
+                        <button onclick="copyToClipboard('code-events')" aria-label="Copy task event code" class="rounded-lg bg-harbor px-3 py-2 text-xs font-bold uppercase tracking-wide text-white">Copy</button>
                     </div>
                     <pre class="code-scroll mt-4 overflow-auto rounded-lg bg-slate-950 p-4 text-xs text-slate-100"><code id="code-events">type TaskEventType string
 
@@ -536,7 +595,7 @@ func runStageWithReporter(ctx context.Context, client remoteClient, sshUser stri
                 </div>
             </section>
 
-            <section id="tab-content-phase5" class="tab-panel space-y-6">
+            <section id="tab-content-phase5" role="tabpanel" aria-labelledby="btn-phase5" class="tab-panel space-y-6">
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
                     <span class="inline-flex items-center rounded-lg bg-harbor/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-harbor">Phase 5</span>
                     <h1 class="mt-4 text-2xl font-extrabold text-ink">Generate and Persist Secrets Safely</h1>
@@ -574,7 +633,7 @@ func runStageWithReporter(ctx context.Context, client remoteClient, sshUser stri
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
                     <div class="flex items-center justify-between gap-3">
                         <h2 class="text-lg font-bold text-ink">Code Direction</h2>
-                        <button onclick="copyToClipboard('code-secret')" class="rounded-lg bg-harbor px-3 py-2 text-xs font-bold uppercase tracking-wide text-white">Copy</button>
+                        <button onclick="copyToClipboard('code-secret')" aria-label="Copy secret code" class="rounded-lg bg-harbor px-3 py-2 text-xs font-bold uppercase tracking-wide text-white">Copy</button>
                     </div>
                     <pre class="code-scroll mt-4 overflow-auto rounded-lg bg-slate-950 p-4 text-xs text-slate-100"><code id="code-secret">func generateServerSecret() (string, error) {
     raw := make([]byte, 32)
@@ -602,7 +661,7 @@ func (secrets *ProfileSecrets) EnsureServerSecret() error {
                 </div>
             </section>
 
-            <section id="tab-content-phase6" class="tab-panel space-y-6">
+            <section id="tab-content-phase6" role="tabpanel" aria-labelledby="btn-phase6" class="tab-panel space-y-6">
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
                     <span class="inline-flex items-center rounded-lg bg-moss/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-moss">Phase 6</span>
                     <h1 class="mt-4 text-2xl font-extrabold text-ink">Verification, Documentation, and Release Path</h1>
@@ -644,7 +703,7 @@ func (secrets *ProfileSecrets) EnsureServerSecret() error {
 
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
                     <h2 class="text-lg font-bold text-ink">Release Sequence</h2>
-                    <p class="mt-3 text-sm leading-6 text-slate-600">Current release status: steps 1, 2, 3, and 5 are complete for the backend implementation. Step 4 is the next chat session's primary entry point.</p>
+                    <p class="mt-3 text-sm leading-6 text-slate-600">Current release status: steps 1, 2, 3, and 5 are complete, and step 4 is implemented for profile selection, intake, review, dashboard, advanced edits, and non-TTY fallback. The remaining step 4 gap is the optional live in-TUI run/log screen.</p>
                     <ol class="mt-4 space-y-3 text-sm leading-6 text-slate-600">
                         <li><span class="font-bold text-ink">1.</span> Merge the profile store and tests while keeping the old setup UI functional.</li>
                         <li><span class="font-bold text-ink">2.</span> Add profile-aware full-run field derivation and generated server secrets.</li>
@@ -661,22 +720,34 @@ func (secrets *ProfileSecrets) EnsureServerSecret() error {
 
     <script>
         const totalTasks = 24;
-        const backendCompletedTasks = new Set(["task-1", "task-2", "task-6", "task-7", "task-8", "task-11", "task-17", "task-18", "task-19", "task-20", "task-21", "task-22", "task-23", "task-24"]);
+        const implementedTasks = new Set(["task-1", "task-2", "task-3", "task-5", "task-6", "task-7", "task-8", "task-9", "task-10", "task-11", "task-12", "task-13", "task-15", "task-16", "task-17", "task-18", "task-19", "task-20", "task-21", "task-22", "task-23", "task-24"]);
         let checklistState = {};
 
+        function baselineChecklistState() {
+            return Object.fromEntries([...implementedTasks].map(taskId => [taskId, true]));
+        }
+
         function switchTab(tab) {
-            document.querySelectorAll(".tab-panel").forEach(panel => panel.classList.remove("active"));
+            document.querySelectorAll(".tab-panel").forEach(panel => {
+                panel.classList.remove("active");
+                panel.hidden = true;
+            });
             const target = document.getElementById(`tab-content-${tab}`);
-            if (target) target.classList.add("active");
+            if (target) {
+                target.classList.add("active");
+                target.hidden = false;
+            }
 
             document.querySelectorAll(".tab-btn").forEach(button => {
                 button.classList.remove("bg-harbor", "text-white");
                 button.classList.add("text-slate-600", "hover:bg-slate-100");
+                button.setAttribute("aria-selected", "false");
             });
             const activeButton = document.getElementById(`btn-${tab}`);
             if (activeButton) {
                 activeButton.classList.add("bg-harbor", "text-white");
                 activeButton.classList.remove("text-slate-600", "hover:bg-slate-100");
+                activeButton.setAttribute("aria-selected", "true");
             }
             window.scrollTo({ top: 0, behavior: "smooth" });
         }
@@ -684,9 +755,9 @@ func (secrets *ProfileSecrets) EnsureServerSecret() error {
         function loadChecklist() {
             try {
                 const savedState = localStorage.getItem("aegisnode_ux_plan_checklist");
-                checklistState = savedState ? JSON.parse(savedState) : Object.fromEntries([...backendCompletedTasks].map(taskId => [taskId, true]));
+                checklistState = savedState ? JSON.parse(savedState) : baselineChecklistState();
             } catch (error) {
-                checklistState = {};
+                checklistState = baselineChecklistState();
             }
             for (let i = 1; i <= totalTasks; i++) {
                 const checkbox = document.getElementById(`task-${i}`);
@@ -703,15 +774,26 @@ func (secrets *ProfileSecrets) EnsureServerSecret() error {
             updateProgress();
         }
 
-        function resetChecklist() {
+        function restoreBaseline() {
+            checklistState = baselineChecklistState();
+            localStorage.setItem("aegisnode_ux_plan_checklist", JSON.stringify(checklistState));
+            for (let i = 1; i <= totalTasks; i++) {
+                const checkbox = document.getElementById(`task-${i}`);
+                if (checkbox) checkbox.checked = !!checklistState[`task-${i}`];
+            }
+            updateProgress();
+            showToast("Implementation baseline restored");
+        }
+
+        function clearChecklist() {
             checklistState = {};
-            localStorage.removeItem("aegisnode_ux_plan_checklist");
+            localStorage.setItem("aegisnode_ux_plan_checklist", JSON.stringify(checklistState));
             for (let i = 1; i <= totalTasks; i++) {
                 const checkbox = document.getElementById(`task-${i}`);
                 if (checkbox) checkbox.checked = false;
             }
             updateProgress();
-            showToast("Progress reset");
+            showToast("Progress cleared");
         }
 
         function updateProgress() {
@@ -735,11 +817,14 @@ func (secrets *ProfileSecrets) EnsureServerSecret() error {
             } catch (error) {
                 const textArea = document.createElement("textarea");
                 textArea.value = text;
+                textArea.setAttribute("readonly", "");
+                textArea.style.position = "fixed";
+                textArea.style.left = "-9999px";
                 document.body.appendChild(textArea);
                 textArea.select();
-                document.execCommand("copy");
+                const copied = document.execCommand("copy");
                 document.body.removeChild(textArea);
-                showToast("Copied");
+                showToast(copied ? "Copied" : "Copy failed");
             }
         }
 
@@ -749,6 +834,10 @@ func (secrets *ProfileSecrets) EnsureServerSecret() error {
             toast.classList.remove("hidden");
             setTimeout(() => toast.classList.add("hidden"), 1600);
         }
+
+        document.querySelectorAll(".tab-panel:not(.active)").forEach(panel => {
+            panel.hidden = true;
+        });
 
         loadChecklist();
     </script>

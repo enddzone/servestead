@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +94,34 @@ func TestProfileStoreCorruptJSONNamesPath(t *testing.T) {
 	_, _, err := store.Load("broken")
 	if err == nil || !strings.Contains(err.Error(), profilePath) {
 		t.Fatalf("corrupt JSON error did not name path: %v", err)
+	}
+}
+
+func TestProfileStoreDeletesProfileDirectory(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{ID: "old-profile", IP: "203.0.113.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSecrets(profile.ID, ProfileSecrets{ServerSecret: "secret"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendRunEvent(profile.ID, "run-1", TaskEvent{Type: TaskStarted, RunID: "run-1", Stage: "bootstrap", Time: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Delete(profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Load(profile.ID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted profile should not load: %v", err)
+	}
+	summaries, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 0 {
+		t.Fatalf("deleted profile still listed: %+v", summaries)
 	}
 }
 

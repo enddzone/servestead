@@ -66,6 +66,8 @@ Profiles are keyed by generated profile IDs, so starting fresh for a reused IP p
 bin/aegisnode setup --ip 203.0.113.10 --fresh
 ```
 
+When a fresh profile is created from an existing saved profile that already completed bootstrap, AegisNode treats administrative access as already present and continues with the remaining setup stages using the saved admin user. This avoids trying to log in as `root` on hardened servers where root SSH has already been disabled.
+
 For scripts or repeatable smoke tests, provide all upfront values explicitly:
 
 ```sh
@@ -77,7 +79,7 @@ bin/aegisnode setup \
   --yes
 ```
 
-Running `setup` without `--ip` still opens the terminal UI for the older guided paths: prepare the AegisNode SSH key, set up and harden an existing VPS, harden an already set-up VPS, configure Docker networking and UFW, deploy the Pangolin reverse proxy stack, or run local preflight checks only. Setup does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
+Running `setup` without `--ip` opens the profile-first terminal UI. It lists saved profiles, shows their stage dashboard, collects missing full-run values before any remote command runs, and lets you review the plan before execution. From a saved profile dashboard, press `x` to delete only the local saved profile, secrets, state, and run logs; this does not change the remote server. The older one-off guided paths remain available from the advanced legacy setup entry. Setup does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
 
 For a quick preflight check without opening the TUI:
 

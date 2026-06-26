@@ -96,6 +96,7 @@ type ProfileStore interface {
 	Create(Profile) (Profile, error)
 	Load(id string) (Profile, ProfileState, error)
 	Save(Profile, ProfileState) error
+	Delete(id string) error
 	LoadSecrets(id string) (ProfileSecrets, error)
 	SaveSecrets(id string, secrets ProfileSecrets) error
 	AppendRunEvent(profileID string, runID string, event TaskEvent) error
@@ -231,6 +232,16 @@ func (store *fileProfileStore) Save(profile Profile, state ProfileState) error {
 		return err
 	}
 	return nil
+}
+
+func (store *fileProfileStore) Delete(id string) error {
+	if id == "" {
+		return errors.New("profile ID is required")
+	}
+	if filepath.Base(id) != id || id == "." || id == ".." {
+		return errors.New("profile ID must not contain path separators")
+	}
+	return os.RemoveAll(store.profileDirectory(id))
 }
 
 func (store *fileProfileStore) LoadSecrets(id string) (ProfileSecrets, error) {

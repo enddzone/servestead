@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestRunPreflightPassesWithRequiredKeys(t *testing.T) {
@@ -51,6 +53,14 @@ func TestRunPreflightFailsWhenRequiredKeyIsMissing(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "[fail] private key") {
 		t.Fatalf("missing failed key check in output:\n%s", output.String())
+	}
+}
+
+func TestRunSetupWithoutIPRequiresTerminal(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := runSetup(context.Background(), nil, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "interactive setup requires a terminal") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -274,6 +284,302 @@ func TestPrepareProfileSetupGeneratesPersistentSecret(t *testing.T) {
 	}
 	if secondConfig.ServerSecret != config.ServerSecret {
 		t.Fatalf("setup did not reuse saved secret")
+	}
+}
+
+func TestProfileSetupModelResumesSelectedProfile(t *testing.T) {
+	choice := profileChoice{
+		Profile: Profile{
+			ID:               "profile-1",
+			Name:             "production",
+			IP:               "203.0.113.10",
+			InitialSSHUser:   "root",
+			AdminUser:        "aegisadmin",
+			PrivateKeyPath:   "/tmp/aegis-key",
+			BaseDomain:       "example.com",
+			LetsEncryptEmail: "admin@example.com",
+		},
+		State: ProfileState{
+			ActiveRunID: "run-1",
+			Runs: map[string]SetupRun{
+				"run-1": {
+					ID:     "run-1",
+					Status: runStatusComplete,
+					Stages: map[string]SetupStageStatus{
+						"bootstrap": {Status: stageStatusComplete},
+					},
+				},
+			},
+		},
+	}
+	model := newProfileSetupModel([]profileChoice{choice})
+	model.selectedIndex = 0
+	model.setInputsFromChoice(false)
+	model.inputs[0].SetValue("198.51.100.20")
+
+	options, err := model.optionsFromInputs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.ProfileID != "profile-1" || options.IP != "203.0.113.10" {
+		t.Fatalf("selected profile should preserve profile identity and IP: %+v", options)
+	}
+}
+
+func TestProfileSetupModelRendersDashboardFromProfileState(t *testing.T) {
+	state := ProfileState{
+		ActiveRunID: "run-1",
+		Runs: map[string]SetupRun{
+			"run-1": {
+				ID:     "run-1",
+				Status: runStatusFailed,
+				Stages: map[string]SetupStageStatus{
+					"bootstrap": {Status: stageStatusComplete},
+					"harden":    {Status: stageStatusFailed, LastError: "ufw command failed"},
+					"network":   {Status: stageStatusPending},
+					"proxy":     {Status: stageStatusPending},
+				},
+			},
+		},
+	}
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID:               "profile-1",
+			Name:             "production",
+			IP:               "203.0.113.10",
+			PrivateKeyPath:   "/tmp/aegis-key",
+			BaseDomain:       "example.com",
+			LetsEncryptEmail: "admin@example.com",
+		},
+		State: state,
+	}})
+	model.selectedIndex = 0
+	model.refreshDashboard()
+	model.screen = profileSetupScreenDashboard
+	view := model.View()
+	for _, expected := range []string{"Dashboard for production", "Bootstrap", "complete", "Harden", "failed", "ufw command failed"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("dashboard missing %q:\n%s", expected, view)
+		}
+	}
+}
+
+func TestProfileSetupModelCollectsNewProfileInputs(t *testing.T) {
+	model := newProfileSetupModel(nil)
+	model.setInputsFromOptions(setupCLIOptions{})
+	values := []string{"203.0.113.10", "/tmp/aegis-key", "example.com", "admin@example.com"}
+	for index, value := range values {
+		model.inputs[index].SetValue(value)
+	}
+	model.advanced[0].SetValue("production")
+	model.advanced[1].SetValue("ubuntu")
+	model.advanced[2].SetValue("aegisadmin")
+
+	options, err := model.optionsFromInputs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.ProfileID != "" || options.IP != "203.0.113.10" || options.Name != "production" {
+		t.Fatalf("unexpected new profile options: %+v", options)
+	}
+	if options.InitialSSHUser != "ubuntu" || options.AdminUser != "aegisadmin" {
+		t.Fatalf("unexpected advanced users: %+v", options)
+	}
+}
+
+func TestProfileSetupModelFreshUsesAdminAsInitialUser(t *testing.T) {
+	choice := profileChoice{
+		Profile: Profile{
+			ID:               "profile-1",
+			Name:             "production",
+			IP:               "203.0.113.10",
+			InitialSSHUser:   "root",
+			AdminUser:        "aegisnode",
+			PrivateKeyPath:   "/tmp/aegis-key",
+			BaseDomain:       "example.com",
+			LetsEncryptEmail: "admin@example.com",
+		},
+		State: ProfileState{
+			ActiveRunID: "run-1",
+			Runs: map[string]SetupRun{
+				"run-1": {
+					ID:     "run-1",
+					Status: runStatusComplete,
+					Stages: map[string]SetupStageStatus{
+						"bootstrap": {Status: stageStatusComplete},
+					},
+				},
+			},
+		},
+	}
+	model := newProfileSetupModel([]profileChoice{choice})
+	model.selectedIndex = 0
+	model.setInputsFromChoice(false)
+
+	updatedModel, _ := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	result := updatedModel.(profileSetupModel)
+	options, err := result.optionsFromInputs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.Fresh || options.ProfileID != "profile-1" {
+		t.Fatalf("fresh setup should keep source profile id for seeding: %+v", options)
+	}
+	if options.InitialSSHUser != "aegisnode" || options.AdminUser != "aegisnode" {
+		t.Fatalf("fresh setup should use admin user for existing server login: %+v", options)
+	}
+}
+
+func TestProfileSetupModelDeleteConfirmation(t *testing.T) {
+	choice := profileChoice{
+		Profile: Profile{
+			ID: "profile-1",
+			IP: "203.0.113.10",
+		},
+		State: ProfileState{Runs: map[string]SetupRun{}},
+	}
+	model := newProfileSetupModel([]profileChoice{choice})
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenDashboard
+
+	updatedModel, _ := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	result := updatedModel.(profileSetupModel)
+	if result.screen != profileSetupScreenDeleteConfirm {
+		t.Fatalf("delete key did not open confirmation: %+v", result.screen)
+	}
+	updatedModel, _ = result.updateProfileDeleteConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	result = updatedModel.(profileSetupModel)
+	if result.deleteProfileID != "profile-1" {
+		t.Fatalf("delete confirmation did not capture profile id: %+v", result)
+	}
+}
+
+func TestPrepareProfileSetupLoadsSelectedProfileID(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	first, err := store.Create(Profile{
+		ID:               "first-profile",
+		Name:             "first",
+		IP:               "203.0.113.10",
+		PrivateKeyPath:   "/tmp/first-key",
+		BaseDomain:       "first.example.com",
+		LetsEncryptEmail: "first@example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Create(Profile{
+		ID:               "second-profile",
+		Name:             "second",
+		IP:               "203.0.113.10",
+		PrivateKeyPath:   "/tmp/second-key",
+		BaseDomain:       "second.example.com",
+		LetsEncryptEmail: "second@example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	profile, _, config, err := prepareProfileSetup(setupCLIOptions{
+		ProfileID: second.ID,
+	}, store, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.ID != second.ID || profile.ID == first.ID {
+		t.Fatalf("selected profile was not loaded: %+v", profile)
+	}
+	if config.PrivateKeyPath != "/tmp/second-key" || config.BaseDomain != "second.example.com" {
+		t.Fatalf("unexpected selected profile config: %+v", config)
+	}
+}
+
+func TestPrepareFreshProfileSeedsBootstrapFromExistingProfile(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	source, err := store.Create(Profile{
+		ID:               "source-profile",
+		Name:             "source",
+		IP:               "203.0.113.10",
+		InitialSSHUser:   "root",
+		AdminUser:        "aegisnode",
+		PrivateKeyPath:   "/tmp/aegis-key",
+		BaseDomain:       "example.com",
+		LetsEncryptEmail: "admin@example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceState := ProfileState{
+		ActiveRunID: "run-1",
+		Runs: map[string]SetupRun{
+			"run-1": {
+				ID:     "run-1",
+				Status: runStatusComplete,
+				Stages: map[string]SetupStageStatus{
+					"bootstrap": {Status: stageStatusComplete},
+				},
+			},
+		},
+	}
+	if err := store.Save(source, sourceState); err != nil {
+		t.Fatal(err)
+	}
+
+	profile, state, config, err := prepareProfileSetup(setupCLIOptions{
+		IP:               "203.0.113.10",
+		ProfileID:        source.ID,
+		Fresh:            true,
+		Name:             "fresh",
+		PrivateKeyPath:   "/tmp/aegis-key",
+		BaseDomain:       "example.com",
+		LetsEncryptEmail: "admin@example.com",
+	}, store, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.ID == source.ID {
+		t.Fatalf("fresh setup reused source profile id: %+v", profile)
+	}
+	if config.InitialSSHUser != "aegisnode" || config.AdminUser != "aegisnode" {
+		t.Fatalf("fresh setup did not inherit admin login: %+v", config)
+	}
+	if !completedSetupStages(state)["bootstrap"] {
+		t.Fatalf("fresh setup did not seed completed bootstrap: %+v", state)
+	}
+}
+
+func TestPrepareFreshProfileKeepsInitialUserWhenBootstrapNotComplete(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	source, err := store.Create(Profile{
+		ID:               "source-profile",
+		Name:             "source",
+		IP:               "203.0.113.10",
+		InitialSSHUser:   "root",
+		AdminUser:        "aegisnode",
+		PrivateKeyPath:   "/tmp/aegis-key",
+		BaseDomain:       "example.com",
+		LetsEncryptEmail: "admin@example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, state, config, err := prepareProfileSetup(setupCLIOptions{
+		IP:               "203.0.113.10",
+		ProfileID:        source.ID,
+		Fresh:            true,
+		Name:             "fresh",
+		PrivateKeyPath:   "/tmp/aegis-key",
+		BaseDomain:       "example.com",
+		LetsEncryptEmail: "admin@example.com",
+	}, store, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.InitialSSHUser != "root" || config.AdminUser != "aegisnode" {
+		t.Fatalf("fresh setup should keep initial user until bootstrap is complete: %+v", config)
+	}
+	if completedSetupStages(state)["bootstrap"] {
+		t.Fatalf("fresh setup should not seed bootstrap from incomplete source: %+v", state)
 	}
 }
 

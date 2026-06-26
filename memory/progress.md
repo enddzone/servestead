@@ -40,14 +40,16 @@ Backend verification:
 - `go test ./...` passes.
 - Tests cover profile persistence/permissions/corrupt JSON, generated secret shape and reuse, structured task event order, full-run execution, state persistence, no secret exposure in normal output, and second-run skip behavior.
 
-Remaining UI/dashboard work:
+UI/dashboard follow-up implementation:
 
-- Replace the legacy mode-first setup TUI with a higher-level app model: profile picker, upfront intake, full plan review, dashboard, run view, failure/retry states, and advanced edit path.
-- Use `bubbles/list` for profile and advanced selections, `bubbles/table` for stage state, `bubbles/progress` plus spinner for active runs, `bubbles/viewport` for logs, and `bubbles/help` for key hints.
-- Render profile summaries from `ProfileStore.List()` and stage status from `ProfileState`; do not parse human-readable command output.
-- In the dashboard, show completed stages as complete/skipped on later runs so users understand idempotent resume behavior.
-- Add intentional controls for fresh profile creation, profile switching, rerun/retry, and advanced value edits.
-- Preserve direct command compatibility and scripted setup behavior while replacing the interactive UI.
+- `aegisnode setup` without `--ip` now opens a profile-first TUI instead of the legacy mode-first menu.
+- The new TUI lists saved profiles, opens a dashboard backed by `ProfileState`, collects required full-run values up front, exposes advanced SSH/profile fields, supports fresh profile creation, and renders a final plan review before remote execution starts.
+- Saved profiles can be deleted from the dashboard with confirmation. Deletion removes only local profile files, secrets, state, and run logs.
+- Fresh profile creation from an existing bootstrapped profile seeds bootstrap as complete and uses the saved admin user for remaining stages, avoiding root login on already-hardened servers.
+- The TUI uses `bubbles/list` for profile selection, `bubbles/table` for stage state, `bubbles/progress` for completion, `bubbles/viewport` for the plan preview, and `bubbles/help`/`key` for footer hints.
+- The older one-off setup modes remain reachable through an advanced legacy setup entry.
+- Direct command compatibility and scripted `setup --ip --domain ... --email ... --yes` behavior are preserved.
+- Live remote execution still uses the existing synchronous runner/output path; structured events continue to persist profile state and JSONL logs during the run.
 
 ## Phase checklist
 
