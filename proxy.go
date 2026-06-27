@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +14,15 @@ import (
 
 const proxyStackDirectory = "/opt/aegisnode/proxy"
 const proxyDockerSubnet = "172.30.0.0/24"
+const aegisPublicNetwork = "aegis-public"
+
+const (
+	pangolinImage    = "docker.io/fosrl/pangolin:1.19.4"
+	gerbilImage      = "docker.io/fosrl/gerbil:1.4.2"
+	traefikImage     = "docker.io/traefik:v3.6.4"
+	newtImage        = "docker.io/fosrl/newt:1.13.0"
+	socketProxyImage = "docker.io/tecnativa/docker-socket-proxy:v0.4.2"
+)
 
 var domainName = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$`)
 var pangolinSetupToken = regexp.MustCompile(`^[a-z0-9]{32}$`)
@@ -25,6 +35,10 @@ type proxyConfig struct {
 	LetsEncryptEmail string
 	ServerSecret     string
 	SetupToken       string
+	AdminEmail       string
+	AdminPassword    string
+	NewtID           string
+	NewtSecret       string
 }
 
 type proxyRemoteClientFactory func(context.Context, proxyConfig, io.Writer, io.Writer) (remoteClient, error)
@@ -45,6 +59,7 @@ func runProxy(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	flags.StringVar(&config.ServerSecret, "server-secret", "", "Pangolin server secret")
 	flags.StringVar(&config.ServerSecret, "postgres-password", "", "deprecated alias for --server-secret")
 	flags.StringVar(&config.SetupToken, "setup-token", "", "Pangolin initial admin setup token (generated when omitted)")
+	flags.StringVar(&config.AdminEmail, "pangolin-admin-email", "", "Pangolin administrator email (defaults to --email)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -57,6 +72,22 @@ func runProxy(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 			return fmt.Errorf("generate Pangolin setup token: %w", err)
 		}
 		config.SetupToken = generated
+	}
+	config.AdminEmail = firstNonEmpty(config.AdminEmail, config.LetsEncryptEmail)
+	generatedPassword, err := generatePassword(32)
+	if err != nil {
+		return fmt.Errorf("generate Pangolin administrator password: %w", err)
+	}
+	config.AdminPassword = generatedPassword
+	for destination, size := range map[*string]int{
+		&config.NewtID:     15,
+		&config.NewtSecret: 48,
+	} {
+		generated, err := generateLowercaseSecret(size)
+		if err != nil {
+			return fmt.Errorf("generate Pangolin credentials: %w", err)
+		}
+		*destination = generated
 	}
 	if err := validateProxyConfig(config); err != nil {
 		return err
@@ -76,12 +107,14 @@ func runProxy(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return fmt.Errorf("proxy deployment failed: %w", err)
 	}
 	fmt.Fprintf(stdout, "proxy deployment complete: https://pangolin.%s\n", config.BaseDomain)
-	fmt.Fprintf(stdout, "required DNS: A %s -> %s and A *.%s -> %s\n", config.BaseDomain, config.Host, config.BaseDomain, config.Host)
-	printPangolinSetupGuidance(stdout, config.BaseDomain, config.SetupToken)
+	fmt.Fprintln(stdout, requiredDNSGuidance(config.BaseDomain, config.Host))
+	fmt.Fprintf(stdout, "Pangolin administrator: %s\n", config.AdminEmail)
+	fmt.Fprintf(stdout, "Pangolin password: %s\n", config.AdminPassword)
 	return nil
 }
 
 func validateProxyConfig(config proxyConfig) error {
+	config.AdminEmail = firstNonEmpty(config.AdminEmail, config.LetsEncryptEmail)
 	if config.Host == "" || config.PrivateKeyPath == "" || config.BaseDomain == "" || config.LetsEncryptEmail == "" || config.ServerSecret == "" {
 		return errors.New("--host, --private-key, --domain, --email, and --server-secret are required")
 	}
@@ -99,6 +132,9 @@ func validateProxyConfig(config proxyConfig) error {
 	}
 	if !pangolinSetupToken.MatchString(config.SetupToken) {
 		return errors.New("--setup-token must contain exactly 32 lowercase letters or digits")
+	}
+	if strings.ContainsAny(config.AdminEmail, " \t\r\n") || !strings.Contains(config.AdminEmail, "@") {
+		return errors.New("--pangolin-admin-email must be a valid email address")
 	}
 	return nil
 }
@@ -134,6 +170,9 @@ func proxyTasks(config proxyConfig) []Task {
 			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote(proxyStackDirectory+"/config/traefik"),
 			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote(proxyStackDirectory+"/config/traefik/logs"),
 		)},
+		{Name: "Create shared application network", Apply: commandScript(
+			"docker network inspect " + shellQuote(aegisPublicNetwork) + " >/dev/null 2>&1 || docker network create " + shellQuote(aegisPublicNetwork),
+		)},
 		{Name: "Write Pangolin application config", Apply: remoteWriteFileCommand(proxyStackDirectory+"/config/config.yml", pangolinConfigFile(config), "root", stackGroup, 0640)},
 		{Name: "Write Traefik static config", Apply: remoteWriteFileCommand(proxyStackDirectory+"/config/traefik/traefik_config.yml", traefikStaticConfigFile(config), "root", stackGroup, 0640)},
 		{Name: "Write Traefik dynamic config", Apply: remoteWriteFileCommand(proxyStackDirectory+"/config/traefik/dynamic_config.yml", traefikDynamicConfigFile(config), "root", stackGroup, 0640)},
@@ -155,9 +194,10 @@ func proxyTasks(config proxyConfig) []Task {
 			"docker compose -f "+shellQuote(composePath)+" down --remove-orphans || true",
 			"docker compose -f "+shellQuote(composePath)+" up -d --remove-orphans",
 		)},
+		{Name: "Bootstrap Pangolin organization and site", Apply: pangolinBootstrapCommand(config)},
 		{Name: "Verify Pangolin reverse proxy stack", Apply: commandScript(
 			"running=\"$(docker compose -f "+shellQuote(composePath)+" ps --services --status running)\"",
-			"for service in pangolin gerbil traefik; do",
+			"for service in pangolin gerbil traefik socket-proxy newt; do",
 			"  printf '%s\\n' \"$running\" | grep -Fx \"$service\" >/dev/null",
 			"done",
 			"docker compose -f "+shellQuote(composePath)+" ps",
@@ -169,7 +209,7 @@ func pangolinComposeFile(config proxyConfig) string {
 	return strings.Join([]string{
 		"services:",
 		"  pangolin:",
-		"    image: docker.io/fosrl/pangolin:latest",
+		"    image: " + pangolinImage,
 		"    container_name: pangolin",
 		"    restart: unless-stopped",
 		"    security_opt:",
@@ -178,6 +218,8 @@ func pangolinComposeFile(config proxyConfig) string {
 		"      PANGOLIN_SETUP_TOKEN: " + yamlDoubleQuote(config.SetupToken),
 		"    volumes:",
 		"      - ./config:/app/config",
+		"    ports:",
+		"      - \"127.0.0.1:3000:3000\"",
 		"    healthcheck:",
 		"      test: [\"CMD\", \"curl\", \"-f\", \"http://localhost:3001/api/v1/\"]",
 		"      interval: \"10s\"",
@@ -185,7 +227,7 @@ func pangolinComposeFile(config proxyConfig) string {
 		"      retries: 15",
 		"",
 		"  gerbil:",
-		"    image: docker.io/fosrl/gerbil:latest",
+		"    image: " + gerbilImage,
 		"    container_name: gerbil",
 		"    restart: unless-stopped",
 		"    depends_on:",
@@ -207,7 +249,7 @@ func pangolinComposeFile(config proxyConfig) string {
 		"      - \"80:80\"",
 		"",
 		"  traefik:",
-		"    image: docker.io/traefik:v3.6",
+		"    image: " + traefikImage,
 		"    container_name: traefik",
 		"    restart: unless-stopped",
 		"    network_mode: service:gerbil",
@@ -221,6 +263,40 @@ func pangolinComposeFile(config proxyConfig) string {
 		"      - ./config/letsencrypt:/letsencrypt",
 		"      - ./config/traefik/logs:/var/log/traefik",
 		"",
+		"  socket-proxy:",
+		"    image: " + socketProxyImage,
+		"    container_name: aegis-socket-proxy",
+		"    restart: unless-stopped",
+		"    security_opt:",
+		"      - no-new-privileges:true",
+		"    environment:",
+		"      CONTAINERS: \"1\"",
+		"      EVENTS: \"1\"",
+		"      INFO: \"1\"",
+		"      NETWORKS: \"1\"",
+		"      PING: \"1\"",
+		"      VERSION: \"1\"",
+		"      POST: \"0\"",
+		"    volumes:",
+		"      - /var/run/docker.sock:/var/run/docker.sock:ro",
+		"    networks:",
+		"      - " + aegisPublicNetwork,
+		"",
+		"  newt:",
+		"    image: " + newtImage,
+		"    container_name: aegis-newt",
+		"    restart: unless-stopped",
+		"    depends_on:",
+		"      - socket-proxy",
+		"    environment:",
+		"      PANGOLIN_ENDPOINT: " + yamlDoubleQuote("https://pangolin."+config.BaseDomain),
+		"      NEWT_ID: " + yamlDoubleQuote(config.NewtID),
+		"      NEWT_SECRET: " + yamlDoubleQuote(config.NewtSecret),
+		"      DOCKER_SOCKET: \"tcp://socket-proxy:2375\"",
+		"      DOCKER_ENFORCE_NETWORK_VALIDATION: \"true\"",
+		"    networks:",
+		"      - " + aegisPublicNetwork,
+		"",
 		"networks:",
 		"  default:",
 		"    driver: bridge",
@@ -228,8 +304,67 @@ func pangolinComposeFile(config proxyConfig) string {
 		"    ipam:",
 		"      config:",
 		"        - subnet: " + proxyDockerSubnet,
+		"  " + aegisPublicNetwork + ":",
+		"    external: true",
 		"",
 	}, "\n")
+}
+
+func pangolinBootstrapCommand(config proxyConfig) string {
+	adminPayload := fmt.Sprintf(`{"email":%s,"password":%s,"setupToken":%s}`,
+		jsonString(config.AdminEmail), jsonString(config.AdminPassword), jsonString(config.SetupToken))
+	loginPayload := fmt.Sprintf(`{"email":%s,"password":%s}`,
+		jsonString(config.AdminEmail), jsonString(config.AdminPassword))
+	sitePayload := fmt.Sprintf(`{"name":"local-vps","niceId":"local-vps","type":"newt","subnet":"100.89.1.0/24","newtId":%s,"secret":%s}`,
+		jsonString(config.NewtID), jsonString(config.NewtSecret))
+	return commandScript(
+		`api='http://127.0.0.1:3000/api/v1'`,
+		`pangolin_request() {`,
+		`  label="$1"`,
+		`  shift`,
+		`  response_file="$(mktemp)"`,
+		`  status="$(curl -sS -o "$response_file" -w '%{http_code}' "$@")" || {`,
+		`    result=$?`,
+		`    echo "Pangolin $label request failed before receiving a response." >&2`,
+		`    cat "$response_file" >&2`,
+		`    rm -f "$response_file"`,
+		`    return "$result"`,
+		`  }`,
+		`  case "$status" in`,
+		`    2??) cat "$response_file" ;;`,
+		`    *)`,
+		`      echo "Pangolin $label failed (HTTP $status):" >&2`,
+		`      cat "$response_file" >&2`,
+		`      echo >&2`,
+		`      rm -f "$response_file"`,
+		`      return 1`,
+		`      ;;`,
+		`  esac`,
+		`  rm -f "$response_file"`,
+		`}`,
+		`for attempt in $(seq 1 60); do curl -fsS "$api/" >/dev/null && break; sleep 2; done`,
+		`curl -fsS "$api/" >/dev/null`,
+		`setup="$(curl -fsS "$api/auth/initial-setup-complete")"`,
+		`if printf '%s' "$setup" | grep -Eq '"complete"[[:space:]]*:[[:space:]]*false'; then`,
+		`  pangolin_request 'administrator creation' -X PUT "$api/auth/set-server-admin" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data `+shellQuote(adminPayload)+` >/dev/null`,
+		`fi`,
+		`cookie_file="$(mktemp)"`,
+		`trap 'rm -f "$cookie_file"' EXIT`,
+		`pangolin_request 'administrator login' -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data `+shellQuote(loginPayload)+` >/dev/null`,
+		`orgs="$(curl -fsS -b "$cookie_file" "$api/orgs")"`,
+		`if ! printf '%s' "$orgs" | grep -Eq '"orgId"[[:space:]]*:[[:space:]]*"aegisnode"'; then`,
+		`  pangolin_request 'organization creation' -b "$cookie_file" -X PUT "$api/org" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data '{"orgId":"aegisnode","name":"AegisNode","subnet":"100.89.0.0/16","utilitySubnet":"100.88.0.0/16"}' >/dev/null`,
+		`fi`,
+		`sites="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/sites?pageSize=100")"`,
+		`if ! printf '%s' "$sites" | grep -Eq '"niceId"[[:space:]]*:[[:space:]]*"local-vps"'; then`,
+		`  pangolin_request 'Newt site creation' -b "$cookie_file" -X PUT "$api/org/aegisnode/site" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data `+shellQuote(sitePayload)+` >/dev/null`,
+		`fi`,
+	)
+}
+
+func jsonString(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
 }
 
 func printPangolinSetupGuidance(output io.Writer, baseDomain, setupToken string) {
@@ -239,6 +374,13 @@ func printPangolinSetupGuidance(output io.Writer, baseDomain, setupToken string)
 	fmt.Fprintf(output, "Pangolin initial setup: https://pangolin.%s/auth/initial-setup\n", baseDomain)
 	fmt.Fprintf(output, "Pangolin setup token: %s\n", setupToken)
 	fmt.Fprintln(output, "The token is valid only until the initial server admin is registered.")
+}
+
+func requiredDNSGuidance(baseDomain, host string) string {
+	return fmt.Sprintf(
+		"Required DNS: A pangolin.%s -> %s, A beszel.%s -> %s, A dozzle.%s -> %s",
+		baseDomain, host, baseDomain, host, baseDomain, host,
+	)
 }
 
 func traefikStaticConfigFile(config proxyConfig) string {

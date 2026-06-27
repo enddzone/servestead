@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -205,8 +206,8 @@ func TestSetupPlanSummaryIncludesProxyGuidance(t *testing.T) {
 		ServerSecret:     "secret",
 	})
 	for _, expected := range []string{
-		"Deploy Traefik, Pangolin, and Gerbil",
-		"Required DNS: A example.com -> 203.0.113.10 and A *.example.com -> 203.0.113.10",
+		"Deploy Traefik, Pangolin, Gerbil, Newt, Beszel, and Dozzle",
+		"Required DNS: A pangolin.example.com -> 203.0.113.10, A beszel.example.com -> 203.0.113.10, A dozzle.example.com -> 203.0.113.10",
 	} {
 		if !strings.Contains(summary, expected) {
 			t.Fatalf("summary missing %q:\n%s", expected, summary)
@@ -291,6 +292,7 @@ func TestPrepareProfileSetupGeneratesPersistentSecret(t *testing.T) {
 }
 
 func TestPrepareCompletedLegacyProfileDoesNotInventUndeployedSetupToken(t *testing.T) {
+	t.Setenv("PANGOLIN_ADMIN_PASSWORD", "existing-password")
 	store := newFileProfileStore(t.TempDir())
 	profile, err := store.Create(Profile{
 		IP:               "203.0.113.10",
@@ -328,6 +330,70 @@ func TestPrepareCompletedLegacyProfileDoesNotInventUndeployedSetupToken(t *testi
 	}
 	if config.PangolinSetupToken != "" {
 		t.Fatalf("invented an undeployed setup token for a completed legacy profile: %q", config.PangolinSetupToken)
+	}
+	if config.PangolinAdminPassword != "existing-password" {
+		t.Fatalf("existing administrator password was not imported")
+	}
+}
+
+func TestPrepareFailedProxyUsesExplicitPangolinPasswordOverride(t *testing.T) {
+	t.Setenv("PANGOLIN_ADMIN_PASSWORD", "existing-admin-password")
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		IP: "203.0.113.10", AdminUser: "aegisadmin", PrivateKeyPath: "/tmp/aegis-key",
+		BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{
+		ActiveRunID: "failed-run",
+		Runs: map[string]SetupRun{"failed-run": {
+			ID: "failed-run", Status: runStatusFailed,
+			Stages: map[string]SetupStageStatus{"proxy": {Status: stageStatusFailed}},
+		}},
+	}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSecrets(profile.ID, ProfileSecrets{PangolinAdminPassword: "Aa1!stale-generated-password"}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, config, err := prepareProfileSetup(setupCLIOptions{ProfileID: profile.ID}, store, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.PangolinAdminPassword != "existing-admin-password" {
+		t.Fatalf("password override was ignored: %q", config.PangolinAdminPassword)
+	}
+}
+
+func TestAdvancedSetupMasksPangolinPassword(t *testing.T) {
+	inputs := setupAdvancedInputs(setupCLIOptions{PangolinAdminPassword: "secret"})
+	if inputs[4].EchoMode != textinput.EchoPassword {
+		t.Fatal("Pangolin administrator password input is not masked")
+	}
+}
+
+func TestFailedProxyRetryCollectsPangolinCredentials(t *testing.T) {
+	state := ProfileState{
+		ActiveRunID: "failed-run",
+		Runs: map[string]SetupRun{"failed-run": {
+			Stages: map[string]SetupStageStatus{"proxy": {Status: stageStatusFailed}},
+		}},
+	}
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{ID: "profile-1", BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com"},
+		State:   state,
+	}})
+	model.selectedIndex = 0
+	model.setInputsFromChoice(false)
+	model.stageTable.SetCursor(3)
+	updated, _ := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	result := updated.(profileSetupModel)
+	if result.screen != profileSetupScreenAdvanced || result.singleStage != "proxy" {
+		t.Fatalf("failed Proxy retry did not request credentials: screen=%d stage=%q", result.screen, result.singleStage)
 	}
 }
 
@@ -632,11 +698,13 @@ func TestRunProfileSetupPlanExecutesFullRunAndPersistsState(t *testing.T) {
 	originalHardening := newHardeningRemoteClient
 	originalNetwork := newNetworkRemoteClient
 	originalProxy := newProxyRemoteClient
+	originalObservability := newObservabilityRemoteClient
 	defer func() {
 		newBootstrapRemoteClient = originalBootstrap
 		newHardeningRemoteClient = originalHardening
 		newNetworkRemoteClient = originalNetwork
 		newProxyRemoteClient = originalProxy
+		newObservabilityRemoteClient = originalObservability
 	}()
 
 	directory := t.TempDir()
@@ -650,7 +718,7 @@ func TestRunProfileSetupPlanExecutesFullRunAndPersistsState(t *testing.T) {
 	}
 
 	clients := []*recordingRemoteClient{
-		{}, {}, {}, {},
+		{}, {}, {}, {}, {},
 	}
 	newBootstrapRemoteClient = func(_ context.Context, _ bootstrapConfig, _, _ io.Writer) (remoteClient, error) {
 		return clients[0], nil
@@ -663,6 +731,9 @@ func TestRunProfileSetupPlanExecutesFullRunAndPersistsState(t *testing.T) {
 	}
 	newProxyRemoteClient = func(_ context.Context, _ proxyConfig, _, _ io.Writer) (remoteClient, error) {
 		return clients[3], nil
+	}
+	newObservabilityRemoteClient = func(_ context.Context, _ observabilityConfig, _, _ io.Writer) (remoteClient, error) {
+		return clients[4], nil
 	}
 
 	store := newFileProfileStore(t.TempDir())
@@ -693,7 +764,7 @@ func TestRunProfileSetupPlanExecutesFullRunAndPersistsState(t *testing.T) {
 	if run.Status != runStatusComplete {
 		t.Fatalf("unexpected run state: %+v", run)
 	}
-	for _, stage := range []string{"bootstrap", "harden", "network", "proxy"} {
+	for _, stage := range []string{"bootstrap", "harden", "network", "proxy", "observability"} {
 		if run.Stages[stage].Status != stageStatusComplete {
 			t.Fatalf("stage %s not complete: %+v", stage, run.Stages[stage])
 		}
@@ -726,10 +797,11 @@ func TestRunProfileSetupPlanExecutesFullRunAndPersistsState(t *testing.T) {
 		}
 	}
 	for _, expected := range []string{
-		"Step 1/4: bootstrap administrative access already complete; skipping.",
-		"Step 2/4: harden server already complete; skipping.",
-		"Step 3/4: configure Docker networking and UFW already complete; skipping.",
-		"Step 4/4: deploy Pangolin and reverse proxy stack already complete; skipping.",
+		"Step 1/5: bootstrap administrative access already complete; skipping.",
+		"Step 2/5: harden server already complete; skipping.",
+		"Step 3/5: configure Docker networking and UFW already complete; skipping.",
+		"Step 4/5: deploy Pangolin and reverse proxy stack already complete; skipping.",
+		"Step 5/5: deploy observability stack already complete; skipping.",
 	} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("second run output missing %q:\n%s", expected, stdout.String())

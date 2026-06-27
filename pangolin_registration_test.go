@@ -126,17 +126,17 @@ func TestLoadProfileChoicesIncludesSavedPangolinToken(t *testing.T) {
 	}
 }
 
-func TestProfileDashboardChecksPangolinOnlyAfterProxyDeployment(t *testing.T) {
+func TestProfileDashboardChecksPangolinBeforeRetryingProxy(t *testing.T) {
 	model := newProfileSetupModel([]profileChoice{{
 		Profile: Profile{ID: "production", BaseDomain: "example.com"},
 		State:   ProfileState{Runs: map[string]SetupRun{}},
 	}})
 	model.selectedIndex = 0
 	model.refreshDashboard()
-	if command := model.checkPangolinRegistration(); command != nil {
-		t.Fatal("registration check should not run before Proxy deployment")
+	if command := model.checkPangolinRegistration(); command == nil {
+		t.Fatal("registration check should detect partial Proxy deployments")
 	}
-	if model.pangolinStatus != pangolinRegistrationUnknown {
+	if model.pangolinStatus != pangolinRegistrationChecking {
 		t.Fatalf("unexpected status: %s", model.pangolinStatus)
 	}
 }

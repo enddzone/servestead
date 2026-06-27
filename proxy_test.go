@@ -23,12 +23,14 @@ func TestProxyCommandsDeployPhase4Stack(t *testing.T) {
 		"Validate Docker Compose is available",
 		"Validate Docker bridge firewall support",
 		"Prepare proxy stack directories",
+		"Create shared application network",
 		"Write Pangolin application config",
 		"Write Traefik static config",
 		"Write Traefik dynamic config",
 		"Write Pangolin reverse proxy compose file",
 		"Allow proxy and Pangolin tunnel ingress",
 		"Start Pangolin reverse proxy stack",
+		"Bootstrap Pangolin organization and site",
 		"Verify Pangolin reverse proxy stack",
 	})
 	for _, expected := range []string{
@@ -57,7 +59,7 @@ func TestProxyCommandsDeployPhase4Stack(t *testing.T) {
 		"docker compose -f '/opt/aegisnode/proxy/docker-compose.yml' down --remove-orphans || true",
 		"docker compose -f '/opt/aegisnode/proxy/docker-compose.yml' up -d --remove-orphans",
 		"docker compose -f '/opt/aegisnode/proxy/docker-compose.yml' ps --services --status running",
-		"for service in pangolin gerbil traefik; do",
+		"for service in pangolin gerbil traefik socket-proxy newt; do",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("proxy commands missing %q:\n%s", expected, joined)
@@ -73,10 +75,12 @@ func TestPangolinComposeFileContainsConfiguredServices(t *testing.T) {
 		SetupToken:       "0123456789abcdefghijklmnopqrstuv",
 	})
 	for _, expected := range []string{
-		"image: docker.io/fosrl/pangolin:latest",
+		"image: docker.io/fosrl/pangolin:1.19.4",
 		"PANGOLIN_SETUP_TOKEN: \"0123456789abcdefghijklmnopqrstuv\"",
-		"image: docker.io/fosrl/gerbil:latest",
-		"image: docker.io/traefik:v3.6",
+		"image: docker.io/fosrl/gerbil:1.4.2",
+		"image: docker.io/traefik:v3.6.4",
+		"image: docker.io/fosrl/newt:1.13.0",
+		"image: docker.io/tecnativa/docker-socket-proxy:v0.4.2",
 		"./config:/app/config",
 		"--reachableAt=http://gerbil:3004",
 		"--generateAndSaveKeyTo=/var/config/key",
@@ -97,7 +101,6 @@ func TestPangolinComposeFileContainsConfiguredServices(t *testing.T) {
 	}
 	for _, unexpected := range []string{
 		"providers.docker",
-		"/var/run/docker.sock",
 		"postgres:",
 		"DB_CONNECTION_STRING",
 		"traefik.enable",
@@ -158,6 +161,29 @@ func TestPangolinConfigFileContainsDashboardSettings(t *testing.T) {
 	}
 }
 
+func TestPangolinBootstrapUsesCSRFProtectedIdempotentAPI(t *testing.T) {
+	script := pangolinBootstrapCommand(proxyConfig{
+		AdminEmail:    "admin@example.com",
+		AdminPassword: "Aa1!password",
+		SetupToken:    "0123456789abcdefghijklmnopqrstuv",
+		NewtID:        "newtidentifier1",
+		NewtSecret:    "newt-secret",
+	})
+	for _, expected := range []string{
+		"/auth/initial-setup-complete",
+		"/auth/set-server-admin",
+		"X-CSRF-Token: x-csrf-protection",
+		"/auth/login",
+		`"orgId":"aegisnode"`,
+		`"niceId":"local-vps"`,
+		`"newtId":"newtidentifier1"`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("bootstrap script missing %q:\n%s", expected, script)
+		}
+	}
+}
+
 func TestRunProxyStepsUsesPrivilegedCommands(t *testing.T) {
 	client := &recordingRemoteClient{}
 	config := proxyConfig{
@@ -205,9 +231,9 @@ func TestRunProxyUsesRemoteClientAndPrintsDNSGuidance(t *testing.T) {
 	}
 	for _, expected := range []string{
 		"proxy deployment complete: https://pangolin.example.com",
-		"required DNS: A example.com -> 203.0.113.10 and A *.example.com -> 203.0.113.10",
-		"Pangolin initial setup: https://pangolin.example.com/auth/initial-setup",
-		"Pangolin setup token: 0123456789abcdefghijklmnopqrstuv",
+		"Required DNS: A pangolin.example.com -> 203.0.113.10, A beszel.example.com -> 203.0.113.10, A dozzle.example.com -> 203.0.113.10",
+		"Pangolin administrator: admin@example.com",
+		"Pangolin password:",
 	} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("proxy output missing %q:\n%s", expected, stdout.String())

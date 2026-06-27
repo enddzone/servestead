@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func TestProfileStoreCreatesPrivateProfileFiles(t *testing.T) {
@@ -162,5 +164,35 @@ func assertFileMode(t *testing.T, path string, expected os.FileMode) {
 	}
 	if info.Mode().Perm() != expected {
 		t.Fatalf("%s mode = %v, want %v", path, info.Mode().Perm(), expected)
+	}
+}
+
+func TestEnsureComposeWiringSecretsIsStable(t *testing.T) {
+	var secrets ProfileSecrets
+	if err := secrets.EnsureComposeWiringSecrets(); err != nil {
+		t.Fatal(err)
+	}
+	first := secrets
+	if err := secrets.EnsureComposeWiringSecrets(); err != nil {
+		t.Fatal(err)
+	}
+	if secrets != first {
+		t.Fatal("existing compose wiring secrets changed")
+	}
+	if len(secrets.PangolinAdminPassword) != 32 || len(secrets.NewtID) != 15 ||
+		len(secrets.NewtSecret) != 48 || len(secrets.BeszelAdminPassword) != 32 ||
+		len(secrets.BeszelSystemToken) != 48 {
+		t.Fatalf("unexpected generated secret lengths: %+v", secrets)
+	}
+	for _, required := range []string{"A", "a", "1", "!"} {
+		if !strings.Contains(secrets.PangolinAdminPassword, required) {
+			t.Fatalf("Pangolin password does not meet upstream complexity requirements")
+		}
+	}
+	if _, err := ssh.ParsePrivateKey([]byte(secrets.BeszelHubPrivateKey)); err != nil {
+		t.Fatalf("invalid Beszel Hub private key: %v", err)
+	}
+	if _, _, _, _, err := ssh.ParseAuthorizedKey([]byte(secrets.BeszelHubPublicKey)); err != nil {
+		t.Fatalf("invalid Beszel Hub public key: %v", err)
 	}
 }

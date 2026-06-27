@@ -34,35 +34,46 @@ const (
 	setupModeProxy
 	setupModeDoctor
 	setupModeFullRun
+	setupModeObservability
 )
 
 type setupConfig struct {
-	Mode               setupMode
-	Host               string
-	InitialSSHUser     string
-	AdminUser          string
-	AdminPublicKeyPath string
-	PrivateKeyPath     string
-	ProviderKeyPath    string
-	ProviderKeyComment string
-	BaseDomain         string
-	LetsEncryptEmail   string
-	ServerSecret       string
-	PangolinSetupToken string
-	ProfileID          string
+	Mode                  setupMode
+	Host                  string
+	InitialSSHUser        string
+	AdminUser             string
+	AdminPublicKeyPath    string
+	PrivateKeyPath        string
+	ProviderKeyPath       string
+	ProviderKeyComment    string
+	BaseDomain            string
+	LetsEncryptEmail      string
+	ServerSecret          string
+	PangolinSetupToken    string
+	PangolinAdminEmail    string
+	PangolinAdminPassword string
+	NewtID                string
+	NewtSecret            string
+	BeszelAdminPassword   string
+	BeszelSystemToken     string
+	BeszelHubPrivateKey   string
+	BeszelHubPublicKey    string
+	ProfileID             string
 }
 
 type setupCLIOptions struct {
-	IP               string
-	ProfileID        string
-	Name             string
-	Fresh            bool
-	Yes              bool
-	InitialSSHUser   string
-	AdminUser        string
-	PrivateKeyPath   string
-	BaseDomain       string
-	LetsEncryptEmail string
+	IP                    string
+	ProfileID             string
+	Name                  string
+	Fresh                 bool
+	Yes                   bool
+	InitialSSHUser        string
+	AdminUser             string
+	PrivateKeyPath        string
+	BaseDomain            string
+	LetsEncryptEmail      string
+	PangolinAdminEmail    string
+	PangolinAdminPassword string
 }
 
 type preflightCheck struct {
@@ -101,6 +112,7 @@ func runSetup(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	flags.StringVar(&options.PrivateKeyPath, "private-key", "", "path to the private key used for setup")
 	flags.StringVar(&options.BaseDomain, "domain", "", "base domain for Pangolin, for example example.com")
 	flags.StringVar(&options.LetsEncryptEmail, "email", "", "Let's Encrypt account email")
+	flags.StringVar(&options.PangolinAdminEmail, "pangolin-admin-email", "", "Pangolin administrator email (defaults to --email)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -290,7 +302,7 @@ const (
 	profileSetupScreenDeleteConfirm
 )
 
-var setupStageOrder = []string{"bootstrap", "harden", "network", "proxy"}
+var setupStageOrder = []string{"bootstrap", "harden", "network", "proxy", "observability"}
 
 type pangolinRegistrationStatus string
 
@@ -404,6 +416,8 @@ func setupAdvancedInputs(options setupCLIOptions) []textinput.Model {
 		{label: "Profile name", placeholder: "production-vps", value: options.Name},
 		{label: "Initial SSH user", value: firstNonEmpty(options.InitialSSHUser, "root")},
 		{label: "Admin SSH user", value: firstNonEmpty(options.AdminUser, "aegisadmin")},
+		{label: "Pangolin admin email", placeholder: "defaults to Let's Encrypt email", value: options.PangolinAdminEmail},
+		{label: "Pangolin admin password", placeholder: "generated for fresh installs", value: options.PangolinAdminPassword, secret: true},
 	})
 }
 
@@ -423,10 +437,11 @@ func newProfileStageTable(state *ProfileState) table.Model {
 
 func profileStageRows(state *ProfileState) []table.Row {
 	labels := map[string]string{
-		"bootstrap": "Bootstrap",
-		"harden":    "Harden",
-		"network":   "Network",
-		"proxy":     "Proxy",
+		"bootstrap":     "Bootstrap",
+		"harden":        "Harden",
+		"network":       "Network",
+		"proxy":         "Proxy",
+		"observability": "Observability",
 	}
 	completed := map[string]bool{}
 	if state != nil {
@@ -486,7 +501,7 @@ func profileCompletion(state *ProfileState) float64 {
 			completed++
 		}
 	}
-	return float64(completed) / 4
+	return float64(completed) / float64(len(setupStageOrder))
 }
 
 func (model profileSetupModel) Init() tea.Cmd {
@@ -512,6 +527,9 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.complete {
 			model.pangolinStatus = pangolinRegistrationComplete
 			model.pangolinError = ""
+			if !completedSetupStages(model.profiles[model.selectedIndex].State)["proxy"] {
+				model.advanced[4].SetValue("")
+			}
 		} else {
 			model.pangolinStatus = pangolinRegistrationIncomplete
 			model.pangolinError = ""
@@ -598,6 +616,20 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 			return model, nil
 		}
 		model.singleStage = stage
+		proxyRetry := false
+		if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
+			choice := model.profiles[model.selectedIndex]
+			if run, ok := choice.State.Runs[choice.State.ActiveRunID]; ok {
+				proxyRetry = run.Stages["proxy"].Status == stageStatusFailed
+			}
+		}
+		if stage == "proxy" && (model.pangolinStatus == pangolinRegistrationComplete || proxyRetry) {
+			model.err = ""
+			model.focus = 3
+			model.advanced[model.focus].Focus()
+			model.screen = profileSetupScreenAdvanced
+			return model, nil
+		}
 		model.done = true
 		return model, tea.Quit
 	case "e", "E":
@@ -677,6 +709,10 @@ func (model profileSetupModel) updateProfileInput(key tea.KeyMsg, advanced bool)
 			model.err = err.Error()
 			return model, nil
 		}
+		if advanced && model.singleStage != "" {
+			model.done = true
+			return model, tea.Quit
+		}
 		model.err = ""
 		model.refreshPlanPreview()
 		model.screen = profileSetupScreenReview
@@ -744,6 +780,7 @@ func (model *profileSetupModel) goBack() {
 			model.screen = profileSetupScreenPicker
 		}
 	case profileSetupScreenAdvanced:
+		model.singleStage = ""
 		if model.selectedIndex >= 0 {
 			model.screen = profileSetupScreenDashboard
 		} else {
@@ -766,15 +803,17 @@ func (model *profileSetupModel) setInputsFromChoice(fresh bool) {
 	}
 	choice := model.profiles[model.selectedIndex]
 	options := setupCLIOptions{
-		IP:               choice.Profile.IP,
-		ProfileID:        choice.Profile.ID,
-		Name:             choice.Profile.Name,
-		InitialSSHUser:   choice.Profile.InitialSSHUser,
-		AdminUser:        choice.Profile.AdminUser,
-		PrivateKeyPath:   choice.Profile.PrivateKeyPath,
-		BaseDomain:       choice.Profile.BaseDomain,
-		LetsEncryptEmail: choice.Profile.LetsEncryptEmail,
-		Fresh:            fresh,
+		IP:                    choice.Profile.IP,
+		ProfileID:             choice.Profile.ID,
+		Name:                  choice.Profile.Name,
+		InitialSSHUser:        choice.Profile.InitialSSHUser,
+		AdminUser:             choice.Profile.AdminUser,
+		PrivateKeyPath:        choice.Profile.PrivateKeyPath,
+		BaseDomain:            choice.Profile.BaseDomain,
+		LetsEncryptEmail:      choice.Profile.LetsEncryptEmail,
+		PangolinAdminEmail:    firstNonEmpty(choice.Profile.PangolinAdminEmail, choice.Profile.LetsEncryptEmail),
+		PangolinAdminPassword: choice.Secrets.PangolinAdminPassword,
+		Fresh:                 fresh,
 	}
 	if fresh {
 		options.ProfileID = ""
@@ -829,7 +868,7 @@ func (model *profileSetupModel) checkPangolinRegistration() tea.Cmd {
 		return nil
 	}
 	choice := model.profiles[model.selectedIndex]
-	if !completedSetupStages(choice.State)["proxy"] || choice.Profile.BaseDomain == "" {
+	if choice.Profile.BaseDomain == "" {
 		model.pangolinStatus = pangolinRegistrationUnknown
 		model.pangolinError = ""
 		return nil
@@ -879,14 +918,16 @@ func (model profileSetupModel) optionsFromInputs() (setupCLIOptions, error) {
 		return strings.TrimSpace(inputs[index].Value())
 	}
 	options := setupCLIOptions{
-		IP:               value(model.inputs, 0),
-		PrivateKeyPath:   expandUserPath(value(model.inputs, 1)),
-		BaseDomain:       value(model.inputs, 2),
-		LetsEncryptEmail: value(model.inputs, 3),
-		Name:             value(model.advanced, 0),
-		InitialSSHUser:   firstNonEmpty(value(model.advanced, 1), "root"),
-		AdminUser:        firstNonEmpty(value(model.advanced, 2), "aegisadmin"),
-		Fresh:            model.fresh,
+		IP:                    value(model.inputs, 0),
+		PrivateKeyPath:        expandUserPath(value(model.inputs, 1)),
+		BaseDomain:            value(model.inputs, 2),
+		LetsEncryptEmail:      value(model.inputs, 3),
+		Name:                  value(model.advanced, 0),
+		InitialSSHUser:        firstNonEmpty(value(model.advanced, 1), "root"),
+		AdminUser:             firstNonEmpty(value(model.advanced, 2), "aegisadmin"),
+		PangolinAdminEmail:    value(model.advanced, 3),
+		PangolinAdminPassword: value(model.advanced, 4),
+		Fresh:                 model.fresh,
 	}
 	if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
 		options.ProfileID = model.profiles[model.selectedIndex].Profile.ID
@@ -901,6 +942,7 @@ func (model profileSetupModel) optionsFromInputs() (setupCLIOptions, error) {
 		AdminPublicKeyPath: publicKeyPath(options.PrivateKeyPath),
 		BaseDomain:         options.BaseDomain,
 		LetsEncryptEmail:   options.LetsEncryptEmail,
+		PangolinAdminEmail: firstNonEmpty(options.PangolinAdminEmail, options.LetsEncryptEmail),
 		ServerSecret:       "generated-placeholder",
 	}
 	if err := validateFullRunConfig(config); err != nil {
@@ -915,14 +957,16 @@ func (model profileSetupModel) optionsForSelectedProfile() (setupCLIOptions, err
 	}
 	profile := model.profiles[model.selectedIndex].Profile
 	return setupCLIOptions{
-		IP:               profile.IP,
-		ProfileID:        profile.ID,
-		Name:             profile.Name,
-		InitialSSHUser:   profile.InitialSSHUser,
-		AdminUser:        profile.AdminUser,
-		PrivateKeyPath:   profile.PrivateKeyPath,
-		BaseDomain:       profile.BaseDomain,
-		LetsEncryptEmail: profile.LetsEncryptEmail,
+		IP:                    profile.IP,
+		ProfileID:             profile.ID,
+		Name:                  profile.Name,
+		InitialSSHUser:        profile.InitialSSHUser,
+		AdminUser:             profile.AdminUser,
+		PrivateKeyPath:        profile.PrivateKeyPath,
+		BaseDomain:            profile.BaseDomain,
+		LetsEncryptEmail:      profile.LetsEncryptEmail,
+		PangolinAdminEmail:    firstNonEmpty(strings.TrimSpace(model.advanced[3].Value()), profile.PangolinAdminEmail, profile.LetsEncryptEmail),
+		PangolinAdminPassword: strings.TrimSpace(model.advanced[4].Value()),
 	}, nil
 }
 
@@ -994,14 +1038,16 @@ func (model profileSetupModel) pangolinRegistrationView(choice profileChoice) st
 	proxyComplete := completedSetupStages(choice.State)["proxy"]
 	var builder strings.Builder
 	switch {
-	case !proxyComplete:
-		builder.WriteString("Pangolin registration: waiting for Proxy deployment.")
 	case model.pangolinStatus == pangolinRegistrationChecking:
 		builder.WriteString("Pangolin registration: checking server...")
 	case model.pangolinStatus == pangolinRegistrationIncomplete:
 		builder.WriteString(setupWarningStyle.Render("ACTION REQUIRED: Pangolin initial admin registration is incomplete."))
 	case model.pangolinStatus == pangolinRegistrationComplete:
 		builder.WriteString("Pangolin registration: complete.")
+		if !proxyComplete {
+			builder.WriteString("\n")
+			builder.WriteString(setupWarningStyle.Render("Existing administrator credentials are required to finish Proxy setup."))
+		}
 	case model.pangolinStatus == pangolinRegistrationUnavailable:
 		builder.WriteString(setupWarningStyle.Render("Pangolin registration: unable to verify."))
 		if model.pangolinError != "" {
@@ -1009,7 +1055,11 @@ func (model profileSetupModel) pangolinRegistrationView(choice profileChoice) st
 			builder.WriteString(setupHelpStyle.Render(model.pangolinError))
 		}
 	default:
-		builder.WriteString("Pangolin registration: not checked.")
+		if proxyComplete {
+			builder.WriteString("Pangolin registration: not checked.")
+		} else {
+			builder.WriteString("Pangolin registration: waiting for Proxy deployment.")
+		}
 	}
 
 	if !proxyComplete {
@@ -1307,6 +1357,7 @@ func prepareProfileSetup(options setupCLIOptions, store ProfileStore, output io.
 		AdminPublicKeyPath: publicKeyPath(expandUserPath(profile.PrivateKeyPath)),
 		BaseDomain:         profile.BaseDomain,
 		LetsEncryptEmail:   profile.LetsEncryptEmail,
+		PangolinAdminEmail: firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail),
 		ProfileID:          profile.ID,
 	}
 	if config.BaseDomain == "" || config.LetsEncryptEmail == "" {
@@ -1334,6 +1385,19 @@ func prepareProfileSetup(options setupCLIOptions, store ProfileStore, output io.
 	if err := secrets.EnsureServerSecret(); err != nil {
 		return Profile{}, ProfileState{}, setupConfig{}, fmt.Errorf("generate server secret: %w", err)
 	}
+	passwordOverride := firstNonEmpty(options.PangolinAdminPassword, os.Getenv("PANGOLIN_ADMIN_PASSWORD"))
+	if passwordOverride != "" {
+		secrets.PangolinAdminPassword = passwordOverride
+	}
+	if completedSetupStages(state)["proxy"] && secrets.PangolinAdminPassword == "" {
+		return Profile{}, ProfileState{}, setupConfig{}, errors.New("existing Pangolin registration has no saved administrator password; enter it in Advanced setup or set PANGOLIN_ADMIN_PASSWORD once")
+	}
+	if passwordOverride == "" && !completedSetupStages(state)["proxy"] && !pangolinPasswordValid(secrets.PangolinAdminPassword) {
+		secrets.PangolinAdminPassword = ""
+	}
+	if err := secrets.EnsureComposeWiringSecrets(); err != nil {
+		return Profile{}, ProfileState{}, setupConfig{}, fmt.Errorf("generate Pangolin wiring secrets: %w", err)
+	}
 	if secrets.PangolinSetupToken != "" || !completedSetupStages(state)["proxy"] {
 		if err := secrets.EnsurePangolinSetupToken(); err != nil {
 			return Profile{}, ProfileState{}, setupConfig{}, fmt.Errorf("generate Pangolin setup token: %w", err)
@@ -1344,6 +1408,14 @@ func prepareProfileSetup(options setupCLIOptions, store ProfileStore, output io.
 	}
 	config.ServerSecret = secrets.ServerSecret
 	config.PangolinSetupToken = secrets.PangolinSetupToken
+	config.PangolinAdminPassword = secrets.PangolinAdminPassword
+	config.NewtID = secrets.NewtID
+	config.NewtSecret = secrets.NewtSecret
+	config.BeszelAdminPassword = secrets.BeszelAdminPassword
+	config.BeszelSystemToken = secrets.BeszelSystemToken
+	config.BeszelHubPrivateKey = secrets.BeszelHubPrivateKey
+	config.BeszelHubPublicKey = secrets.BeszelHubPublicKey
+	profile.PangolinAdminEmail = config.PangolinAdminEmail
 	profile.PrivateKeyPath = config.PrivateKeyPath
 	profile.BaseDomain = config.BaseDomain
 	profile.LetsEncryptEmail = config.LetsEncryptEmail
@@ -1371,12 +1443,13 @@ func prepareProfileStageSetup(options setupCLIOptions, store ProfileStore, stage
 		AdminPublicKeyPath: publicKeyPath(expandUserPath(firstNonEmpty(profile.PrivateKeyPath, defaultKeygenConfig().Path))),
 		BaseDomain:         profile.BaseDomain,
 		LetsEncryptEmail:   profile.LetsEncryptEmail,
+		PangolinAdminEmail: firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail),
 		ProfileID:          profile.ID,
 	}
 	if err := validateStageRunConfig(stage, config); err != nil {
 		return Profile{}, ProfileState{}, setupConfig{}, err
 	}
-	if stage == "proxy" {
+	if stage == "proxy" || stage == "observability" {
 		secrets, err := store.LoadSecrets(profile.ID)
 		if err != nil {
 			return Profile{}, ProfileState{}, setupConfig{}, err
@@ -1384,14 +1457,34 @@ func prepareProfileStageSetup(options setupCLIOptions, store ProfileStore, stage
 		if err := secrets.EnsureServerSecret(); err != nil {
 			return Profile{}, ProfileState{}, setupConfig{}, fmt.Errorf("generate server secret: %w", err)
 		}
+		passwordOverride := firstNonEmpty(options.PangolinAdminPassword, os.Getenv("PANGOLIN_ADMIN_PASSWORD"))
+		if passwordOverride != "" {
+			secrets.PangolinAdminPassword = passwordOverride
+		}
+		if completedSetupStages(state)["proxy"] && secrets.PangolinAdminPassword == "" {
+			return Profile{}, ProfileState{}, setupConfig{}, errors.New("existing Pangolin registration has no saved administrator password; enter it in Advanced setup or set PANGOLIN_ADMIN_PASSWORD once")
+		}
+		if passwordOverride == "" && !completedSetupStages(state)["proxy"] && !pangolinPasswordValid(secrets.PangolinAdminPassword) {
+			secrets.PangolinAdminPassword = ""
+		}
 		if err := secrets.EnsurePangolinSetupToken(); err != nil {
 			return Profile{}, ProfileState{}, setupConfig{}, fmt.Errorf("generate Pangolin setup token: %w", err)
+		}
+		if err := secrets.EnsureComposeWiringSecrets(); err != nil {
+			return Profile{}, ProfileState{}, setupConfig{}, fmt.Errorf("generate Pangolin wiring secrets: %w", err)
 		}
 		if err := store.SaveSecrets(profile.ID, secrets); err != nil {
 			return Profile{}, ProfileState{}, setupConfig{}, err
 		}
 		config.ServerSecret = secrets.ServerSecret
 		config.PangolinSetupToken = secrets.PangolinSetupToken
+		config.PangolinAdminPassword = secrets.PangolinAdminPassword
+		config.NewtID = secrets.NewtID
+		config.NewtSecret = secrets.NewtSecret
+		config.BeszelAdminPassword = secrets.BeszelAdminPassword
+		config.BeszelSystemToken = secrets.BeszelSystemToken
+		config.BeszelHubPrivateKey = secrets.BeszelHubPrivateKey
+		config.BeszelHubPublicKey = secrets.BeszelHubPublicKey
 	}
 	if err := store.Save(profile, state); err != nil {
 		return Profile{}, ProfileState{}, setupConfig{}, err
@@ -1409,6 +1502,8 @@ func setupModeForStage(stage string) setupMode {
 		return setupModeNetwork
 	case "proxy":
 		return setupModeProxy
+	case "observability":
+		return setupModeObservability
 	default:
 		return setupModeFullRun
 	}
@@ -1439,7 +1534,12 @@ func validateStageRunConfig(stage string, config setupConfig) error {
 			LetsEncryptEmail: config.LetsEncryptEmail,
 			ServerSecret:     firstNonEmpty(config.ServerSecret, "generated-placeholder"),
 			SetupToken:       firstNonEmpty(config.PangolinSetupToken, "00000000000000000000000000000000"),
+			AdminEmail:       firstNonEmpty(config.PangolinAdminEmail, config.LetsEncryptEmail),
 		})
+	case "observability":
+		if config.BaseDomain == "" || config.PangolinAdminEmail == "" {
+			return errors.New("profile domain and Pangolin administrator email are required for the observability stage")
+		}
 	default:
 		return fmt.Errorf("unknown setup stage: %s", stage)
 	}
@@ -1499,6 +1599,7 @@ func inheritFreshSetupOptions(options setupCLIOptions, source Profile, sourceSta
 	options.PrivateKeyPath = firstNonEmpty(options.PrivateKeyPath, source.PrivateKeyPath)
 	options.BaseDomain = firstNonEmpty(options.BaseDomain, source.BaseDomain)
 	options.LetsEncryptEmail = firstNonEmpty(options.LetsEncryptEmail, source.LetsEncryptEmail)
+	options.PangolinAdminEmail = firstNonEmpty(options.PangolinAdminEmail, source.PangolinAdminEmail, options.LetsEncryptEmail, source.LetsEncryptEmail)
 	return options
 }
 
@@ -1524,13 +1625,14 @@ func freshProfileSeedState(sourceState ProfileState) ProfileState {
 
 func createSetupProfile(options setupCLIOptions, store ProfileStore, seedState ProfileState) (Profile, ProfileState, error) {
 	profile, err := store.Create(Profile{
-		Name:             firstNonEmpty(options.Name, options.IP),
-		IP:               options.IP,
-		InitialSSHUser:   firstNonEmpty(options.InitialSSHUser, "root"),
-		AdminUser:        firstNonEmpty(options.AdminUser, "aegisadmin"),
-		PrivateKeyPath:   expandUserPath(firstNonEmpty(options.PrivateKeyPath, defaultKeygenConfig().Path)),
-		BaseDomain:       options.BaseDomain,
-		LetsEncryptEmail: options.LetsEncryptEmail,
+		Name:               firstNonEmpty(options.Name, options.IP),
+		IP:                 options.IP,
+		InitialSSHUser:     firstNonEmpty(options.InitialSSHUser, "root"),
+		AdminUser:          firstNonEmpty(options.AdminUser, "aegisadmin"),
+		PrivateKeyPath:     expandUserPath(firstNonEmpty(options.PrivateKeyPath, defaultKeygenConfig().Path)),
+		BaseDomain:         options.BaseDomain,
+		LetsEncryptEmail:   options.LetsEncryptEmail,
+		PangolinAdminEmail: firstNonEmpty(options.PangolinAdminEmail, options.LetsEncryptEmail),
 	})
 	if err != nil {
 		return Profile{}, ProfileState{}, err
@@ -1560,6 +1662,7 @@ func applySetupOptionsToProfile(profile *Profile, options setupCLIOptions) {
 	profile.PrivateKeyPath = expandUserPath(firstNonEmpty(options.PrivateKeyPath, profile.PrivateKeyPath, defaultKeygenConfig().Path))
 	profile.BaseDomain = firstNonEmpty(options.BaseDomain, profile.BaseDomain)
 	profile.LetsEncryptEmail = firstNonEmpty(options.LetsEncryptEmail, profile.LetsEncryptEmail)
+	profile.PangolinAdminEmail = firstNonEmpty(options.PangolinAdminEmail, profile.PangolinAdminEmail, profile.LetsEncryptEmail)
 }
 
 func validateFullRunConfig(config setupConfig) error {
@@ -1577,6 +1680,7 @@ func validateFullRunConfig(config setupConfig) error {
 		LetsEncryptEmail: config.LetsEncryptEmail,
 		ServerSecret:     firstNonEmpty(config.ServerSecret, "generated-placeholder"),
 		SetupToken:       firstNonEmpty(config.PangolinSetupToken, "00000000000000000000000000000000"),
+		AdminEmail:       firstNonEmpty(config.PangolinAdminEmail, config.LetsEncryptEmail),
 	})
 }
 
@@ -1620,8 +1724,9 @@ func runProfileSetupPlan(ctx context.Context, store ProfileStore, profile Profil
 	}
 	printSSHLoginGuidance(stdout, config)
 	fmt.Fprintf(stdout, "\nProxy URL: https://pangolin.%s\n", config.BaseDomain)
-	fmt.Fprintf(stdout, "Required DNS: A %s -> %s and A *.%s -> %s\n", config.BaseDomain, config.Host, config.BaseDomain, config.Host)
-	printPangolinSetupGuidance(stdout, config.BaseDomain, config.PangolinSetupToken)
+	fmt.Fprintf(stdout, "Beszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\n", config.BaseDomain, config.BaseDomain)
+	fmt.Fprintln(stdout, requiredDNSGuidance(config.BaseDomain, config.Host))
+	fmt.Fprintf(stdout, "Retrieve Pangolin login with: aegisnode pangolin-credentials --profile %s\n", config.ProfileID)
 	return nil
 }
 
@@ -1675,8 +1780,9 @@ func runProfileSetupPlanWithRunView(ctx context.Context, store ProfileStore, pro
 	}
 	printSSHLoginGuidance(stdout, config)
 	fmt.Fprintf(stdout, "\nProxy URL: https://pangolin.%s\n", config.BaseDomain)
-	fmt.Fprintf(stdout, "Required DNS: A %s -> %s and A *.%s -> %s\n", config.BaseDomain, config.Host, config.BaseDomain, config.Host)
-	printPangolinSetupGuidance(stdout, config.BaseDomain, config.PangolinSetupToken)
+	fmt.Fprintf(stdout, "Beszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\n", config.BaseDomain, config.BaseDomain)
+	fmt.Fprintln(stdout, requiredDNSGuidance(config.BaseDomain, config.Host))
+	fmt.Fprintf(stdout, "Retrieve Pangolin login with: aegisnode pangolin-credentials --profile %s\n", config.ProfileID)
 	return nil
 }
 
@@ -1773,9 +1879,9 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 	stageStdout := setupStageWriter(stdout, "bootstrap", "stdout")
 	stageStderr := setupStageWriter(stderr, "bootstrap", "stderr")
 	if completedStages["bootstrap"] {
-		fmt.Fprintln(stageStdout, "Step 1/4: bootstrap administrative access already complete; skipping.")
+		fmt.Fprintln(stageStdout, "Step 1/5: bootstrap administrative access already complete; skipping.")
 	} else {
-		fmt.Fprintln(stageStdout, "Step 1/4: bootstrap administrative access.")
+		fmt.Fprintln(stageStdout, "Step 1/5: bootstrap administrative access.")
 		bootstrapConfig := bootstrapConfig{
 			Host:               config.Host,
 			SSHUser:            config.InitialSSHUser,
@@ -1799,9 +1905,9 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 	stageStdout = setupStageWriter(stdout, "harden", "stdout")
 	stageStderr = setupStageWriter(stderr, "harden", "stderr")
 	if completedStages["harden"] {
-		fmt.Fprintln(stageStdout, "Step 2/4: harden server already complete; skipping.")
+		fmt.Fprintln(stageStdout, "Step 2/5: harden server already complete; skipping.")
 	} else {
-		fmt.Fprintln(stageStdout, "Step 2/4: harden server.")
+		fmt.Fprintln(stageStdout, "Step 2/5: harden server.")
 		hardeningConfig := hardeningConfig{Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath}
 		hardeningClient, err := newHardeningRemoteClient(ctx, hardeningConfig, stageStdout, stageStderr)
 		if err != nil {
@@ -1819,9 +1925,9 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 	stageStdout = setupStageWriter(stdout, "network", "stdout")
 	stageStderr = setupStageWriter(stderr, "network", "stderr")
 	if completedStages["network"] {
-		fmt.Fprintln(stageStdout, "Step 3/4: configure Docker networking and UFW already complete; skipping.")
+		fmt.Fprintln(stageStdout, "Step 3/5: configure Docker networking and UFW already complete; skipping.")
 	} else {
-		fmt.Fprintln(stageStdout, "Step 3/4: configure Docker networking and UFW.")
+		fmt.Fprintln(stageStdout, "Step 3/5: configure Docker networking and UFW.")
 		sshPort, err := sshPortForHost(config.Host)
 		if err != nil {
 			return err
@@ -1843,28 +1949,51 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 	stageStdout = setupStageWriter(stdout, "proxy", "stdout")
 	stageStderr = setupStageWriter(stderr, "proxy", "stderr")
 	if completedStages["proxy"] {
-		fmt.Fprintln(stageStdout, "Step 4/4: deploy Pangolin and reverse proxy stack already complete; skipping.")
+		fmt.Fprintln(stageStdout, "Step 4/5: deploy Pangolin and reverse proxy stack already complete; skipping.")
+	} else {
+		fmt.Fprintln(stageStdout, "Step 4/5: deploy Pangolin and reverse proxy stack.")
+		proxyConfig := proxyConfig{
+			Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
+			BaseDomain: config.BaseDomain, LetsEncryptEmail: config.LetsEncryptEmail,
+			ServerSecret: config.ServerSecret, SetupToken: config.PangolinSetupToken,
+			AdminEmail: config.PangolinAdminEmail, AdminPassword: config.PangolinAdminPassword,
+			NewtID: config.NewtID, NewtSecret: config.NewtSecret,
+		}
+		proxyClient, err := newProxyRemoteClient(ctx, proxyConfig, stageStdout, stageStderr)
+		if err != nil {
+			return err
+		}
+		if err := runProxyStepsWithReporter(ctx, proxyClient, proxyConfig, runID, reporter, stageStdout); err != nil {
+			_ = proxyClient.Close()
+			return fmt.Errorf("proxy deployment failed: %w", err)
+		}
+		if err := proxyClient.Close(); err != nil {
+			return err
+		}
+	}
+
+	stageStdout = setupStageWriter(stdout, "observability", "stdout")
+	stageStderr = setupStageWriter(stderr, "observability", "stderr")
+	if completedStages["observability"] {
+		fmt.Fprintln(stageStdout, "Step 5/5: deploy observability stack already complete; skipping.")
 		return nil
 	}
-	fmt.Fprintln(stageStdout, "Step 4/4: deploy Pangolin and reverse proxy stack.")
-	proxyConfig := proxyConfig{
-		Host:             profile.IP,
-		SSHUser:          config.AdminUser,
-		PrivateKeyPath:   config.PrivateKeyPath,
-		BaseDomain:       config.BaseDomain,
-		LetsEncryptEmail: config.LetsEncryptEmail,
-		ServerSecret:     config.ServerSecret,
-		SetupToken:       config.PangolinSetupToken,
+	fmt.Fprintln(stageStdout, "Step 5/5: deploy observability stack.")
+	observabilityConfig := observabilityConfig{
+		Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
+		BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
+		AdminPassword: config.BeszelAdminPassword, PangolinPassword: config.PangolinAdminPassword, SystemToken: config.BeszelSystemToken,
+		HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
 	}
-	proxyClient, err := newProxyRemoteClient(ctx, proxyConfig, stageStdout, stageStderr)
+	observabilityClient, err := newObservabilityRemoteClient(ctx, observabilityConfig, stageStdout, stageStderr)
 	if err != nil {
 		return err
 	}
-	if err := runProxyStepsWithReporter(ctx, proxyClient, proxyConfig, runID, reporter, stageStdout); err != nil {
-		_ = proxyClient.Close()
-		return fmt.Errorf("proxy deployment failed: %w", err)
+	if err := runObservabilityStepsWithReporter(ctx, observabilityClient, observabilityConfig, runID, reporter, stageStdout); err != nil {
+		_ = observabilityClient.Close()
+		return fmt.Errorf("observability deployment failed: %w", err)
 	}
-	return proxyClient.Close()
+	return observabilityClient.Close()
 }
 
 func runSetupStage(ctx context.Context, profile Profile, config setupConfig, runID string, stage string, reporter TaskReporter, stdout, stderr io.Writer) error {
@@ -1930,6 +2059,10 @@ func runSetupStage(ctx context.Context, profile Profile, config setupConfig, run
 			LetsEncryptEmail: config.LetsEncryptEmail,
 			ServerSecret:     config.ServerSecret,
 			SetupToken:       config.PangolinSetupToken,
+			AdminEmail:       config.PangolinAdminEmail,
+			AdminPassword:    config.PangolinAdminPassword,
+			NewtID:           config.NewtID,
+			NewtSecret:       config.NewtSecret,
 		}
 		fmt.Fprintln(stageStdout, "One-time stage: deploy Pangolin and reverse proxy stack.")
 		proxyClient, err := newProxyRemoteClient(ctx, proxyConfig, stageStdout, stageStderr)
@@ -1941,6 +2074,23 @@ func runSetupStage(ctx context.Context, profile Profile, config setupConfig, run
 			return fmt.Errorf("proxy deployment failed: %w", err)
 		}
 		return proxyClient.Close()
+	case "observability":
+		observabilityConfig := observabilityConfig{
+			Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
+			BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
+			AdminPassword: config.BeszelAdminPassword, PangolinPassword: config.PangolinAdminPassword, SystemToken: config.BeszelSystemToken,
+			HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
+		}
+		fmt.Fprintln(stageStdout, "One-time stage: deploy observability stack.")
+		observabilityClient, err := newObservabilityRemoteClient(ctx, observabilityConfig, stageStdout, stageStderr)
+		if err != nil {
+			return err
+		}
+		if err := runObservabilityStepsWithReporter(ctx, observabilityClient, observabilityConfig, runID, reporter, stageStdout); err != nil {
+			_ = observabilityClient.Close()
+			return fmt.Errorf("observability deployment failed: %w", err)
+		}
+		return observabilityClient.Close()
 	default:
 		return fmt.Errorf("unknown setup stage: %s", stage)
 	}
@@ -1952,8 +2102,10 @@ func printStageCompletionGuidance(stdout io.Writer, config setupConfig, stage st
 		printSSHLoginGuidance(stdout, config)
 	case "proxy":
 		fmt.Fprintf(stdout, "\nProxy URL: https://pangolin.%s\n", config.BaseDomain)
-		fmt.Fprintf(stdout, "Required DNS: A %s -> %s and A *.%s -> %s\n", config.BaseDomain, config.Host, config.BaseDomain, config.Host)
-		printPangolinSetupGuidance(stdout, config.BaseDomain, config.PangolinSetupToken)
+		fmt.Fprintln(stdout, requiredDNSGuidance(config.BaseDomain, config.Host))
+		fmt.Fprintf(stdout, "Retrieve Pangolin login with: aegisnode pangolin-credentials --profile %s\n", config.ProfileID)
+	case "observability":
+		fmt.Fprintf(stdout, "\nBeszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\n", config.BaseDomain, config.BaseDomain)
 	}
 }
 
@@ -2163,6 +2315,17 @@ func setupRunStageTaskTotals(config setupConfig) map[string]int {
 			BaseDomain:       config.BaseDomain,
 			LetsEncryptEmail: config.LetsEncryptEmail,
 			ServerSecret:     firstNonEmpty(config.ServerSecret, "generated-placeholder"),
+			SetupToken:       firstNonEmpty(config.PangolinSetupToken, "00000000000000000000000000000000"),
+			AdminEmail:       firstNonEmpty(config.PangolinAdminEmail, config.LetsEncryptEmail),
+			AdminPassword:    config.PangolinAdminPassword,
+			NewtID:           config.NewtID,
+			NewtSecret:       config.NewtSecret,
+		})),
+		"observability": len(observabilityTasks(observabilityConfig{
+			Host: config.Host, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
+			BaseDomain: config.BaseDomain, AdminEmail: firstNonEmpty(config.PangolinAdminEmail, config.LetsEncryptEmail),
+			AdminPassword: config.BeszelAdminPassword, PangolinPassword: config.PangolinAdminPassword, SystemToken: config.BeszelSystemToken,
+			HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
 		})),
 	}
 }
@@ -2434,6 +2597,8 @@ func profileRunStageLabel(stage string) string {
 		return "Network"
 	case "proxy":
 		return "Proxy"
+	case "observability":
+		return "Observability"
 	default:
 		return "Run"
 	}
@@ -2652,7 +2817,7 @@ func preflightChecks(config setupConfig) []preflightCheck {
 	}
 	checks = append(checks, nativeCapabilityCheck("native SSH runner"))
 
-	privateKeyRequired := config.Mode == setupModeBootstrapHarden || config.Mode == setupModeHardenOnly || config.Mode == setupModeNetwork || config.Mode == setupModeProxy || config.Mode == setupModeFullRun
+	privateKeyRequired := config.Mode == setupModeBootstrapHarden || config.Mode == setupModeHardenOnly || config.Mode == setupModeNetwork || config.Mode == setupModeProxy || config.Mode == setupModeObservability || config.Mode == setupModeFullRun
 	checks = append(checks, fileCheck("private key", config.PrivateKeyPath, privateKeyRequired))
 
 	publicKeyRequired := config.Mode == setupModeBootstrapHarden || config.Mode == setupModeFullRun
@@ -3143,29 +3308,23 @@ func setupPlanSummary(config setupConfig) string {
 		)
 	case setupModeProxy:
 		return fmt.Sprintf(
-			"- Connect to %s as %s with %s.\n- Deploy Traefik, Pangolin, and Gerbil for %s.\n- Required DNS: A %s -> %s and A *.%s -> %s.\n",
+			"- Connect to %s as %s with %s.\n- Deploy Traefik, Pangolin, Gerbil, Newt, Beszel, and Dozzle for %s.\n- %s.\n",
 			config.Host,
 			config.AdminUser,
 			config.PrivateKeyPath,
 			config.BaseDomain,
-			config.BaseDomain,
-			config.Host,
-			config.BaseDomain,
-			config.Host,
+			requiredDNSGuidance(config.BaseDomain, config.Host),
 		)
 	case setupModeFullRun:
 		return fmt.Sprintf(
-			"- Use profile %s for %s.\n- Connect first as %s, create or update %s, then harden the server.\n- Configure Docker networking and UFW as %s.\n- Deploy Traefik, Pangolin, and Gerbil for %s.\n- Pangolin server secret is generated, saved, and reused without printing it.\n- Required DNS: A %s -> %s and A *.%s -> %s.\n",
+			"- Use profile %s for %s.\n- Connect first as %s, create or update %s, then harden the server.\n- Configure Docker networking and UFW as %s.\n- Deploy Traefik, Pangolin, Gerbil, Newt, Beszel, and Dozzle for %s.\n- Pangolin and observability secrets are generated, saved, and reused without printing them.\n- %s.\n",
 			firstNonEmpty(config.ProfileID, "(unsaved)"),
 			config.Host,
 			config.InitialSSHUser,
 			config.AdminUser,
 			config.AdminUser,
 			config.BaseDomain,
-			config.BaseDomain,
-			config.Host,
-			config.BaseDomain,
-			config.Host,
+			requiredDNSGuidance(config.BaseDomain, config.Host),
 		)
 	default:
 		return "- Unknown plan.\n"

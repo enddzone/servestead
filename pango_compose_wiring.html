@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AegisNode Pangolin Compose Wiring Plan</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1020;
+      --panel: #131a2d;
+      --panel-2: #192238;
+      --text: #e8edf7;
+      --muted: #a6b0c3;
+      --border: #2a3650;
+      --accent: #7dd3fc;
+      --good: #86efac;
+      --warn: #fcd34d;
+      --code: #090d18;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(1080px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 48px 0 80px;
+    }
+
+    h1, h2, h3 { line-height: 1.2; }
+    h1 { margin: 0 0 12px; font-size: clamp(2rem, 5vw, 3.5rem); }
+    h2 { margin-top: 48px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+    h3 { margin-top: 28px; }
+    p, li { color: var(--muted); }
+    strong, dt { color: var(--text); }
+    a { color: var(--accent); }
+
+    .lede {
+      max-width: 780px;
+      font-size: 1.15rem;
+    }
+
+    .badge {
+      display: inline-block;
+      margin-bottom: 18px;
+      padding: 5px 10px;
+      border: 1px solid #155e75;
+      border-radius: 999px;
+      color: var(--accent);
+      background: #08334466;
+      font-size: .8rem;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .callout, .card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--panel);
+      padding: 20px;
+    }
+
+    .callout {
+      margin: 28px 0;
+      border-left: 4px solid var(--good);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+    }
+
+    .card h3 { margin-top: 0; }
+
+    code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: var(--code);
+      color: #dbeafe;
+    }
+
+    pre {
+      overflow-x: auto;
+      padding: 18px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--code);
+      color: #dbeafe;
+      line-height: 1.45;
+    }
+
+    pre code { padding: 0; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 20px 0;
+    }
+
+    th, td {
+      padding: 12px;
+      border: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th { background: var(--panel-2); }
+    td { color: var(--muted); }
+
+    .phase {
+      margin: 18px 0;
+      padding: 18px 20px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--panel);
+    }
+
+    .phase h3 { margin: 0 0 8px; }
+    .phase ul { margin-bottom: 0; }
+
+    .decision {
+      color: var(--good);
+      font-weight: 700;
+    }
+
+    .warning {
+      color: var(--warn);
+      font-weight: 700;
+    }
+
+    footer {
+      margin-top: 56px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: .9rem;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <span class="badge">Implementation plan</span>
+    <h1>Pangolin Compose Wiring</h1>
+    <p class="lede">
+      Make AegisNode deploy Pangolin, discover application resources from
+      Docker Compose labels, and prove the workflow with an authenticated
+      Beszel and Dozzle stack.
+    </p>
+  </header>
+
+  <div class="callout">
+    <strong>Certificate decision:</strong>
+    keep Traefik's existing ACME HTTP-01 resolver. Pangolin will request an
+    individual certificate for each configured hostname. No wildcard
+    certificate, DNS API, or DNS-provider integration is in scope.
+  </div>
+
+  <div class="callout">
+    <strong>Configuration tracking decision:</strong>
+    this work does not choose or implement Git, S3, or any other system for
+    storing, versioning, or distributing server and stack configuration.
+    AegisNode will generate and deploy the files needed for this test. The
+    tracking methodology will be designed separately after the Pangolin wiring
+    has been validated.
+  </div>
+
+  <h2>1. Goals and success criteria</h2>
+  <div class="grid">
+    <section class="card">
+      <h3>Repeatable deployment</h3>
+      <p>
+        AegisNode generates and deploys the Pangolin, Traefik, Newt, and test
+        stack configuration consistently. Persisting those inputs in a
+        configuration-tracking system is deferred.
+      </p>
+    </section>
+    <section class="card">
+      <h3>No setup UI required</h3>
+      <p>
+        A fresh deployment creates the Pangolin administrator, organization,
+        and local Newt site through Pangolin's HTTP endpoints.
+      </p>
+    </section>
+    <section class="card">
+      <h3>Compose-driven exposure</h3>
+      <p>
+        Adding Pangolin labels to an application service creates or updates its
+        public resource without editing the Pangolin dashboard.
+      </p>
+    </section>
+    <section class="card">
+      <h3>Working test stack</h3>
+      <p>
+        Beszel monitors the VPS, Dozzle displays its container logs, and both
+        are reachable only through Pangolin authentication.
+      </p>
+    </section>
+  </div>
+
+  <h2>2. Findings and constraints</h2>
+  <ul>
+    <li>
+      Pangolin blueprints support YAML and flattened Docker labels. Newt can
+      continuously reconcile those labels when Docker discovery is enabled.
+    </li>
+    <li>
+      Pangolin's documented initial setup is UI-based, but the UI uses
+      <code>PUT /api/v1/auth/set-server-admin</code>. AegisNode can call this
+      endpoint with the setup token, then use the normal login API to create
+      the organization and site.
+    </li>
+    <li>
+      This bootstrap API is not a static configuration interface. Pangolin
+      images must be pinned and the endpoint contract must be tested before an
+      upgrade.
+    </li>
+    <li>
+      Directly pre-populating Pangolin's SQLite database is out of scope. It
+      would bind AegisNode to an internal schema and bypass application
+      validation.
+    </li>
+    <li>
+      HTTP-01 requires each public hostname to resolve to the VPS and requires
+      inbound TCP port 80. A wildcard DNS record is convenient but optional;
+      explicit records for Pangolin, Beszel, and Dozzle also work.
+    </li>
+  </ul>
+
+  <h2>3. Target architecture</h2>
+  <pre><code>Internet
+   |
+   | TCP 80/443
+   v
+Gerbil network namespace + Traefik
+   |
+   +-- Pangolin dashboard/API
+   |
+   +-- Pangolin resource routing
+          |
+          v
+       Newt site
+          |
+          | shared Docker network: aegis-public
+          +-- beszel:8090
+          +-- dozzle:8080
+
+Docker socket --&gt; read-only socket proxy
+                    +-- Newt label discovery
+                    +-- Dozzle log access
+                    +-- Beszel agent metrics</code></pre>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Component</th>
+        <th>Responsibility</th>
+        <th>Persistent state</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Pangolin</td>
+        <td>Identity, access policy, resources, and site coordination</td>
+        <td><code>/opt/aegisnode/proxy/config/db</code></td>
+      </tr>
+      <tr>
+        <td>Traefik</td>
+        <td>HTTP routing and per-host Let's Encrypt certificates</td>
+        <td><code>/opt/aegisnode/proxy/config/letsencrypt</code></td>
+      </tr>
+      <tr>
+        <td>Newt</td>
+        <td>One VPS-level site and continuous Docker-label reconciliation</td>
+        <td>Generated site ID and secret</td>
+      </tr>
+      <tr>
+        <td>Beszel</td>
+        <td>VPS and container metrics</td>
+        <td><code>/opt/aegisnode/stacks/observability/beszel_data</code></td>
+      </tr>
+      <tr>
+        <td>Dozzle</td>
+        <td>Read-only container log viewer</td>
+        <td>Named data volume</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>4. Runtime configuration model</h2>
+  <h3>Files generated and deployed by AegisNode</h3>
+  <ul>
+    <li>Pangolin Compose file and <code>config.yml</code>.</li>
+    <li>Traefik static and dynamic configuration files.</li>
+    <li>Observability Compose file and Beszel system configuration.</li>
+    <li>Pangolin labels for Beszel and Dozzle.</li>
+    <li>Explicit, tested container image versions.</li>
+  </ul>
+
+  <p>
+    These runtime files are deployment outputs for the current test. This plan
+    does not require the observability stack or its rendered configuration to
+    be committed to source control.
+  </p>
+
+  <h3>Secrets</h3>
+  <ul>
+    <li>Pangolin server secret, setup token, and administrator password.</li>
+    <li>Newt site ID and secret.</li>
+    <li>Beszel initial-user password, system token, and Hub key material.</li>
+  </ul>
+  <p>
+    These values remain in AegisNode's owner-only profile secret file and in
+    required root-owned <code>0600</code> runtime files on the VPS.
+  </p>
+
+  <h3>Application label contract</h3>
+  <pre><code>labels:
+  - pangolin.public-resources.beszel.name=Beszel
+  - pangolin.public-resources.beszel.mode=http
+  - pangolin.public-resources.beszel.full-domain=beszel.${BASE_DOMAIN}
+  - pangolin.public-resources.beszel.auth.sso-enabled=true
+  - pangolin.public-resources.beszel.auth.sso-users[0]=${PANGOLIN_ADMIN_EMAIL}
+  - pangolin.public-resources.beszel.targets[0].hostname=beszel
+  - pangolin.public-resources.beszel.targets[0].port=8090
+  - pangolin.public-resources.beszel.targets[0].method=http</code></pre>
+  <p>
+    Dozzle uses the same shape with its own resource key, domain, hostname, and
+    port 8080. Application services use <code>expose</code>, not host
+    <code>ports</code>.
+  </p>
+
+  <h2>5. Implementation phases</h2>
+
+  <section class="phase">
+    <h3>Phase 1 — Extend configuration rendering</h3>
+    <ul>
+      <li>Extend the existing Pangolin and Traefik configuration generators.</li>
+      <li>Add rendering for the observability Compose and Beszel configuration files.</li>
+      <li>Pin Pangolin, Gerbil, Traefik, Badger, Newt, Beszel, and Dozzle versions.</li>
+      <li>Render validated values and preserve existing file permissions.</li>
+    </ul>
+  </section>
+
+  <section class="phase">
+    <h3>Phase 2 — Automate Pangolin bootstrap</h3>
+    <ul>
+      <li>Generate a Pangolin administrator password and save it in profile secrets.</li>
+      <li>Wait for Pangolin health and check initial-setup status.</li>
+      <li>Create the administrator only when initial setup is incomplete.</li>
+      <li>Log in and idempotently create organization <code>aegisnode</code>.</li>
+      <li>Create Newt site <code>local-vps</code> with stable generated credentials.</li>
+      <li>
+        For an existing registered installation without a saved password, require
+        a one-time <code>PANGOLIN_ADMIN_PASSWORD</code> environment value.
+      </li>
+    </ul>
+  </section>
+
+  <section class="phase">
+    <h3>Phase 3 — Add host-level Newt discovery</h3>
+    <ul>
+      <li>Create external network <code>aegis-public</code>.</li>
+      <li>Run one Newt instance per VPS on that network.</li>
+      <li>Enable Docker discovery and network validation.</li>
+      <li>
+        Put a read-only Docker socket proxy between the Docker daemon and Newt,
+        Beszel, and Dozzle; deny write and exec endpoints.
+      </li>
+    </ul>
+  </section>
+
+  <section class="phase">
+    <h3>Phase 4 — Deploy observability stack</h3>
+    <ul>
+      <li>Add an <code>observability</code> setup stage after <code>proxy</code>.</li>
+      <li>Deploy Beszel Hub, a local Beszel agent, and Dozzle in one Compose project.</li>
+      <li>Preconfigure Beszel's local system and agent token without using its UI.</li>
+      <li>Set Beszel's trusted authentication header to <code>Remote-Email</code>.</li>
+      <li>Set Dozzle's authentication provider to <code>forward-proxy</code>.</li>
+      <li>Disable Dozzle container actions and shell access.</li>
+      <li>Apply Pangolin SSO labels restricted to the initial administrator.</li>
+    </ul>
+  </section>
+
+  <section class="phase">
+    <h3>Phase 5 — Update operator workflow</h3>
+    <ul>
+      <li>
+        Add optional <code>--pangolin-admin-email</code>, defaulting to the
+        existing Let's Encrypt email.
+      </li>
+      <li>Add <code>aegisnode pangolin-credentials --profile &lt;id&gt;</code>.</li>
+      <li>Show the new observability stage in the TUI and run summary.</li>
+      <li>
+        Replace wildcard-certificate guidance with DNS requirements for the
+        three concrete hostnames.
+      </li>
+    </ul>
+  </section>
+
+  <h2>6. Verification and acceptance</h2>
+  <h3>Automated checks</h3>
+  <ul>
+    <li>Unit-test configuration rendering, escaping, validation, and secret generation.</li>
+    <li>Contract-test Pangolin setup, login, organization, and site API responses.</li>
+    <li>Test fresh profiles and migration behavior for existing profiles.</li>
+    <li>Run <code>docker compose config --quiet</code> against rendered fixtures.</li>
+    <li>Run <code>go test ./...</code> and <code>go vet ./...</code>.</li>
+  </ul>
+
+  <h3>Disposable VPS smoke test</h3>
+  <ol>
+    <li>
+      Point <code>pangolin.example.com</code>, <code>beszel.example.com</code>,
+      and <code>dozzle.example.com</code> at the VPS, either explicitly or
+      through a wildcard DNS record.
+    </li>
+    <li>Run the complete AegisNode setup twice and confirm the second run is idempotent.</li>
+    <li>Confirm all infrastructure and observability containers are healthy.</li>
+    <li>Confirm Newt discovers and applies both Compose-labeled resources.</li>
+    <li>Confirm each hostname serves a valid individual Let's Encrypt certificate.</li>
+    <li>Confirm anonymous requests are redirected to Pangolin authentication.</li>
+    <li>Confirm the administrator reaches Beszel and Dozzle without a second login.</li>
+    <li>Confirm Beszel reports the VPS online and Dozzle displays container logs.</li>
+    <li>Confirm ports 8090, 8080, and the Docker proxy are not publicly reachable.</li>
+  </ol>
+
+  <h2>7. Explicit non-goals</h2>
+  <ul>
+    <li>Choosing or implementing Git, S3, or another configuration-tracking system.</li>
+    <li>Requiring the Beszel/Dozzle test stack to be stored in source control.</li>
+    <li>Wildcard TLS certificates or DNS-01 challenges.</li>
+    <li>Cloudflare or any other DNS-provider API integration.</li>
+    <li>Automatic DNS record creation.</li>
+    <li>Pangolin database pre-population.</li>
+    <li>General-purpose application deployment beyond the first test stack.</li>
+  </ul>
+
+  <h2>8. References</h2>
+  <ul>
+    <li><a href="https://docs.pangolin.net/manage/blueprints">Pangolin blueprints and container labels</a></li>
+    <li><a href="https://docs.pangolin.net/manage/sites/configure-site">Newt configuration and Docker discovery</a></li>
+    <li><a href="https://docs.pangolin.net/manage/access-control/forwarded-headers">Pangolin forwarded identity headers</a></li>
+    <li><a href="https://docs.pangolin.net/self-host/manual/docker-compose">Pangolin Docker Compose deployment</a></li>
+    <li><a href="https://doc.traefik.io/traefik/https/acme/#httpchallenge">Traefik ACME HTTP-01</a></li>
+    <li><a href="https://beszel.dev/guide/getting-started">Beszel deployment</a></li>
+    <li><a href="https://dozzle.dev/guide/authentication">Dozzle forward-proxy authentication</a></li>
+  </ul>
+
+  <footer>
+    <span class="decision">Selected:</span> HTTP-01 with per-host certificates.
+    <span class="warning">Required:</span> every exposed hostname must resolve to
+    the VPS and TCP port 80 must remain reachable for certificate issuance and renewal.
+  </footer>
+</main>
+</body>
+</html>

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"math/big"
@@ -12,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 const (
@@ -27,16 +31,17 @@ const (
 )
 
 type Profile struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	IP               string    `json:"ip"`
-	InitialSSHUser   string    `json:"initial_ssh_user"`
-	AdminUser        string    `json:"admin_user"`
-	PrivateKeyPath   string    `json:"private_key_path"`
-	BaseDomain       string    `json:"base_domain,omitempty"`
-	LetsEncryptEmail string    `json:"lets_encrypt_email,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID                 string    `json:"id"`
+	Name               string    `json:"name"`
+	IP                 string    `json:"ip"`
+	InitialSSHUser     string    `json:"initial_ssh_user"`
+	AdminUser          string    `json:"admin_user"`
+	PrivateKeyPath     string    `json:"private_key_path"`
+	BaseDomain         string    `json:"base_domain,omitempty"`
+	LetsEncryptEmail   string    `json:"lets_encrypt_email,omitempty"`
+	PangolinAdminEmail string    `json:"pangolin_admin_email,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 type ProfileSummary struct {
@@ -68,8 +73,15 @@ type SetupStageStatus struct {
 }
 
 type ProfileSecrets struct {
-	ServerSecret       string `json:"server_secret"`
-	PangolinSetupToken string `json:"pangolin_setup_token"`
+	ServerSecret          string `json:"server_secret"`
+	PangolinSetupToken    string `json:"pangolin_setup_token"`
+	PangolinAdminPassword string `json:"pangolin_admin_password"`
+	NewtID                string `json:"newt_id"`
+	NewtSecret            string `json:"newt_secret"`
+	BeszelAdminPassword   string `json:"beszel_admin_password"`
+	BeszelSystemToken     string `json:"beszel_system_token"`
+	BeszelHubPrivateKey   string `json:"beszel_hub_private_key"`
+	BeszelHubPublicKey    string `json:"beszel_hub_public_key"`
 }
 
 func (secrets *ProfileSecrets) EnsureServerSecret() error {
@@ -115,6 +127,96 @@ func GeneratePangolinSetupToken() (string, error) {
 		token[i] = alphabet[index.Int64()]
 	}
 	return string(token), nil
+}
+
+func (secrets *ProfileSecrets) EnsureComposeWiringSecrets() error {
+	if secrets.PangolinAdminPassword == "" {
+		generated, err := generatePassword(32)
+		if err != nil {
+			return err
+		}
+		secrets.PangolinAdminPassword = generated
+	}
+	generators := []struct {
+		value *string
+		size  int
+	}{
+		{&secrets.NewtID, 15},
+		{&secrets.NewtSecret, 48},
+		{&secrets.BeszelAdminPassword, 32},
+		{&secrets.BeszelSystemToken, 48},
+	}
+	for _, item := range generators {
+		if *item.value != "" {
+			continue
+		}
+		generated, err := generateLowercaseSecret(item.size)
+		if err != nil {
+			return err
+		}
+		*item.value = generated
+	}
+	if secrets.BeszelHubPrivateKey == "" || secrets.BeszelHubPublicKey == "" {
+		publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return err
+		}
+		privateBlock, err := ssh.MarshalPrivateKey(privateKey, "aegisnode-beszel")
+		if err != nil {
+			return err
+		}
+		sshPublicKey, err := ssh.NewPublicKey(publicKey)
+		if err != nil {
+			return err
+		}
+		secrets.BeszelHubPrivateKey = string(pem.EncodeToMemory(privateBlock))
+		secrets.BeszelHubPublicKey = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPublicKey)))
+	}
+	return nil
+}
+
+func pangolinPasswordValid(password string) bool {
+	if len(password) < 8 || len(password) > 128 {
+		return false
+	}
+	var upper, lower, digit, special bool
+	for _, character := range password {
+		switch {
+		case character >= 'A' && character <= 'Z':
+			upper = true
+		case character >= 'a' && character <= 'z':
+			lower = true
+		case character >= '0' && character <= '9':
+			digit = true
+		case strings.ContainsRune("~!`@#$%^&*()_-+={}[]|\\:;\"'<>,./?", character):
+			special = true
+		}
+	}
+	return upper && lower && digit && special
+}
+
+func generatePassword(length int) (string, error) {
+	if length < 8 {
+		return "", errors.New("password length must be at least 8")
+	}
+	suffix, err := generateLowercaseSecret(length - 4)
+	if err != nil {
+		return "", err
+	}
+	return "Aa1!" + suffix, nil
+}
+
+func generateLowercaseSecret(length int) (string, error) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	value := make([]byte, length)
+	for i := range value {
+		index, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			return "", err
+		}
+		value[i] = alphabet[index.Int64()]
+	}
+	return string(value), nil
 }
 
 type ProfileStore interface {

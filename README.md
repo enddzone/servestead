@@ -79,7 +79,7 @@ bin/aegisnode setup \
   --yes
 ```
 
-Running `setup` without `--ip` opens the profile-first terminal UI. It lists saved profiles, shows their stage dashboard, collects missing full-run values before any remote command runs, lets you press `v` to review the plan, then shows the live run view during execution. From a saved profile dashboard, use `j`/`k` to select a stage and press `r` to run that stage once, even if it is already marked complete. The dashboard checks Pangolin's initial-registration status, highlights incomplete registration, uses `t` to reveal or hide the saved setup token and URL, and uses `c` to retry the status check. Press `q` to quit from navigation or run screens, `esc` to go back, or `x` to delete only the local saved profile, secrets, state, and run logs; delete does not change the remote server. The older one-off guided paths remain available from the advanced legacy setup entry. Setup does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
+Running `setup` without `--ip` opens the profile-first terminal UI. It lists saved profiles, shows the bootstrap, hardening, network, proxy, and observability stages, collects missing full-run values before any remote command runs, lets you press `v` to review the plan, then shows the live run view during execution. From a saved profile dashboard, use `j`/`k` to select a stage and press `r` to run that stage once, even if it is already marked complete. Retrying Proxy after Pangolin has already been registered opens masked administrator email/password inputs and saves the supplied credentials in the owner-only profile secrets file. Press `q` to quit from navigation or run screens, `esc` to go back, or `x` to delete only the local saved profile, secrets, state, and run logs; delete does not change the remote server. The older one-off guided paths remain available from the advanced legacy setup entry. Setup does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
 
 For a quick preflight check without opening the TUI:
 
@@ -139,12 +139,16 @@ bin/aegisnode proxy \
   --server-secret 'replace-with-a-long-random-secret'
 ```
 
-The direct proxy command keeps `--server-secret` for scripts. Normal profile-aware setup generates this value automatically and reuses it from the profile secrets file. AegisNode also generates Pangolin's distinct one-time admin setup token, saves it with the profile, passes it to Pangolin through the supported `PANGOLIN_SETUP_TOKEN` environment variable, and prints it after deployment. The proxy runner writes `/opt/aegisnode/proxy/docker-compose.yml`, Pangolin application config, and Traefik config files, prepares persistent data directories, opens TCP/80, TCP/443, UDP/51820, and UDP/21820 for Traefik and Gerbil/Pangolin ingress, starts Traefik, Pangolin, and Gerbil with Docker Compose, and verifies all three services are running. DNS registrar changes remain external; create `A example.com -> 203.0.113.10` and `A *.example.com -> 203.0.113.10` before expecting Let's Encrypt HTTP-01 issuance to complete.
+The direct proxy command keeps `--server-secret` for scripts. Normal profile-aware setup generates and saves the Pangolin server secret, administrator password, Newt credentials, Beszel credentials, and Beszel key material. It creates the Pangolin administrator, `aegisnode` organization, and `local-vps` Newt site through Pangolin's API. The proxy stack uses pinned Pangolin, Gerbil, Traefik, Newt, and Docker socket proxy images. Newt continuously reconciles Pangolin resources from Compose labels through a read-only socket proxy.
 
-Retrieve the saved token again before completing initial admin registration:
+The observability stage writes `/opt/aegisnode/stacks/observability/docker-compose.yml`, preconfigures a local Beszel system, and deploys Beszel Hub, Beszel Agent, and Dozzle without public host ports. Beszel and Dozzle are exposed as `beszel.<domain>` and `dozzle.<domain>` through Pangolin SSO for the saved administrator. The stage pauses Newt while replacing the application containers so Docker events cannot race concurrent blueprint creation, reconciles those exact names and hostnames to the stable resource IDs `aegisnode-beszel` and `aegisnode-dozzle`, removes conflicting duplicates, restarts Newt for one complete scan, and verifies exactly one of each before completing. Dozzle container actions and shell access are disabled.
+
+DNS registrar changes remain external. Create records for `pangolin.<domain>`, `beszel.<domain>`, and `dozzle.<domain>` pointing to the VPS. Traefik uses HTTP-01 to issue a separate certificate for each hostname, so TCP port 80 must remain reachable.
+
+Retrieve the generated Pangolin administrator credentials:
 
 ```sh
-bin/aegisnode pangolin-token --ip 203.0.113.10
+bin/aegisnode pangolin-credentials --profile <profile-id>
 ```
 
-If more than one saved profile uses that IP, rerun with the profile ID shown in the error: `bin/aegisnode pangolin-token --profile <id>`. Then open `https://pangolin.example.com/auth/initial-setup` and enter the token. Existing profiles created before this feature need the Proxy stage run once to generate and deploy a deterministic token; AegisNode does not claim an undeployed local token matches an older Pangolin-generated token.
+For an existing registered Pangolin profile created before automated bootstrap, set `PANGOLIN_ADMIN_PASSWORD` once when rerunning setup so AegisNode can save the existing password in the owner-only profile secrets file.
