@@ -174,11 +174,11 @@
                     <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div>
                             <h2 class="text-lg font-extrabold text-ink">Final Implementation Snapshot</h2>
-                            <p class="mt-2 max-w-3xl text-sm leading-6 text-slate-600">The backend foundation and profile-first setup TUI are in place. The remaining product gap is a fully live Bubble Tea run screen; remote execution still streams through the existing synchronous runner while structured events persist profile state and logs.</p>
+                            <p class="mt-2 max-w-3xl text-sm leading-6 text-slate-600">The backend foundation, profile-first setup TUI, and live Bubble Tea run screen are in place. Interactive profile-aware setup now renders progress, current task, stage status, and inline logs while structured events continue to persist profile state and JSONL logs.</p>
                         </div>
-                        <span class="inline-flex shrink-0 items-center rounded-lg bg-marigold/10 px-3 py-2 text-xs font-bold uppercase tracking-wide text-marigold">
-                            <i class="fa-solid fa-location-dot mr-2"></i>
-                            Next: live run view
+                        <span class="inline-flex shrink-0 items-center rounded-lg bg-moss/10 px-3 py-2 text-xs font-bold uppercase tracking-wide text-moss">
+                            <i class="fa-solid fa-circle-check mr-2"></i>
+                            UX overhaul complete
                         </span>
                     </div>
                     <div class="mt-5 grid gap-3 md:grid-cols-3">
@@ -188,11 +188,11 @@
                         </div>
                         <div class="rounded-lg border border-marigold/30 bg-marigold/5 p-4">
                             <p class="text-xs font-bold uppercase tracking-wide text-marigold">TUI ready</p>
-                            <p class="mt-2 text-sm leading-6 text-slate-600">No-arg setup now opens profile picking, dashboard, upfront intake, advanced edits, and full plan review.</p>
+                            <p class="mt-2 text-sm leading-6 text-slate-600">No-arg setup now opens profile picking, dashboard, upfront intake, advanced edits, full plan review, and the live run view.</p>
                         </div>
                         <div class="rounded-lg border border-berry/30 bg-berry/5 p-4">
-                            <p class="text-xs font-bold uppercase tracking-wide text-berry">Residual gap</p>
-                            <p class="mt-2 text-sm leading-6 text-slate-600">The run itself is still synchronous stdout/stderr output rather than a live spinner/log viewport owned by Bubble Tea.</p>
+                            <p class="text-xs font-bold uppercase tracking-wide text-berry">Run view ready</p>
+                            <p class="mt-2 text-sm leading-6 text-slate-600">Interactive runs use a Bubble Tea command loop with spinner, progress bar, stage rows, current task text, and a scrollback log viewport.</p>
                         </div>
                     </div>
                 </div>
@@ -277,7 +277,7 @@
 
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
                     <h2 class="text-lg font-extrabold text-ink">Phased Success Criteria</h2>
-                    <p class="mt-2 text-sm leading-6 text-slate-600">Repository status after the implementation pass: 22 of 24 checklist items are implemented and covered by `go test ./...`. The open items are the fully live in-TUI run screen and inline log viewport; execution currently uses the existing synchronous runner/output path while persisting structured task events.</p>
+                    <p class="mt-2 text-sm leading-6 text-slate-600">Repository status after the implementation pass: 24 of 24 checklist items are implemented and covered by `go test ./...`. Interactive profile-aware setup runs now render progress, current task, stage status, and inline logs inside the TUI while preserving scripted output for `--yes` and non-TTY flows.</p>
                     <div class="mt-4 grid gap-3 md:grid-cols-2">
                         <label class="flex gap-3 rounded-lg border border-line p-3 text-sm"><input id="task-1" type="checkbox" onchange="toggleTask('task-1')" class="mt-1"> User can run `aegisnode setup --ip X` and execute a full setup plan from one command.</label>
                         <label class="flex gap-3 rounded-lg border border-line p-3 text-sm"><input id="task-2" type="checkbox" onchange="toggleTask('task-2')" class="mt-1"> All required values are collected before remote execution starts.</label>
@@ -305,6 +305,7 @@
                             <h3 class="font-bold text-marigold">Implemented UI capabilities</h3>
                             <ul class="mt-3 space-y-2 text-sm leading-6 text-slate-600">
                                 <li>No-arg `setup` now opens a profile-first app model with profile picker, dashboard, upfront intake, advanced edit path, and full plan review.</li>
+                                <li>The dashboard stage table supports one-time stage runs, including rerunning a stage already marked complete; `j`/`k` selects, `r` reruns, `v` reviews, `esc` goes back, and `q` quits from navigation/run screens.</li>
                                 <li>The TUI uses `bubbles/list`, `bubbles/table`, `bubbles/progress`, `bubbles/viewport`, and `bubbles/help`/`key` components.</li>
                                 <li>Dashboard stage rows are rendered from `ProfileState` rather than parsing human-readable output.</li>
                                 <li>Fresh profile creation, profile switching, and advanced SSH/profile edits are intentional user actions.</li>
@@ -316,11 +317,11 @@
                 </div>
 
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
-                    <h2 class="text-lg font-extrabold text-ink">Remaining Hardening</h2>
+                    <h2 class="text-lg font-extrabold text-ink">Final Verification</h2>
                     <div class="mt-4 grid gap-4 md:grid-cols-2">
                         <div class="rounded-lg border border-line p-4">
-                            <h3 class="font-bold text-ink">Start here</h3>
-                            <p class="mt-2 text-sm leading-6 text-slate-600">Move remote execution into a Bubble Tea command loop if a live spinner, task list, and scrollback log viewport are required during the run.</p>
+                            <h3 class="font-bold text-ink">Implemented</h3>
+                            <p class="mt-2 text-sm leading-6 text-slate-600">Remote execution for interactive profile-aware setup now runs inside a Bubble Tea command loop with live status and scrollback logs.</p>
                         </div>
                         <div class="rounded-lg border border-line p-4">
                             <h3 class="font-bold text-ink">Verify here</h3>
@@ -703,7 +704,7 @@ func (secrets *ProfileSecrets) EnsureServerSecret() error {
 
                 <div class="rounded-lg border border-line bg-panel p-6 shadow-sm">
                     <h2 class="text-lg font-bold text-ink">Release Sequence</h2>
-                    <p class="mt-3 text-sm leading-6 text-slate-600">Current release status: steps 1, 2, 3, and 5 are complete, and step 4 is implemented for profile selection, intake, review, dashboard, advanced edits, and non-TTY fallback. The remaining step 4 gap is the optional live in-TUI run/log screen.</p>
+                    <p class="mt-3 text-sm leading-6 text-slate-600">Current release status: steps 1 through 5 are complete. Step 4 now includes profile selection, intake, review, dashboard, advanced edits, non-TTY fallback, and the live in-TUI run/log screen.</p>
                     <ol class="mt-4 space-y-3 text-sm leading-6 text-slate-600">
                         <li><span class="font-bold text-ink">1.</span> Merge the profile store and tests while keeping the old setup UI functional.</li>
                         <li><span class="font-bold text-ink">2.</span> Add profile-aware full-run field derivation and generated server secrets.</li>
@@ -720,7 +721,7 @@ func (secrets *ProfileSecrets) EnsureServerSecret() error {
 
     <script>
         const totalTasks = 24;
-        const implementedTasks = new Set(["task-1", "task-2", "task-3", "task-5", "task-6", "task-7", "task-8", "task-9", "task-10", "task-11", "task-12", "task-13", "task-15", "task-16", "task-17", "task-18", "task-19", "task-20", "task-21", "task-22", "task-23", "task-24"]);
+        const implementedTasks = new Set(["task-1", "task-2", "task-3", "task-4", "task-5", "task-6", "task-7", "task-8", "task-9", "task-10", "task-11", "task-12", "task-13", "task-14", "task-15", "task-16", "task-17", "task-18", "task-19", "task-20", "task-21", "task-22", "task-23", "task-24"]);
         let checklistState = {};
 
         function baselineChecklistState() {

@@ -15,6 +15,7 @@ const proxyStackDirectory = "/opt/aegisnode/proxy"
 const proxyDockerSubnet = "172.30.0.0/24"
 
 var domainName = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$`)
+var pangolinSetupToken = regexp.MustCompile(`^[a-z0-9]{32}$`)
 
 type proxyConfig struct {
 	Host             string
@@ -23,6 +24,7 @@ type proxyConfig struct {
 	BaseDomain       string
 	LetsEncryptEmail string
 	ServerSecret     string
+	SetupToken       string
 }
 
 type proxyRemoteClientFactory func(context.Context, proxyConfig, io.Writer, io.Writer) (remoteClient, error)
@@ -42,11 +44,19 @@ func runProxy(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	flags.StringVar(&config.LetsEncryptEmail, "email", "", "Let's Encrypt account email")
 	flags.StringVar(&config.ServerSecret, "server-secret", "", "Pangolin server secret")
 	flags.StringVar(&config.ServerSecret, "postgres-password", "", "deprecated alias for --server-secret")
+	flags.StringVar(&config.SetupToken, "setup-token", "", "Pangolin initial admin setup token (generated when omitted)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if config.SetupToken == "" {
+		generated, err := GeneratePangolinSetupToken()
+		if err != nil {
+			return fmt.Errorf("generate Pangolin setup token: %w", err)
+		}
+		config.SetupToken = generated
 	}
 	if err := validateProxyConfig(config); err != nil {
 		return err
@@ -67,6 +77,7 @@ func runProxy(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	}
 	fmt.Fprintf(stdout, "proxy deployment complete: https://pangolin.%s\n", config.BaseDomain)
 	fmt.Fprintf(stdout, "required DNS: A %s -> %s and A *.%s -> %s\n", config.BaseDomain, config.Host, config.BaseDomain, config.Host)
+	printPangolinSetupGuidance(stdout, config.BaseDomain, config.SetupToken)
 	return nil
 }
 
@@ -85,6 +96,9 @@ func validateProxyConfig(config proxyConfig) error {
 	}
 	if strings.ContainsAny(config.ServerSecret, "\r\n") {
 		return errors.New("--server-secret must not contain newlines")
+	}
+	if !pangolinSetupToken.MatchString(config.SetupToken) {
+		return errors.New("--setup-token must contain exactly 32 lowercase letters or digits")
 	}
 	return nil
 }
@@ -160,6 +174,8 @@ func pangolinComposeFile(config proxyConfig) string {
 		"    restart: unless-stopped",
 		"    security_opt:",
 		"      - no-new-privileges:true",
+		"    environment:",
+		"      PANGOLIN_SETUP_TOKEN: " + yamlDoubleQuote(config.SetupToken),
 		"    volumes:",
 		"      - ./config:/app/config",
 		"    healthcheck:",
@@ -214,6 +230,15 @@ func pangolinComposeFile(config proxyConfig) string {
 		"        - subnet: " + proxyDockerSubnet,
 		"",
 	}, "\n")
+}
+
+func printPangolinSetupGuidance(output io.Writer, baseDomain, setupToken string) {
+	if setupToken == "" {
+		return
+	}
+	fmt.Fprintf(output, "Pangolin initial setup: https://pangolin.%s/auth/initial-setup\n", baseDomain)
+	fmt.Fprintf(output, "Pangolin setup token: %s\n", setupToken)
+	fmt.Fprintln(output, "The token is valid only until the initial server admin is registered.")
 }
 
 func traefikStaticConfigFile(config proxyConfig) string {

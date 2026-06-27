@@ -31,6 +31,12 @@ func TestProfileStoreCreatesPrivateProfileFiles(t *testing.T) {
 	if len(secrets.ServerSecret) < 40 || strings.ContainsAny(secrets.ServerSecret, "\r\n") {
 		t.Fatalf("unexpected generated secret shape: %q", secrets.ServerSecret)
 	}
+	if err := secrets.EnsurePangolinSetupToken(); err != nil {
+		t.Fatal(err)
+	}
+	if !pangolinSetupToken.MatchString(secrets.PangolinSetupToken) {
+		t.Fatalf("unexpected generated Pangolin setup token: %q", secrets.PangolinSetupToken)
+	}
 	if err := store.SaveSecrets(profile.ID, secrets); err != nil {
 		t.Fatal(err)
 	}

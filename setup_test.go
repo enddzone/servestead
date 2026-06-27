@@ -186,11 +186,11 @@ func TestSetupProxyConfigFromInputs(t *testing.T) {
 	if config.Host != "203.0.113.10" || config.AdminUser != "aegisadmin" || config.PrivateKeyPath != "/tmp/aegis-home/id_ed25519" {
 		t.Fatalf("unexpected SSH config: %+v", config)
 	}
-	if config.BaseDomain != "example.com" || config.LetsEncryptEmail != "admin@example.com" || config.ServerSecret == "" {
+	if config.BaseDomain != "example.com" || config.LetsEncryptEmail != "admin@example.com" || config.ServerSecret == "" || config.PangolinSetupToken == "" {
 		t.Fatalf("unexpected proxy config: %+v", config)
 	}
-	if strings.Contains(setupPlanSummary(config), config.ServerSecret) {
-		t.Fatalf("setup summary exposes generated server secret")
+	if strings.Contains(setupPlanSummary(config), config.ServerSecret) || strings.Contains(setupPlanSummary(config), config.PangolinSetupToken) {
+		t.Fatalf("setup summary exposes a generated secret")
 	}
 }
 
@@ -267,11 +267,11 @@ func TestPrepareProfileSetupGeneratesPersistentSecret(t *testing.T) {
 	if profile.ID == "" || state.Runs == nil {
 		t.Fatalf("unexpected profile/state: %+v %+v", profile, state)
 	}
-	if config.Mode != setupModeFullRun || config.ServerSecret == "" {
+	if config.Mode != setupModeFullRun || config.ServerSecret == "" || config.PangolinSetupToken == "" {
 		t.Fatalf("unexpected full-run config: %+v", config)
 	}
-	if strings.Contains(setupPlanSummary(config), config.ServerSecret) {
-		t.Fatalf("full-run summary exposes generated server secret")
+	if strings.Contains(setupPlanSummary(config), config.ServerSecret) || strings.Contains(setupPlanSummary(config), config.PangolinSetupToken) {
+		t.Fatalf("full-run summary exposes a generated secret")
 	}
 
 	_, _, secondConfig, err := prepareProfileSetup(setupCLIOptions{
@@ -284,6 +284,50 @@ func TestPrepareProfileSetupGeneratesPersistentSecret(t *testing.T) {
 	}
 	if secondConfig.ServerSecret != config.ServerSecret {
 		t.Fatalf("setup did not reuse saved secret")
+	}
+	if secondConfig.PangolinSetupToken != config.PangolinSetupToken {
+		t.Fatalf("setup did not reuse saved Pangolin setup token")
+	}
+}
+
+func TestPrepareCompletedLegacyProfileDoesNotInventUndeployedSetupToken(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		IP:               "203.0.113.10",
+		InitialSSHUser:   "root",
+		AdminUser:        "aegisadmin",
+		PrivateKeyPath:   "/tmp/aegis-key",
+		BaseDomain:       "example.com",
+		LetsEncryptEmail: "admin@example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{
+		ActiveRunID: "legacy-run",
+		Runs: map[string]SetupRun{
+			"legacy-run": {
+				ID:     "legacy-run",
+				Status: runStatusComplete,
+				Stages: map[string]SetupStageStatus{
+					"proxy": {Status: stageStatusComplete},
+				},
+			},
+		},
+	}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSecrets(profile.ID, ProfileSecrets{ServerSecret: "server-secret"}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, config, err := prepareProfileSetup(setupCLIOptions{ProfileID: profile.ID}, store, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.PangolinSetupToken != "" {
+		t.Fatalf("invented an undeployed setup token for a completed legacy profile: %q", config.PangolinSetupToken)
 	}
 }
 
@@ -689,6 +733,270 @@ func TestRunProfileSetupPlanExecutesFullRunAndPersistsState(t *testing.T) {
 	} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("second run output missing %q:\n%s", expected, stdout.String())
+		}
+	}
+}
+
+func TestProfileRunModelRendersTaskProgressAndLogs(t *testing.T) {
+	model := newProfileRunModel(
+		Profile{Name: "production", IP: "203.0.113.10"},
+		setupConfig{
+			Host:               "203.0.113.10",
+			InitialSSHUser:     "root",
+			AdminUser:          "aegisadmin",
+			PrivateKeyPath:     "/tmp/aegis-key",
+			AdminPublicKeyPath: "/tmp/aegis-key.pub",
+			BaseDomain:         "example.com",
+			LetsEncryptEmail:   "admin@example.com",
+			ServerSecret:       "secret",
+		},
+		"run-1",
+		map[string]bool{"bootstrap": true},
+		"",
+		make(chan tea.Msg),
+		func() {},
+	)
+	model.applyTaskEvent(TaskEvent{Type: TaskStarted, RunID: "run-1", Stage: "harden", TaskName: "Validate sysctl keys"})
+	model.applyTaskEvent(TaskEvent{Type: TaskLogLine, RunID: "run-1", Stage: "harden", Stream: "stdout", Line: "remote output"})
+	model.applyTaskEvent(TaskEvent{Type: TaskSucceeded, RunID: "run-1", Stage: "harden", TaskName: "Validate sysctl keys"})
+
+	view := model.View()
+	for _, expected := range []string{
+		"AegisNode setup run",
+		"production (203.0.113.10)",
+		"Tasks:",
+		"Current: Harden - Validate sysctl keys",
+		"Harden     running",
+		"remote output",
+	} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("run view missing %q:\n%s", expected, view)
+		}
+	}
+}
+
+func TestProfileSetupModelSelectsSingleStageRun(t *testing.T) {
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID:             "profile-1",
+			Name:           "production",
+			IP:             "203.0.113.10",
+			AdminUser:      "aegisadmin",
+			PrivateKeyPath: "/tmp/aegis-key",
+		},
+		State: ProfileState{
+			ActiveRunID: "run-1",
+			Runs: map[string]SetupRun{
+				"run-1": {
+					ID:     "run-1",
+					Status: runStatusComplete,
+					Stages: map[string]SetupStageStatus{
+						"bootstrap": {Status: stageStatusComplete},
+						"harden":    {Status: stageStatusComplete},
+					},
+				},
+			},
+		},
+	}})
+	model.selectedIndex = 0
+	model.refreshDashboard()
+	model.screen = profileSetupScreenDashboard
+	model.stageTable.SetCursor(1)
+
+	updatedModel, cmd := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd == nil {
+		t.Fatal("single-stage selection should quit the setup picker")
+	}
+	result := updatedModel.(profileSetupModel)
+	if !result.done || result.singleStage != "harden" {
+		t.Fatalf("unexpected single-stage result: %+v", result)
+	}
+	options, err := result.optionsForSelectedProfile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.ProfileID != "profile-1" || options.IP != "203.0.113.10" {
+		t.Fatalf("unexpected profile options: %+v", options)
+	}
+}
+
+func TestProfileSetupModelDashboardUsesVForReview(t *testing.T) {
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID:               "profile-1",
+			Name:             "production",
+			IP:               "203.0.113.10",
+			InitialSSHUser:   "root",
+			AdminUser:        "aegisadmin",
+			PrivateKeyPath:   "/tmp/aegis-key",
+			BaseDomain:       "example.com",
+			LetsEncryptEmail: "admin@example.com",
+		},
+		State: ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	model.selectedIndex = 0
+	model.setInputsFromChoice(false)
+	model.refreshDashboard()
+	model.screen = profileSetupScreenDashboard
+
+	updatedModel, _ := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
+	result := updatedModel.(profileSetupModel)
+	if result.screen != profileSetupScreenReview {
+		t.Fatalf("v should open review, got screen %d", result.screen)
+	}
+
+	updatedModel, _ = model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyEnter})
+	result = updatedModel.(profileSetupModel)
+	if result.screen == profileSetupScreenReview {
+		t.Fatal("enter should not open review from the dashboard")
+	}
+}
+
+func TestProfileSetupModelEscapeBackAndQQuit(t *testing.T) {
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID:             "profile-1",
+			Name:           "production",
+			IP:             "203.0.113.10",
+			PrivateKeyPath: "/tmp/aegis-key",
+		},
+		State: ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenReview
+
+	updatedModel, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatal("esc should go back without quitting")
+	}
+	result := updatedModel.(profileSetupModel)
+	if result.screen != profileSetupScreenDashboard || result.cancelled {
+		t.Fatalf("esc should return to dashboard without cancelling: %+v", result)
+	}
+
+	updatedModel, cmd = result.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd == nil {
+		t.Fatal("q should quit")
+	}
+	result = updatedModel.(profileSetupModel)
+	if !result.cancelled {
+		t.Fatalf("q should mark setup cancelled: %+v", result)
+	}
+}
+
+func TestPrepareProfileStageSetupDoesNotRequireProxyFieldsForHarden(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		ID:             "profile-1",
+		Name:           "production",
+		IP:             "203.0.113.10",
+		AdminUser:      "aegisadmin",
+		PrivateKeyPath: "/tmp/aegis-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, config, err := prepareProfileStageSetup(setupCLIOptions{ProfileID: profile.ID}, store, "harden")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Mode != setupModeHardenOnly || config.BaseDomain != "" || config.LetsEncryptEmail != "" {
+		t.Fatalf("unexpected harden stage config: %+v", config)
+	}
+}
+
+func TestRunProfileSetupStagePlanRerunsCompletedHardenStage(t *testing.T) {
+	originalHardening := newHardeningRemoteClient
+	defer func() { newHardeningRemoteClient = originalHardening }()
+
+	directory := t.TempDir()
+	privateKey := filepath.Join(directory, "id_ed25519")
+	if err := os.WriteFile(privateKey, []byte("private"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := &recordingRemoteClient{}
+	newHardeningRemoteClient = func(_ context.Context, config hardeningConfig, _, _ io.Writer) (remoteClient, error) {
+		if config.Host != "203.0.113.10" || config.SSHUser != "aegisadmin" || config.PrivateKeyPath != privateKey {
+			t.Fatalf("unexpected hardening config: %+v", config)
+		}
+		return client, nil
+	}
+
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		ID:             "profile-1",
+		Name:           "production",
+		IP:             "203.0.113.10",
+		AdminUser:      "aegisadmin",
+		PrivateKeyPath: privateKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{
+		ActiveRunID: "run-1",
+		Runs: map[string]SetupRun{
+			"run-1": {
+				ID:     "run-1",
+				Status: runStatusComplete,
+				Stages: map[string]SetupStageStatus{
+					"harden": {Status: stageStatusComplete},
+				},
+			},
+		},
+	}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	profile, state, config, err := prepareProfileStageSetup(setupCLIOptions{ProfileID: profile.ID}, store, "harden")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runProfileSetupStagePlan(context.Background(), store, profile, state, config, "harden", &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.commands) != len(hardeningTasks()) {
+		t.Fatalf("completed harden stage was not rerun, command count %d", len(client.commands))
+	}
+	_, loadedState, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := loadedState.Runs[loadedState.ActiveRunID]
+	if run.Status != runStatusComplete || run.Stages["harden"].Status != stageStatusComplete {
+		t.Fatalf("unexpected one-time run state: %+v", run)
+	}
+	if !strings.Contains(stdout.String(), "Selected one-time stage: Harden") || strings.Contains(stdout.String(), "already complete; skipping") {
+		t.Fatalf("unexpected one-time stage output:\n%s", stdout.String())
+	}
+}
+
+func TestProfileRunLogWriterEmitsStructuredLogLines(t *testing.T) {
+	events := []TaskEvent{}
+	writer := &profileRunLogWriter{
+		reporter: TaskReporterFunc(func(event TaskEvent) {
+			events = append(events, event)
+		}),
+		runID:  "run-1",
+		stage:  "proxy",
+		stream: "stderr",
+	}
+	written, err := writer.Write([]byte("first line\nsecond line\npartial"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written != len("first line\nsecond line\npartial") {
+		t.Fatalf("unexpected written count: %d", written)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 complete log lines, got %#v", events)
+	}
+	for index, expected := range []string{"first line", "second line"} {
+		if events[index].Type != TaskLogLine || events[index].RunID != "run-1" || events[index].Stage != "proxy" || events[index].Stream != "stderr" || events[index].Line != expected {
+			t.Fatalf("unexpected event %d: %#v", index, events[index])
 		}
 	}
 }

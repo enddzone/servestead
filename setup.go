@@ -8,12 +8,14 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -46,6 +48,7 @@ type setupConfig struct {
 	BaseDomain         string
 	LetsEncryptEmail   string
 	ServerSecret       string
+	PangolinSetupToken string
 	ProfileID          string
 }
 
@@ -114,6 +117,9 @@ func runSetup(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		if err != nil {
 			return err
 		}
+		if shouldUseProfileRunView(options, stderr) {
+			return runProfileSetupPlanWithRunView(ctx, store, profile, state, config, stdout, stderr)
+		}
 		return runProfileSetupPlan(ctx, store, profile, state, config, stdout, stderr)
 	}
 
@@ -134,9 +140,19 @@ func runSetup(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		}
 		return nil
 	}
+	if request.Stage != "" {
+		profile, state, config, err := prepareProfileStageSetup(request.ProfileOptions, store, request.Stage)
+		if err != nil {
+			return err
+		}
+		return runProfileSetupStagePlanWithRunView(ctx, store, profile, state, config, request.Stage, stdout, stderr)
+	}
 	profile, state, config, err := prepareProfileSetup(request.ProfileOptions, store, stderr)
 	if err != nil {
 		return err
+	}
+	if shouldUseProfileRunView(request.ProfileOptions, stderr) {
+		return runProfileSetupPlanWithRunView(ctx, store, profile, state, config, stdout, stderr)
 	}
 	return runProfileSetupPlan(ctx, store, profile, state, config, stdout, stderr)
 }
@@ -195,6 +211,13 @@ func collectSetupRequest(store ProfileStore, output io.Writer) (setupRequest, er
 		if !result.done {
 			return setupRequest{}, errors.New("setup did not complete")
 		}
+		if result.singleStage != "" {
+			options, err := result.optionsForSelectedProfile()
+			if err != nil {
+				return setupRequest{}, err
+			}
+			return setupRequest{ProfileOptions: options, Stage: result.singleStage}, nil
+		}
 		options, err := result.optionsFromInputs()
 		if err != nil {
 			return setupRequest{}, err
@@ -227,11 +250,13 @@ type setupRequest struct {
 	Legacy         bool
 	LegacyConfig   setupConfig
 	ProfileOptions setupCLIOptions
+	Stage          string
 }
 
 type profileChoice struct {
 	Profile Profile
 	State   ProfileState
+	Secrets ProfileSecrets
 }
 
 func loadProfileChoices(store ProfileStore) ([]profileChoice, error) {
@@ -245,7 +270,11 @@ func loadProfileChoices(store ProfileStore) ([]profileChoice, error) {
 		if err != nil {
 			return nil, err
 		}
-		choices = append(choices, profileChoice{Profile: profile, State: state})
+		secrets, err := store.LoadSecrets(summary.ID)
+		if err != nil {
+			return nil, err
+		}
+		choices = append(choices, profileChoice{Profile: profile, State: state, Secrets: secrets})
 	}
 	return choices, nil
 }
@@ -260,6 +289,24 @@ const (
 	profileSetupScreenReview
 	profileSetupScreenDeleteConfirm
 )
+
+var setupStageOrder = []string{"bootstrap", "harden", "network", "proxy"}
+
+type pangolinRegistrationStatus string
+
+const (
+	pangolinRegistrationUnknown     pangolinRegistrationStatus = ""
+	pangolinRegistrationChecking    pangolinRegistrationStatus = "checking"
+	pangolinRegistrationIncomplete  pangolinRegistrationStatus = "incomplete"
+	pangolinRegistrationComplete    pangolinRegistrationStatus = "complete"
+	pangolinRegistrationUnavailable pangolinRegistrationStatus = "unavailable"
+)
+
+type pangolinRegistrationStatusMsg struct {
+	profileID string
+	complete  bool
+	err       error
+}
 
 type profileListItem struct {
 	kind        string
@@ -282,6 +329,10 @@ type profileSetupModel struct {
 	help            help.Model
 	selectedIndex   int
 	deleteProfileID string
+	singleStage     string
+	pangolinStatus  pangolinRegistrationStatus
+	pangolinError   string
+	showSetupToken  bool
 	fresh           bool
 	inputs          []textinput.Model
 	advanced        []textinput.Model
@@ -366,6 +417,7 @@ func newProfileStageTable(state *ProfileState) table.Model {
 		table.WithRows(profileStageRows(state)),
 		table.WithHeight(7),
 		table.WithWidth(78),
+		table.WithFocused(true),
 	)
 }
 
@@ -387,7 +439,7 @@ func profileStageRows(state *ProfileState) []table.Row {
 		}
 	}
 	rows := []table.Row{}
-	for _, stage := range []string{"bootstrap", "harden", "network", "proxy"} {
+	for _, stage := range setupStageOrder {
 		status := stageStatusPending
 		lastError := ""
 		if completed[stage] {
@@ -450,22 +502,33 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		model.planViewport.Width = clampInt(msg.Width-4, 40, 100)
 		model.progress.Width = clampInt(msg.Width-8, 24, 64)
 		return model, nil
+	case pangolinRegistrationStatusMsg:
+		if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) || model.profiles[model.selectedIndex].Profile.ID != msg.profileID {
+			return model, nil
+		}
+		if msg.err != nil {
+			model.pangolinStatus = pangolinRegistrationUnavailable
+			model.pangolinError = concisePangolinRegistrationError(msg.err)
+		} else if msg.complete {
+			model.pangolinStatus = pangolinRegistrationComplete
+			model.pangolinError = ""
+		} else {
+			model.pangolinStatus = pangolinRegistrationIncomplete
+			model.pangolinError = ""
+		}
+		return model, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
 			model.cancelled = true
 			return model, tea.Quit
-		case "esc":
-			if model.screen == profileSetupScreenPicker {
+		case "q":
+			if model.screen != profileSetupScreenIntake && model.screen != profileSetupScreenAdvanced {
 				model.cancelled = true
 				return model, tea.Quit
 			}
-			if model.screen == profileSetupScreenDeleteConfirm {
-				model.screen = profileSetupScreenDashboard
-				model.err = ""
-				return model, nil
-			}
-			model.screen = profileSetupScreenPicker
+		case "esc":
+			model.goBack()
 			model.err = ""
 			return model, nil
 		}
@@ -514,7 +577,7 @@ func (model profileSetupModel) updateProfilePicker(key tea.KeyMsg) (tea.Model, t
 			model.setInputsFromChoice(false)
 			model.refreshDashboard()
 			model.screen = profileSetupScreenDashboard
-			return model, nil
+			return model, model.checkPangolinRegistration()
 		}
 	}
 	var cmd tea.Cmd
@@ -524,10 +587,19 @@ func (model profileSetupModel) updateProfilePicker(key tea.KeyMsg) (tea.Model, t
 
 func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
-	case "enter", "r", "R":
+	case "v", "V":
 		model.err = ""
 		model.refreshPlanPreview()
 		model.screen = profileSetupScreenReview
+	case "r", "R":
+		stage, err := model.selectedDashboardStage()
+		if err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		model.singleStage = stage
+		model.done = true
+		return model, tea.Quit
 	case "e", "E":
 		model.err = ""
 		model.screen = profileSetupScreenIntake
@@ -541,6 +613,16 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 	case "x", "X":
 		model.err = ""
 		model.screen = profileSetupScreenDeleteConfirm
+	case "t", "T":
+		if model.selectedProfileHasSetupToken() {
+			model.showSetupToken = !model.showSetupToken
+		}
+	case "c", "C":
+		return model, model.checkPangolinRegistration()
+	default:
+		var cmd tea.Cmd
+		model.stageTable, cmd = model.stageTable.Update(key)
+		return model, cmd
 	}
 	return model, nil
 }
@@ -608,14 +690,14 @@ func (model profileSetupModel) updateProfileInput(key tea.KeyMsg, advanced bool)
 
 func (model profileSetupModel) updateProfileReview(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
-	case "enter", "y", "Y":
+	case "r", "R":
 		if _, err := model.optionsFromInputs(); err != nil {
 			model.err = err.Error()
 			return model, nil
 		}
 		model.done = true
 		return model, tea.Quit
-	case "b", "B", "e", "E":
+	case "e", "E":
 		model.err = ""
 		model.focus = 0
 		model.inputs[0].Focus()
@@ -629,9 +711,6 @@ func (model profileSetupModel) updateProfileReview(key tea.KeyMsg) (tea.Model, t
 		if model.selectedIndex >= 0 {
 			model.screen = profileSetupScreenDashboard
 		}
-	case "n", "N", "q":
-		model.cancelled = true
-		return model, tea.Quit
 	}
 	return model, nil
 }
@@ -646,10 +725,39 @@ func (model profileSetupModel) updateProfileDeleteConfirm(key tea.KeyMsg) (tea.M
 		}
 		model.deleteProfileID = model.profiles[model.selectedIndex].Profile.ID
 		return model, tea.Quit
-	case "n", "N", "q":
+	case "n", "N":
 		model.screen = profileSetupScreenDashboard
 	}
 	return model, nil
+}
+
+func (model *profileSetupModel) goBack() {
+	switch model.screen {
+	case profileSetupScreenPicker:
+		return
+	case profileSetupScreenDashboard:
+		model.screen = profileSetupScreenPicker
+	case profileSetupScreenIntake:
+		if model.selectedIndex >= 0 {
+			model.screen = profileSetupScreenDashboard
+		} else {
+			model.screen = profileSetupScreenPicker
+		}
+	case profileSetupScreenAdvanced:
+		if model.selectedIndex >= 0 {
+			model.screen = profileSetupScreenDashboard
+		} else {
+			model.screen = profileSetupScreenIntake
+		}
+	case profileSetupScreenReview:
+		if model.selectedIndex >= 0 {
+			model.screen = profileSetupScreenDashboard
+		} else {
+			model.screen = profileSetupScreenIntake
+		}
+	case profileSetupScreenDeleteConfirm:
+		model.screen = profileSetupScreenDashboard
+	}
 }
 
 func (model *profileSetupModel) setInputsFromChoice(fresh bool) {
@@ -705,12 +813,40 @@ func (model *profileSetupModel) storeFocusedInputs(inputs []textinput.Model, adv
 }
 
 func (model *profileSetupModel) refreshDashboard() {
+	model.pangolinStatus = pangolinRegistrationUnknown
+	model.pangolinError = ""
+	model.showSetupToken = false
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
 		model.stageTable = newProfileStageTable(nil)
 		return
 	}
 	state := model.profiles[model.selectedIndex].State
 	model.stageTable = newProfileStageTable(&state)
+}
+
+func (model *profileSetupModel) checkPangolinRegistration() tea.Cmd {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		return nil
+	}
+	choice := model.profiles[model.selectedIndex]
+	if !completedSetupStages(choice.State)["proxy"] || choice.Profile.BaseDomain == "" {
+		model.pangolinStatus = pangolinRegistrationUnknown
+		model.pangolinError = ""
+		return nil
+	}
+	model.pangolinStatus = pangolinRegistrationChecking
+	model.pangolinError = ""
+	profile := choice.Profile
+	return func() tea.Msg {
+		complete, err := pangolinInitialSetupComplete(context.Background(), pangolinRegistrationHTTPClient, "https://pangolin."+profile.BaseDomain)
+		return pangolinRegistrationStatusMsg{profileID: profile.ID, complete: complete, err: err}
+	}
+}
+
+func (model profileSetupModel) selectedProfileHasSetupToken() bool {
+	return model.selectedIndex >= 0 &&
+		model.selectedIndex < len(model.profiles) &&
+		model.profiles[model.selectedIndex].Secrets.PangolinSetupToken != ""
 }
 
 func (model *profileSetupModel) refreshPlanPreview() {
@@ -773,6 +909,34 @@ func (model profileSetupModel) optionsFromInputs() (setupCLIOptions, error) {
 	return options, nil
 }
 
+func (model profileSetupModel) optionsForSelectedProfile() (setupCLIOptions, error) {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		return setupCLIOptions{}, errors.New("no profile selected")
+	}
+	profile := model.profiles[model.selectedIndex].Profile
+	return setupCLIOptions{
+		IP:               profile.IP,
+		ProfileID:        profile.ID,
+		Name:             profile.Name,
+		InitialSSHUser:   profile.InitialSSHUser,
+		AdminUser:        profile.AdminUser,
+		PrivateKeyPath:   profile.PrivateKeyPath,
+		BaseDomain:       profile.BaseDomain,
+		LetsEncryptEmail: profile.LetsEncryptEmail,
+	}, nil
+}
+
+func (model profileSetupModel) selectedDashboardStage() (string, error) {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		return "", errors.New("no profile selected")
+	}
+	cursor := model.stageTable.Cursor()
+	if cursor < 0 || cursor >= len(setupStageOrder) {
+		return "", errors.New("no setup stage selected")
+	}
+	return setupStageOrder[cursor], nil
+}
+
 func (model profileSetupModel) View() string {
 	var builder strings.Builder
 	builder.WriteString(setupTitleStyle.Render("AegisNode setup"))
@@ -799,7 +963,11 @@ func (model profileSetupModel) View() string {
 		builder.WriteString(setupErrorStyle.Render(model.err))
 	}
 	builder.WriteString("\n\n")
-	builder.WriteString(model.help.View(profileSetupHelp{screen: model.screen, hasProfile: model.selectedIndex >= 0}))
+	builder.WriteString(model.help.View(profileSetupHelp{
+		screen:        model.screen,
+		hasProfile:    model.selectedIndex >= 0,
+		hasSetupToken: model.selectedProfileHasSetupToken(),
+	}))
 	return builder.String()
 }
 
@@ -812,9 +980,60 @@ func (model profileSetupModel) dashboardView() string {
 	builder.WriteString(fmt.Sprintf("Dashboard for %s (%s)\n\n", firstNonEmpty(choice.Profile.Name, choice.Profile.IP), choice.Profile.IP))
 	builder.WriteString(fmt.Sprintf("Domain: %s\n", firstNonEmpty(choice.Profile.BaseDomain, "(missing)")))
 	builder.WriteString(fmt.Sprintf("Email:  %s\n\n", firstNonEmpty(choice.Profile.LetsEncryptEmail, "(missing)")))
+	builder.WriteString(model.pangolinRegistrationView(choice))
+	builder.WriteString("\n\n")
 	builder.WriteString(model.progress.ViewAs(profileCompletion(&choice.State)))
 	builder.WriteString("\n\n")
 	builder.WriteString(model.stageTable.View())
+	builder.WriteString("\n")
+	builder.WriteString(setupHelpStyle.Render("Select a stage with j/k or up/down. Press r to run it once, even if complete. Press v to review the full setup plan."))
+	return builder.String()
+}
+
+func (model profileSetupModel) pangolinRegistrationView(choice profileChoice) string {
+	proxyComplete := completedSetupStages(choice.State)["proxy"]
+	var builder strings.Builder
+	switch {
+	case !proxyComplete:
+		builder.WriteString("Pangolin registration: waiting for Proxy deployment.")
+	case model.pangolinStatus == pangolinRegistrationChecking:
+		builder.WriteString("Pangolin registration: checking server...")
+	case model.pangolinStatus == pangolinRegistrationIncomplete:
+		builder.WriteString(setupWarningStyle.Render("ACTION REQUIRED: Pangolin initial admin registration is incomplete."))
+	case model.pangolinStatus == pangolinRegistrationComplete:
+		builder.WriteString("Pangolin registration: complete.")
+	case model.pangolinStatus == pangolinRegistrationUnavailable:
+		builder.WriteString(setupWarningStyle.Render("Pangolin registration: unable to verify."))
+		if model.pangolinError != "" {
+			builder.WriteString("\n")
+			builder.WriteString(setupHelpStyle.Render(model.pangolinError))
+		}
+	default:
+		builder.WriteString("Pangolin registration: not checked.")
+	}
+
+	if !proxyComplete {
+		return builder.String()
+	}
+	if choice.Secrets.PangolinSetupToken == "" {
+		if model.pangolinStatus == pangolinRegistrationIncomplete {
+			builder.WriteString("\n")
+			builder.WriteString(setupWarningStyle.Render("No saved token. Run the Proxy stage once to generate and deploy one."))
+		}
+		return builder.String()
+	}
+	if model.showSetupToken {
+		builder.WriteString("\n")
+		builder.WriteString(fmt.Sprintf("Initial setup URL: https://pangolin.%s/auth/initial-setup\n", choice.Profile.BaseDomain))
+		builder.WriteString(fmt.Sprintf("Setup token: %s", choice.Secrets.PangolinSetupToken))
+		if model.pangolinStatus == pangolinRegistrationComplete {
+			builder.WriteString("\n")
+			builder.WriteString(setupHelpStyle.Render("This one-time token is no longer valid after registration."))
+		}
+	} else {
+		builder.WriteString("\n")
+		builder.WriteString(setupHelpStyle.Render("Press t to reveal the saved setup token and initial-setup URL."))
+	}
 	return builder.String()
 }
 
@@ -872,27 +1091,36 @@ func (model profileSetupModel) deleteConfirmView() string {
 }
 
 type profileSetupHelp struct {
-	screen     profileSetupScreen
-	hasProfile bool
+	screen        profileSetupScreen
+	hasProfile    bool
+	hasSetupToken bool
 }
 
 func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 	switch helpMap.screen {
 	case profileSetupScreenPicker:
 		return []key.Binding{
-			key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "select")),
+			key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "select")),
 			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
-			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "quit")),
+			key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		}
 	case profileSetupScreenDashboard:
 		bindings := []key.Binding{
-			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "review")),
+			key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "review")),
+			key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "run stage")),
+			key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "check Pangolin")),
+			key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "stage")),
 			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
 			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "advanced")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+			key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		}
 		if helpMap.hasProfile {
 			bindings = append(bindings, key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "fresh")))
 			bindings = append(bindings, key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete")))
+		}
+		if helpMap.hasSetupToken {
+			bindings = append(bindings, key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "setup token")))
 		}
 		return bindings
 	case profileSetupScreenIntake:
@@ -911,16 +1139,18 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 		}
 	case profileSetupScreenReview:
 		return []key.Binding{
-			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "run")),
-			key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "edit")),
+			key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "run")),
 			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "advanced")),
-			key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "cancel")),
+			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+			key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		}
 	case profileSetupScreenDeleteConfirm:
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "delete")),
 			key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "keep")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+			key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		}
 	default:
 		return nil
@@ -1104,10 +1334,16 @@ func prepareProfileSetup(options setupCLIOptions, store ProfileStore, output io.
 	if err := secrets.EnsureServerSecret(); err != nil {
 		return Profile{}, ProfileState{}, setupConfig{}, fmt.Errorf("generate server secret: %w", err)
 	}
+	if secrets.PangolinSetupToken != "" || !completedSetupStages(state)["proxy"] {
+		if err := secrets.EnsurePangolinSetupToken(); err != nil {
+			return Profile{}, ProfileState{}, setupConfig{}, fmt.Errorf("generate Pangolin setup token: %w", err)
+		}
+	}
 	if err := store.SaveSecrets(profile.ID, secrets); err != nil {
 		return Profile{}, ProfileState{}, setupConfig{}, err
 	}
 	config.ServerSecret = secrets.ServerSecret
+	config.PangolinSetupToken = secrets.PangolinSetupToken
 	profile.PrivateKeyPath = config.PrivateKeyPath
 	profile.BaseDomain = config.BaseDomain
 	profile.LetsEncryptEmail = config.LetsEncryptEmail
@@ -1115,6 +1351,99 @@ func prepareProfileSetup(options setupCLIOptions, store ProfileStore, output io.
 		return Profile{}, ProfileState{}, setupConfig{}, err
 	}
 	return profile, state, config, nil
+}
+
+func prepareProfileStageSetup(options setupCLIOptions, store ProfileStore, stage string) (Profile, ProfileState, setupConfig, error) {
+	if options.ProfileID == "" {
+		return Profile{}, ProfileState{}, setupConfig{}, errors.New("a saved profile is required for one-time stage runs")
+	}
+	profile, state, err := store.Load(options.ProfileID)
+	if err != nil {
+		return Profile{}, ProfileState{}, setupConfig{}, err
+	}
+	applySetupOptionsToProfile(&profile, options)
+	config := setupConfig{
+		Mode:               setupModeForStage(stage),
+		Host:               profile.IP,
+		InitialSSHUser:     firstNonEmpty(profile.InitialSSHUser, "root"),
+		AdminUser:          firstNonEmpty(profile.AdminUser, "aegisadmin"),
+		PrivateKeyPath:     expandUserPath(firstNonEmpty(profile.PrivateKeyPath, defaultKeygenConfig().Path)),
+		AdminPublicKeyPath: publicKeyPath(expandUserPath(firstNonEmpty(profile.PrivateKeyPath, defaultKeygenConfig().Path))),
+		BaseDomain:         profile.BaseDomain,
+		LetsEncryptEmail:   profile.LetsEncryptEmail,
+		ProfileID:          profile.ID,
+	}
+	if err := validateStageRunConfig(stage, config); err != nil {
+		return Profile{}, ProfileState{}, setupConfig{}, err
+	}
+	if stage == "proxy" {
+		secrets, err := store.LoadSecrets(profile.ID)
+		if err != nil {
+			return Profile{}, ProfileState{}, setupConfig{}, err
+		}
+		if err := secrets.EnsureServerSecret(); err != nil {
+			return Profile{}, ProfileState{}, setupConfig{}, fmt.Errorf("generate server secret: %w", err)
+		}
+		if err := secrets.EnsurePangolinSetupToken(); err != nil {
+			return Profile{}, ProfileState{}, setupConfig{}, fmt.Errorf("generate Pangolin setup token: %w", err)
+		}
+		if err := store.SaveSecrets(profile.ID, secrets); err != nil {
+			return Profile{}, ProfileState{}, setupConfig{}, err
+		}
+		config.ServerSecret = secrets.ServerSecret
+		config.PangolinSetupToken = secrets.PangolinSetupToken
+	}
+	if err := store.Save(profile, state); err != nil {
+		return Profile{}, ProfileState{}, setupConfig{}, err
+	}
+	return profile, state, config, nil
+}
+
+func setupModeForStage(stage string) setupMode {
+	switch stage {
+	case "bootstrap":
+		return setupModeBootstrapHarden
+	case "harden":
+		return setupModeHardenOnly
+	case "network":
+		return setupModeNetwork
+	case "proxy":
+		return setupModeProxy
+	default:
+		return setupModeFullRun
+	}
+}
+
+func validateStageRunConfig(stage string, config setupConfig) error {
+	if config.Host == "" || config.PrivateKeyPath == "" {
+		return errors.New("profile host and private key are required for one-time stage runs")
+	}
+	switch stage {
+	case "bootstrap":
+		if config.AdminPublicKeyPath == "" {
+			return errors.New("admin public key is required for the bootstrap stage")
+		}
+		if !linuxUsername.MatchString(config.InitialSSHUser) || !linuxUsername.MatchString(config.AdminUser) {
+			return errors.New("SSH users must be valid Linux usernames")
+		}
+	case "harden", "network":
+		if !linuxUsername.MatchString(config.AdminUser) {
+			return errors.New("admin SSH user must be a valid Linux username")
+		}
+	case "proxy":
+		return validateProxyConfig(proxyConfig{
+			Host:             config.Host,
+			SSHUser:          config.AdminUser,
+			PrivateKeyPath:   config.PrivateKeyPath,
+			BaseDomain:       config.BaseDomain,
+			LetsEncryptEmail: config.LetsEncryptEmail,
+			ServerSecret:     firstNonEmpty(config.ServerSecret, "generated-placeholder"),
+			SetupToken:       firstNonEmpty(config.PangolinSetupToken, "00000000000000000000000000000000"),
+		})
+	default:
+		return fmt.Errorf("unknown setup stage: %s", stage)
+	}
+	return nil
 }
 
 func resolveSetupProfile(options setupCLIOptions, store ProfileStore) (Profile, ProfileState, error) {
@@ -1247,7 +1576,12 @@ func validateFullRunConfig(config setupConfig) error {
 		BaseDomain:       config.BaseDomain,
 		LetsEncryptEmail: config.LetsEncryptEmail,
 		ServerSecret:     firstNonEmpty(config.ServerSecret, "generated-placeholder"),
+		SetupToken:       firstNonEmpty(config.PangolinSetupToken, "00000000000000000000000000000000"),
 	})
+}
+
+func shouldUseProfileRunView(options setupCLIOptions, output io.Writer) bool {
+	return !options.Yes && isInteractiveWriter(output)
 }
 
 func runProfileSetupPlan(ctx context.Context, store ProfileStore, profile Profile, state ProfileState, config setupConfig, stdout, stderr io.Writer) error {
@@ -1287,6 +1621,145 @@ func runProfileSetupPlan(ctx context.Context, store ProfileStore, profile Profil
 	printSSHLoginGuidance(stdout, config)
 	fmt.Fprintf(stdout, "\nProxy URL: https://pangolin.%s\n", config.BaseDomain)
 	fmt.Fprintf(stdout, "Required DNS: A %s -> %s and A *.%s -> %s\n", config.BaseDomain, config.Host, config.BaseDomain, config.Host)
+	printPangolinSetupGuidance(stdout, config.BaseDomain, config.PangolinSetupToken)
+	return nil
+}
+
+func runProfileSetupPlanWithRunView(ctx context.Context, store ProfileStore, profile Profile, state ProfileState, config setupConfig, stdout, stderr io.Writer) error {
+	fmt.Fprintln(stdout, "Selected plan:")
+	fmt.Fprint(stdout, setupPlanSummary(config))
+	fmt.Fprintln(stdout)
+	if err := runPreflight(config, stdout); err != nil {
+		return err
+	}
+
+	completedStages := completedSetupStages(state)
+	runID := newSetupRunID()
+	state.ActiveRunID = runID
+	state.Runs[runID] = newSetupRun(runID, completedStages)
+	if err := store.Save(profile, state); err != nil {
+		return err
+	}
+
+	profileReporter := &profileRunReporter{
+		store:   store,
+		profile: profile,
+		state:   &state,
+		runID:   runID,
+	}
+	runContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	messages := make(chan tea.Msg, 256)
+	liveReporter := profileRunUIReporter{messages: messages}
+	reporter := &synchronizedTaskReporter{reporters: []TaskReporter{profileReporter, liveReporter}}
+	model := newProfileRunModel(profile, config, runID, completedStages, "", messages, cancel)
+	model.start = startProfileRunCommand(runContext, profile, config, runID, completedStages, reporter, profileReporter, messages)
+	program := tea.NewProgram(model, tea.WithOutput(stderr))
+	finalModel, err := program.Run()
+	if err != nil {
+		return fmt.Errorf("run setup TUI: %w", err)
+	}
+	result, ok := finalModel.(profileRunModel)
+	if !ok {
+		return errors.New("setup run TUI returned an unexpected model")
+	}
+	if result.cancelled {
+		return errors.New("setup cancelled")
+	}
+	if result.err != nil {
+		return result.err
+	}
+	if profileReporter.err != nil {
+		return profileReporter.err
+	}
+	printSSHLoginGuidance(stdout, config)
+	fmt.Fprintf(stdout, "\nProxy URL: https://pangolin.%s\n", config.BaseDomain)
+	fmt.Fprintf(stdout, "Required DNS: A %s -> %s and A *.%s -> %s\n", config.BaseDomain, config.Host, config.BaseDomain, config.Host)
+	printPangolinSetupGuidance(stdout, config.BaseDomain, config.PangolinSetupToken)
+	return nil
+}
+
+func runProfileSetupStagePlan(ctx context.Context, store ProfileStore, profile Profile, state ProfileState, config setupConfig, stage string, stdout, stderr io.Writer) error {
+	fmt.Fprintf(stdout, "Selected one-time stage: %s\n\n", profileRunStageLabel(stage))
+	if err := runPreflight(config, stdout); err != nil {
+		return err
+	}
+
+	runID := newSetupRunID()
+	state.ActiveRunID = runID
+	state.Runs[runID] = newSetupRunForStage(runID, stage, completedSetupStages(state))
+	if err := store.Save(profile, state); err != nil {
+		return err
+	}
+
+	reporter := &profileRunReporter{
+		store:   store,
+		profile: profile,
+		state:   &state,
+		runID:   runID,
+	}
+	if err := runSetupStage(ctx, profile, config, runID, stage, reporter, stdout, stderr); err != nil {
+		reporter.finishRun(runStatusFailed)
+		if reporter.err != nil {
+			return reporter.err
+		}
+		return err
+	}
+	reporter.finishRun(runStatusComplete)
+	if reporter.err != nil {
+		return reporter.err
+	}
+	printStageCompletionGuidance(stdout, config, stage)
+	return nil
+}
+
+func runProfileSetupStagePlanWithRunView(ctx context.Context, store ProfileStore, profile Profile, state ProfileState, config setupConfig, stage string, stdout, stderr io.Writer) error {
+	fmt.Fprintf(stdout, "Selected one-time stage: %s\n\n", profileRunStageLabel(stage))
+	if err := runPreflight(config, stdout); err != nil {
+		return err
+	}
+
+	runID := newSetupRunID()
+	state.ActiveRunID = runID
+	state.Runs[runID] = newSetupRunForStage(runID, stage, completedSetupStages(state))
+	if err := store.Save(profile, state); err != nil {
+		return err
+	}
+
+	profileReporter := &profileRunReporter{
+		store:   store,
+		profile: profile,
+		state:   &state,
+		runID:   runID,
+	}
+	runContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	messages := make(chan tea.Msg, 256)
+	liveReporter := profileRunUIReporter{messages: messages}
+	reporter := &synchronizedTaskReporter{reporters: []TaskReporter{profileReporter, liveReporter}}
+	model := newProfileRunModel(profile, config, runID, completedSetupStages(state), stage, messages, cancel)
+	model.start = startProfileStageRunCommand(runContext, profile, config, runID, stage, reporter, profileReporter, messages)
+	program := tea.NewProgram(model, tea.WithOutput(stderr))
+	finalModel, err := program.Run()
+	if err != nil {
+		return fmt.Errorf("run setup TUI: %w", err)
+	}
+	result, ok := finalModel.(profileRunModel)
+	if !ok {
+		return errors.New("setup run TUI returned an unexpected model")
+	}
+	if result.cancelled {
+		return errors.New("setup cancelled")
+	}
+	if result.err != nil {
+		return result.err
+	}
+	if profileReporter.err != nil {
+		return profileReporter.err
+	}
+	printStageCompletionGuidance(stdout, config, stage)
 	return nil
 }
 
@@ -1297,10 +1770,12 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 	}
 	key := strings.TrimSpace(string(adminPublicKey))
 
+	stageStdout := setupStageWriter(stdout, "bootstrap", "stdout")
+	stageStderr := setupStageWriter(stderr, "bootstrap", "stderr")
 	if completedStages["bootstrap"] {
-		fmt.Fprintln(stdout, "Step 1/4: bootstrap administrative access already complete; skipping.")
+		fmt.Fprintln(stageStdout, "Step 1/4: bootstrap administrative access already complete; skipping.")
 	} else {
-		fmt.Fprintln(stdout, "Step 1/4: bootstrap administrative access.")
+		fmt.Fprintln(stageStdout, "Step 1/4: bootstrap administrative access.")
 		bootstrapConfig := bootstrapConfig{
 			Host:               config.Host,
 			SSHUser:            config.InitialSSHUser,
@@ -1308,11 +1783,11 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 			AdminPublicKeyPath: config.AdminPublicKeyPath,
 			PrivateKeyPath:     config.PrivateKeyPath,
 		}
-		bootstrapClient, err := newBootstrapRemoteClient(ctx, bootstrapConfig, stdout, stderr)
+		bootstrapClient, err := newBootstrapRemoteClient(ctx, bootstrapConfig, stageStdout, stageStderr)
 		if err != nil {
 			return err
 		}
-		if err := runBootstrapStepsWithReporter(ctx, bootstrapClient, bootstrapConfig, key, runID, reporter, stdout); err != nil {
+		if err := runBootstrapStepsWithReporter(ctx, bootstrapClient, bootstrapConfig, key, runID, reporter, stageStdout); err != nil {
 			_ = bootstrapClient.Close()
 			return fmt.Errorf("bootstrap failed: %w", err)
 		}
@@ -1321,16 +1796,18 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 		}
 	}
 
+	stageStdout = setupStageWriter(stdout, "harden", "stdout")
+	stageStderr = setupStageWriter(stderr, "harden", "stderr")
 	if completedStages["harden"] {
-		fmt.Fprintln(stdout, "Step 2/4: harden server already complete; skipping.")
+		fmt.Fprintln(stageStdout, "Step 2/4: harden server already complete; skipping.")
 	} else {
-		fmt.Fprintln(stdout, "Step 2/4: harden server.")
+		fmt.Fprintln(stageStdout, "Step 2/4: harden server.")
 		hardeningConfig := hardeningConfig{Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath}
-		hardeningClient, err := newHardeningRemoteClient(ctx, hardeningConfig, stdout, stderr)
+		hardeningClient, err := newHardeningRemoteClient(ctx, hardeningConfig, stageStdout, stageStderr)
 		if err != nil {
 			return err
 		}
-		if err := runHardeningStepsWithReporter(ctx, hardeningClient, hardeningConfig, runID, reporter, stdout); err != nil {
+		if err := runHardeningStepsWithReporter(ctx, hardeningClient, hardeningConfig, runID, reporter, stageStdout); err != nil {
 			_ = hardeningClient.Close()
 			return fmt.Errorf("hardening failed: %w", err)
 		}
@@ -1339,20 +1816,22 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 		}
 	}
 
+	stageStdout = setupStageWriter(stdout, "network", "stdout")
+	stageStderr = setupStageWriter(stderr, "network", "stderr")
 	if completedStages["network"] {
-		fmt.Fprintln(stdout, "Step 3/4: configure Docker networking and UFW already complete; skipping.")
+		fmt.Fprintln(stageStdout, "Step 3/4: configure Docker networking and UFW already complete; skipping.")
 	} else {
-		fmt.Fprintln(stdout, "Step 3/4: configure Docker networking and UFW.")
+		fmt.Fprintln(stageStdout, "Step 3/4: configure Docker networking and UFW.")
 		sshPort, err := sshPortForHost(config.Host)
 		if err != nil {
 			return err
 		}
 		networkConfig := networkConfig{Host: profile.IP, SSHUser: config.AdminUser, SSHPort: sshPort, PrivateKeyPath: config.PrivateKeyPath}
-		networkClient, err := newNetworkRemoteClient(ctx, networkConfig, stdout, stderr)
+		networkClient, err := newNetworkRemoteClient(ctx, networkConfig, stageStdout, stageStderr)
 		if err != nil {
 			return err
 		}
-		if err := runNetworkStepsWithReporter(ctx, networkClient, networkConfig, runID, reporter, stdout); err != nil {
+		if err := runNetworkStepsWithReporter(ctx, networkClient, networkConfig, runID, reporter, stageStdout); err != nil {
 			_ = networkClient.Close()
 			return fmt.Errorf("network configuration failed: %w", err)
 		}
@@ -1361,11 +1840,13 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 		}
 	}
 
+	stageStdout = setupStageWriter(stdout, "proxy", "stdout")
+	stageStderr = setupStageWriter(stderr, "proxy", "stderr")
 	if completedStages["proxy"] {
-		fmt.Fprintln(stdout, "Step 4/4: deploy Pangolin and reverse proxy stack already complete; skipping.")
+		fmt.Fprintln(stageStdout, "Step 4/4: deploy Pangolin and reverse proxy stack already complete; skipping.")
 		return nil
 	}
-	fmt.Fprintln(stdout, "Step 4/4: deploy Pangolin and reverse proxy stack.")
+	fmt.Fprintln(stageStdout, "Step 4/4: deploy Pangolin and reverse proxy stack.")
 	proxyConfig := proxyConfig{
 		Host:             profile.IP,
 		SSHUser:          config.AdminUser,
@@ -1373,16 +1854,589 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 		BaseDomain:       config.BaseDomain,
 		LetsEncryptEmail: config.LetsEncryptEmail,
 		ServerSecret:     config.ServerSecret,
+		SetupToken:       config.PangolinSetupToken,
 	}
-	proxyClient, err := newProxyRemoteClient(ctx, proxyConfig, stdout, stderr)
+	proxyClient, err := newProxyRemoteClient(ctx, proxyConfig, stageStdout, stageStderr)
 	if err != nil {
 		return err
 	}
-	if err := runProxyStepsWithReporter(ctx, proxyClient, proxyConfig, runID, reporter, stdout); err != nil {
+	if err := runProxyStepsWithReporter(ctx, proxyClient, proxyConfig, runID, reporter, stageStdout); err != nil {
 		_ = proxyClient.Close()
 		return fmt.Errorf("proxy deployment failed: %w", err)
 	}
 	return proxyClient.Close()
+}
+
+func runSetupStage(ctx context.Context, profile Profile, config setupConfig, runID string, stage string, reporter TaskReporter, stdout, stderr io.Writer) error {
+	stageStdout := setupStageWriter(stdout, stage, "stdout")
+	stageStderr := setupStageWriter(stderr, stage, "stderr")
+	switch stage {
+	case "bootstrap":
+		adminPublicKey, err := os.ReadFile(config.AdminPublicKeyPath)
+		if err != nil {
+			return fmt.Errorf("read admin public key: %w", err)
+		}
+		bootstrapConfig := bootstrapConfig{
+			Host:               config.Host,
+			SSHUser:            config.InitialSSHUser,
+			AdminUser:          config.AdminUser,
+			AdminPublicKeyPath: config.AdminPublicKeyPath,
+			PrivateKeyPath:     config.PrivateKeyPath,
+		}
+		fmt.Fprintln(stageStdout, "One-time stage: bootstrap administrative access.")
+		bootstrapClient, err := newBootstrapRemoteClient(ctx, bootstrapConfig, stageStdout, stageStderr)
+		if err != nil {
+			return err
+		}
+		if err := runBootstrapStepsWithReporter(ctx, bootstrapClient, bootstrapConfig, strings.TrimSpace(string(adminPublicKey)), runID, reporter, stageStdout); err != nil {
+			_ = bootstrapClient.Close()
+			return fmt.Errorf("bootstrap failed: %w", err)
+		}
+		return bootstrapClient.Close()
+	case "harden":
+		hardeningConfig := hardeningConfig{Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath}
+		fmt.Fprintln(stageStdout, "One-time stage: harden server.")
+		hardeningClient, err := newHardeningRemoteClient(ctx, hardeningConfig, stageStdout, stageStderr)
+		if err != nil {
+			return err
+		}
+		if err := runHardeningStepsWithReporter(ctx, hardeningClient, hardeningConfig, runID, reporter, stageStdout); err != nil {
+			_ = hardeningClient.Close()
+			return fmt.Errorf("hardening failed: %w", err)
+		}
+		return hardeningClient.Close()
+	case "network":
+		sshPort, err := sshPortForHost(config.Host)
+		if err != nil {
+			return err
+		}
+		networkConfig := networkConfig{Host: profile.IP, SSHUser: config.AdminUser, SSHPort: sshPort, PrivateKeyPath: config.PrivateKeyPath}
+		fmt.Fprintln(stageStdout, "One-time stage: configure Docker networking and UFW.")
+		networkClient, err := newNetworkRemoteClient(ctx, networkConfig, stageStdout, stageStderr)
+		if err != nil {
+			return err
+		}
+		if err := runNetworkStepsWithReporter(ctx, networkClient, networkConfig, runID, reporter, stageStdout); err != nil {
+			_ = networkClient.Close()
+			return fmt.Errorf("network configuration failed: %w", err)
+		}
+		return networkClient.Close()
+	case "proxy":
+		proxyConfig := proxyConfig{
+			Host:             profile.IP,
+			SSHUser:          config.AdminUser,
+			PrivateKeyPath:   config.PrivateKeyPath,
+			BaseDomain:       config.BaseDomain,
+			LetsEncryptEmail: config.LetsEncryptEmail,
+			ServerSecret:     config.ServerSecret,
+			SetupToken:       config.PangolinSetupToken,
+		}
+		fmt.Fprintln(stageStdout, "One-time stage: deploy Pangolin and reverse proxy stack.")
+		proxyClient, err := newProxyRemoteClient(ctx, proxyConfig, stageStdout, stageStderr)
+		if err != nil {
+			return err
+		}
+		if err := runProxyStepsWithReporter(ctx, proxyClient, proxyConfig, runID, reporter, stageStdout); err != nil {
+			_ = proxyClient.Close()
+			return fmt.Errorf("proxy deployment failed: %w", err)
+		}
+		return proxyClient.Close()
+	default:
+		return fmt.Errorf("unknown setup stage: %s", stage)
+	}
+}
+
+func printStageCompletionGuidance(stdout io.Writer, config setupConfig, stage string) {
+	switch stage {
+	case "bootstrap", "harden", "network":
+		printSSHLoginGuidance(stdout, config)
+	case "proxy":
+		fmt.Fprintf(stdout, "\nProxy URL: https://pangolin.%s\n", config.BaseDomain)
+		fmt.Fprintf(stdout, "Required DNS: A %s -> %s and A *.%s -> %s\n", config.BaseDomain, config.Host, config.BaseDomain, config.Host)
+		printPangolinSetupGuidance(stdout, config.BaseDomain, config.PangolinSetupToken)
+	}
+}
+
+type setupStageWriterProvider interface {
+	WriterForStage(stage string, stream string) io.Writer
+}
+
+func setupStageWriter(writer io.Writer, stage string, stream string) io.Writer {
+	if provider, ok := writer.(setupStageWriterProvider); ok {
+		return provider.WriterForStage(stage, stream)
+	}
+	return writer
+}
+
+type synchronizedTaskReporter struct {
+	mu        sync.Mutex
+	reporters []TaskReporter
+}
+
+func (reporter *synchronizedTaskReporter) Report(event TaskEvent) {
+	reporter.mu.Lock()
+	defer reporter.mu.Unlock()
+	for _, target := range reporter.reporters {
+		if target != nil {
+			target.Report(event)
+		}
+	}
+}
+
+type profileRunUIReporter struct {
+	messages chan<- tea.Msg
+}
+
+func (reporter profileRunUIReporter) Report(event TaskEvent) {
+	message := profileRunEventMsg{event: event}
+	if event.Type == TaskLogLine {
+		select {
+		case reporter.messages <- message:
+		default:
+		}
+		return
+	}
+	reporter.messages <- message
+}
+
+type profileRunOutput struct {
+	reporter TaskReporter
+	runID    string
+}
+
+func (output profileRunOutput) Write(data []byte) (int, error) {
+	writer := output.WriterForStage("", "stdout")
+	return writer.Write(data)
+}
+
+func (output profileRunOutput) WriterForStage(stage string, stream string) io.Writer {
+	return &profileRunLogWriter{
+		reporter: output.reporter,
+		runID:    output.runID,
+		stage:    stage,
+		stream:   stream,
+	}
+}
+
+type profileRunLogWriter struct {
+	reporter TaskReporter
+	runID    string
+	stage    string
+	stream   string
+	partial  string
+}
+
+func (writer *profileRunLogWriter) Write(data []byte) (int, error) {
+	text := writer.partial + string(data)
+	lines := strings.Split(text, "\n")
+	writer.partial = lines[len(lines)-1]
+	for _, line := range lines[:len(lines)-1] {
+		writer.reportLine(line)
+	}
+	return len(data), nil
+}
+
+func (writer *profileRunLogWriter) reportLine(line string) {
+	if writer.reporter == nil || line == "" {
+		return
+	}
+	writer.reporter.Report(TaskEvent{
+		Type:   TaskLogLine,
+		RunID:  writer.runID,
+		Stage:  writer.stage,
+		Stream: writer.stream,
+		Line:   line,
+		Time:   time.Now(),
+	})
+}
+
+type profileRunEventMsg struct {
+	event TaskEvent
+}
+
+type profileRunFinishedMsg struct {
+	err error
+}
+
+type profileRunStageView struct {
+	Key       string
+	Label     string
+	Status    string
+	Current   string
+	Completed int
+	Total     int
+}
+
+type profileRunModel struct {
+	profile        Profile
+	config         setupConfig
+	runID          string
+	messages       <-chan tea.Msg
+	start          tea.Cmd
+	cancel         context.CancelFunc
+	spinner        spinner.Model
+	progress       progress.Model
+	logViewport    viewport.Model
+	stages         []profileRunStageView
+	totalTasks     int
+	completedTasks int
+	currentStage   string
+	currentTask    string
+	logLines       []string
+	stageFilter    string
+	runLabel       string
+	width          int
+	height         int
+	done           bool
+	cancelled      bool
+	err            error
+}
+
+func newProfileRunModel(profile Profile, config setupConfig, runID string, completedStages map[string]bool, stageFilter string, messages <-chan tea.Msg, cancel context.CancelFunc) profileRunModel {
+	stageTotals := setupRunStageTaskTotals(config)
+	stages := []profileRunStageView{}
+	for _, stage := range setupStageOrder {
+		if stageFilter != "" && stage != stageFilter {
+			continue
+		}
+		stages = append(stages, profileRunStageView{Key: stage, Label: profileRunStageLabel(stage), Status: stageStatusPending, Total: stageTotals[stage]})
+	}
+	totalTasks := 0
+	completedTasks := 0
+	for index := range stages {
+		totalTasks += stages[index].Total
+		if stageFilter == "" && completedStages[stages[index].Key] {
+			stages[index].Status = stageStatusComplete
+			stages[index].Completed = stages[index].Total
+			completedTasks += stages[index].Total
+		}
+	}
+	runSpinner := spinner.New()
+	runSpinner.Spinner = spinner.Dot
+	runLabel := "full setup"
+	if stageFilter != "" {
+		runLabel = profileRunStageLabel(stageFilter)
+	}
+	return profileRunModel{
+		profile:        profile,
+		config:         config,
+		runID:          runID,
+		messages:       messages,
+		cancel:         cancel,
+		spinner:        runSpinner,
+		progress:       progress.New(progress.WithWidth(48)),
+		logViewport:    viewport.New(88, 10),
+		stages:         stages,
+		totalTasks:     totalTasks,
+		completedTasks: completedTasks,
+		stageFilter:    stageFilter,
+		runLabel:       runLabel,
+		width:          92,
+		height:         28,
+	}
+}
+
+func setupRunStageTaskTotals(config setupConfig) map[string]int {
+	sshPort, err := sshPortForHost(config.Host)
+	if err != nil {
+		sshPort = defaultSSHPort
+	}
+	return map[string]int{
+		"bootstrap": len(bootstrapTasks(bootstrapConfig{
+			Host:               config.Host,
+			SSHUser:            config.InitialSSHUser,
+			AdminUser:          config.AdminUser,
+			AdminPublicKeyPath: config.AdminPublicKeyPath,
+			PrivateKeyPath:     config.PrivateKeyPath,
+		}, "")),
+		"harden": len(hardeningTasks()),
+		"network": len(networkTasks(networkConfig{
+			Host:           config.Host,
+			SSHUser:        config.AdminUser,
+			SSHPort:        sshPort,
+			PrivateKeyPath: config.PrivateKeyPath,
+		})),
+		"proxy": len(proxyTasks(proxyConfig{
+			Host:             config.Host,
+			SSHUser:          config.AdminUser,
+			PrivateKeyPath:   config.PrivateKeyPath,
+			BaseDomain:       config.BaseDomain,
+			LetsEncryptEmail: config.LetsEncryptEmail,
+			ServerSecret:     firstNonEmpty(config.ServerSecret, "generated-placeholder"),
+		})),
+	}
+}
+
+func (model profileRunModel) Init() tea.Cmd {
+	return tea.Batch(model.start, model.spinner.Tick, waitForProfileRunMessage(model.messages))
+}
+
+func (model profileRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		model.width = msg.Width
+		model.height = msg.Height
+		model.progress.Width = clampInt(msg.Width-12, 24, 72)
+		model.logViewport.Width = clampInt(msg.Width-4, 40, 100)
+		model.logViewport.Height = clampInt(msg.Height-16, 6, 18)
+		return model, nil
+	case tea.KeyMsg:
+		if model.done {
+			switch msg.String() {
+			case "q", "esc", "ctrl+c":
+				return model, tea.Quit
+			}
+		}
+		switch msg.String() {
+		case "q", "ctrl+c":
+			if model.cancel != nil {
+				model.cancel()
+			}
+			model.cancelled = true
+			model.appendRunLog("Cancelling setup run...")
+			if msg.String() == "q" {
+				return model, tea.Quit
+			}
+			return model, nil
+		case "up", "k", "down", "j", "pgup", "pgdown":
+			var cmd tea.Cmd
+			model.logViewport, cmd = model.logViewport.Update(msg)
+			return model, cmd
+		}
+	case spinner.TickMsg:
+		if model.done {
+			return model, nil
+		}
+		var cmd tea.Cmd
+		model.spinner, cmd = model.spinner.Update(msg)
+		return model, cmd
+	case profileRunEventMsg:
+		model.applyTaskEvent(msg.event)
+		return model, waitForProfileRunMessage(model.messages)
+	case profileRunFinishedMsg:
+		model.done = true
+		model.err = msg.err
+		if msg.err != nil {
+			model.appendRunLog("Run failed: " + msg.err.Error())
+		} else {
+			model.appendRunLog("Run complete.")
+		}
+		return model, nil
+	}
+	return model, nil
+}
+
+func waitForProfileRunMessage(messages <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		message, ok := <-messages
+		if !ok {
+			return nil
+		}
+		return message
+	}
+}
+
+func startProfileRunCommand(ctx context.Context, profile Profile, config setupConfig, runID string, completedStages map[string]bool, reporter TaskReporter, profileReporter *profileRunReporter, messages chan<- tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		go func() {
+			output := profileRunOutput{reporter: reporter, runID: runID}
+			err := runFullSetupStages(ctx, profile, config, runID, completedStages, reporter, output, output)
+			if err != nil {
+				profileReporter.finishRun(runStatusFailed)
+				if profileReporter.err != nil {
+					err = profileReporter.err
+				}
+			} else {
+				profileReporter.finishRun(runStatusComplete)
+				if profileReporter.err != nil {
+					err = profileReporter.err
+				}
+			}
+			messages <- profileRunFinishedMsg{err: err}
+			close(messages)
+		}()
+		return nil
+	}
+}
+
+func startProfileStageRunCommand(ctx context.Context, profile Profile, config setupConfig, runID string, stage string, reporter TaskReporter, profileReporter *profileRunReporter, messages chan<- tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		go func() {
+			output := profileRunOutput{reporter: reporter, runID: runID}
+			err := runSetupStage(ctx, profile, config, runID, stage, reporter, output, output)
+			if err != nil {
+				profileReporter.finishRun(runStatusFailed)
+				if profileReporter.err != nil {
+					err = profileReporter.err
+				}
+			} else {
+				profileReporter.finishRun(runStatusComplete)
+				if profileReporter.err != nil {
+					err = profileReporter.err
+				}
+			}
+			messages <- profileRunFinishedMsg{err: err}
+			close(messages)
+		}()
+		return nil
+	}
+}
+
+func (model *profileRunModel) applyTaskEvent(event TaskEvent) {
+	switch event.Type {
+	case TaskRunStarted:
+		model.setStageStatus(event.Stage, stageStatusRunning)
+		model.currentStage = event.Stage
+		model.appendRunLog(fmt.Sprintf("%s started.", profileRunStageLabel(event.Stage)))
+	case TaskStarted:
+		model.setStageStatus(event.Stage, stageStatusRunning)
+		model.currentStage = event.Stage
+		model.currentTask = event.TaskName
+		model.setStageCurrent(event.Stage, event.TaskName)
+		model.appendRunLog(fmt.Sprintf("%s: %s", profileRunStageLabel(event.Stage), event.TaskName))
+	case TaskLogLine:
+		prefix := profileRunStageLabel(event.Stage)
+		if event.Stream != "" {
+			prefix += " " + event.Stream
+		}
+		model.appendRunLog(fmt.Sprintf("%s: %s", prefix, event.Line))
+	case TaskSucceeded:
+		model.completedTasks++
+		model.incrementStageCompleted(event.Stage)
+	case TaskFailed:
+		model.setStageStatus(event.Stage, stageStatusFailed)
+		model.currentStage = event.Stage
+		model.currentTask = event.TaskName
+		model.appendRunLog(fmt.Sprintf("%s failed: %s", event.TaskName, event.Error))
+	case TaskRunCompleted:
+		model.setStageStatus(event.Stage, stageStatusComplete)
+		model.clearStageCurrent(event.Stage)
+		model.appendRunLog(fmt.Sprintf("%s complete.", profileRunStageLabel(event.Stage)))
+	}
+}
+
+func (model *profileRunModel) setStageStatus(stage string, status string) {
+	for index := range model.stages {
+		if model.stages[index].Key == stage {
+			model.stages[index].Status = status
+			return
+		}
+	}
+}
+
+func (model *profileRunModel) setStageCurrent(stage string, current string) {
+	for index := range model.stages {
+		if model.stages[index].Key == stage {
+			model.stages[index].Current = current
+			return
+		}
+	}
+}
+
+func (model *profileRunModel) clearStageCurrent(stage string) {
+	for index := range model.stages {
+		if model.stages[index].Key == stage {
+			model.stages[index].Current = ""
+			return
+		}
+	}
+}
+
+func (model *profileRunModel) incrementStageCompleted(stage string) {
+	for index := range model.stages {
+		if model.stages[index].Key == stage {
+			if model.stages[index].Completed < model.stages[index].Total {
+				model.stages[index].Completed++
+			}
+			return
+		}
+	}
+}
+
+func (model *profileRunModel) appendRunLog(line string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+	model.logLines = append(model.logLines, line)
+	if len(model.logLines) > 200 {
+		model.logLines = model.logLines[len(model.logLines)-200:]
+	}
+	model.logViewport.SetContent(strings.Join(model.logLines, "\n"))
+	model.logViewport.GotoBottom()
+}
+
+func (model profileRunModel) View() string {
+	var builder strings.Builder
+	builder.WriteString(setupTitleStyle.Render("AegisNode setup run"))
+	builder.WriteString("\n")
+	builder.WriteString(setupHelpStyle.Render(fmt.Sprintf("%s (%s)", firstNonEmpty(model.profile.Name, model.profile.IP), model.profile.IP)))
+	builder.WriteString("\n\n")
+
+	status := model.spinner.View() + " Running " + model.runLabel
+	if model.done && model.err == nil {
+		status = "Complete"
+	} else if model.done {
+		status = "Failed"
+	} else if model.cancelled {
+		status = model.spinner.View() + " Cancelling setup"
+	}
+	builder.WriteString(status)
+	builder.WriteString("\n")
+	builder.WriteString(model.progress.ViewAs(model.taskProgress()))
+	builder.WriteString(fmt.Sprintf("  Tasks: %d / %d\n", model.completedTasks, model.totalTasks))
+	builder.WriteString(fmt.Sprintf("Current: %s\n\n", model.currentTaskLabel()))
+
+	builder.WriteString("Stages\n")
+	for _, stage := range model.stages {
+		builder.WriteString(fmt.Sprintf("  %-10s %-9s %2d/%-2d", stage.Label, stage.Status, stage.Completed, stage.Total))
+		if stage.Current != "" {
+			builder.WriteString("  " + stage.Current)
+		}
+		builder.WriteString("\n")
+	}
+	builder.WriteString("\nLogs\n")
+	builder.WriteString(model.logViewport.View())
+	builder.WriteString("\n\n")
+	if model.done {
+		if model.err != nil {
+			builder.WriteString(setupErrorStyle.Render(model.err.Error()))
+			builder.WriteString("\n")
+		}
+		builder.WriteString(setupHelpStyle.Render("q exits. Run setup again to retry failed stages."))
+	} else {
+		builder.WriteString(setupHelpStyle.Render("q quits. Ctrl+C cancels. j/k or up/down scroll logs."))
+	}
+	return builder.String()
+}
+
+func (model profileRunModel) taskProgress() float64 {
+	if model.totalTasks == 0 {
+		return 0
+	}
+	return float64(model.completedTasks) / float64(model.totalTasks)
+}
+
+func (model profileRunModel) currentTaskLabel() string {
+	if model.currentTask == "" {
+		return "waiting for first remote task"
+	}
+	return fmt.Sprintf("%s - %s", profileRunStageLabel(model.currentStage), model.currentTask)
+}
+
+func profileRunStageLabel(stage string) string {
+	switch stage {
+	case "bootstrap":
+		return "Bootstrap"
+	case "harden":
+		return "Harden"
+	case "network":
+		return "Network"
+	case "proxy":
+		return "Proxy"
+	default:
+		return "Run"
+	}
 }
 
 func newSetupRunID() string {
@@ -1392,7 +2446,7 @@ func newSetupRunID() string {
 func newSetupRun(id string, completedStages map[string]bool) SetupRun {
 	now := time.Now().UTC()
 	stages := map[string]SetupStageStatus{}
-	for _, stage := range []string{"bootstrap", "harden", "network", "proxy"} {
+	for _, stage := range setupStageOrder {
 		status := stageStatusPending
 		if completedStages[stage] {
 			status = stageStatusComplete
@@ -1400,6 +2454,12 @@ func newSetupRun(id string, completedStages map[string]bool) SetupRun {
 		stages[stage] = SetupStageStatus{Status: status}
 	}
 	return SetupRun{ID: id, Status: runStatusPlanned, Stages: stages, CreatedAt: now, UpdatedAt: now}
+}
+
+func newSetupRunForStage(id string, selectedStage string, completedStages map[string]bool) SetupRun {
+	run := newSetupRun(id, completedStages)
+	run.Stages[selectedStage] = SetupStageStatus{Status: stageStatusPending}
+	return run
 }
 
 func completedSetupStages(state ProfileState) map[string]bool {
@@ -1540,6 +2600,7 @@ func runSetupPlan(ctx context.Context, config setupConfig, stdout, stderr io.Wri
 			"--domain", config.BaseDomain,
 			"--email", config.LetsEncryptEmail,
 			"--server-secret", config.ServerSecret,
+			"--setup-token", config.PangolinSetupToken,
 		}, stdout, stderr)
 	case setupModeFullRun:
 		return errors.New("full setup requires a saved profile")
@@ -1651,9 +2712,10 @@ type setupModel struct {
 }
 
 var (
-	setupTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
-	setupHelpStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	setupErrorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	setupTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
+	setupHelpStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	setupWarningStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
+	setupErrorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 )
 
 func newSetupModel() setupModel {
@@ -1671,9 +2733,29 @@ func (model setupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch key.String() {
-	case "ctrl+c", "esc":
+	case "ctrl+c":
 		model.cancelled = true
 		return model, tea.Quit
+	case "q":
+		if model.step != setupStepInput {
+			model.cancelled = true
+			return model, tea.Quit
+		}
+	case "esc":
+		switch model.step {
+		case setupStepMode:
+			return model, nil
+		case setupStepInput:
+			model.step = setupStepMode
+		case setupStepConfirm:
+			if model.mode == setupModeDoctor {
+				model.step = setupStepMode
+			} else {
+				model.step = setupStepInput
+			}
+		}
+		model.err = ""
+		return model, nil
 	}
 
 	switch model.step {
@@ -1760,10 +2842,10 @@ func (model *setupModel) previousInput() {
 
 func (model setupModel) updateConfirm(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
-	case "enter", "y", "Y":
+	case "r", "R":
 		model.done = true
 		return model, tea.Quit
-	case "b", "B":
+	case "e", "E":
 		model.err = ""
 		if model.mode == setupModeDoctor {
 			model.step = setupStepMode
@@ -1771,9 +2853,6 @@ func (model setupModel) updateConfirm(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		model.step = setupStepInput
 		return model, nil
-	case "n", "N", "q":
-		model.cancelled = true
-		return model, tea.Quit
 	}
 	return model, nil
 }
@@ -1795,7 +2874,7 @@ func (model setupModel) View() string {
 			builder.WriteString(setupHelpStyle.Render("  "+option.Description) + "\n")
 		}
 		builder.WriteString("\n")
-		builder.WriteString(setupHelpStyle.Render("Use arrow keys, then Enter. Esc cancels."))
+		builder.WriteString(setupHelpStyle.Render("Use j/k, then Enter. q quits."))
 	case setupStepInput:
 		builder.WriteString(setupModeOptions()[int(model.mode)].Label)
 		builder.WriteString("\n")
@@ -1819,7 +2898,7 @@ func (model setupModel) View() string {
 			builder.WriteString("\n")
 		}
 		builder.WriteString("\n")
-		builder.WriteString(setupHelpStyle.Render("Enter advances. Tab changes field. Esc cancels."))
+		builder.WriteString(setupHelpStyle.Render("Enter advances. Tab changes field. Esc goes back. q quits."))
 	case setupStepConfirm:
 		builder.WriteString("Review plan:\n\n")
 		builder.WriteString(setupPlanSummary(model.config))
@@ -1830,7 +2909,7 @@ func (model setupModel) View() string {
 			builder.WriteString("Before remote changes, AegisNode will check built-in SSH/key support and key files. If a required check fails, it stops before contacting the server.\n")
 		}
 		builder.WriteString("\n")
-		builder.WriteString(setupHelpStyle.Render("Enter or y runs it. b edits. n cancels."))
+		builder.WriteString(setupHelpStyle.Render("r runs it. e edits. Esc goes back. q quits."))
 	}
 	return builder.String()
 }
@@ -1988,6 +3067,11 @@ func (model setupModel) configFromInputs() (setupConfig, error) {
 			return setupConfig{}, fmt.Errorf("generate server secret: %w", err)
 		}
 		config.ServerSecret = serverSecret
+		setupToken, err := GeneratePangolinSetupToken()
+		if err != nil {
+			return setupConfig{}, fmt.Errorf("generate Pangolin setup token: %w", err)
+		}
+		config.PangolinSetupToken = setupToken
 		if config.PrivateKeyPath == "" {
 			return setupConfig{}, errors.New("private key path is required")
 		}
@@ -2001,6 +3085,7 @@ func (model setupModel) configFromInputs() (setupConfig, error) {
 			BaseDomain:       config.BaseDomain,
 			LetsEncryptEmail: config.LetsEncryptEmail,
 			ServerSecret:     config.ServerSecret,
+			SetupToken:       config.PangolinSetupToken,
 		}); err != nil {
 			return setupConfig{}, err
 		}

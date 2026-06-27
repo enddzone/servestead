@@ -58,7 +58,7 @@ For guided setup on an existing disposable Ubuntu VPS, lead with the server IP:
 bin/aegisnode setup --ip 203.0.113.10
 ```
 
-With `--ip`, AegisNode creates or selects a saved profile, collects the missing full-run values up front, generates and stores the Pangolin server secret, checks local prerequisites, then runs bootstrap, hardening, Docker networking, and reverse proxy deployment as one setup plan. Saved profiles live under the directory returned by `os.UserConfigDir()` in an `aegisnode` subdirectory. Each profile keeps metadata, run state, secrets, and JSONL run logs in separate files with owner-only permissions.
+With `--ip`, AegisNode creates or selects a saved profile, collects the missing full-run values up front, generates and stores the Pangolin server secret, checks local prerequisites, then runs bootstrap, hardening, Docker networking, and reverse proxy deployment as one setup plan. Interactive runs show a live terminal run view with task progress, current stage/task, and inline logs; `--yes` keeps script-friendly stdout/stderr output. Saved profiles live under the directory returned by `os.UserConfigDir()` in an `aegisnode` subdirectory. Each profile keeps metadata, run state, secrets, and JSONL run logs in separate files with owner-only permissions.
 
 Profiles are keyed by generated profile IDs, so starting fresh for a reused IP preserves old profile data instead of overwriting it:
 
@@ -79,7 +79,7 @@ bin/aegisnode setup \
   --yes
 ```
 
-Running `setup` without `--ip` opens the profile-first terminal UI. It lists saved profiles, shows their stage dashboard, collects missing full-run values before any remote command runs, and lets you review the plan before execution. From a saved profile dashboard, press `x` to delete only the local saved profile, secrets, state, and run logs; this does not change the remote server. The older one-off guided paths remain available from the advanced legacy setup entry. Setup does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
+Running `setup` without `--ip` opens the profile-first terminal UI. It lists saved profiles, shows their stage dashboard, collects missing full-run values before any remote command runs, lets you press `v` to review the plan, then shows the live run view during execution. From a saved profile dashboard, use `j`/`k` to select a stage and press `r` to run that stage once, even if it is already marked complete. The dashboard checks Pangolin's initial-registration status, highlights incomplete registration, uses `t` to reveal or hide the saved setup token and URL, and uses `c` to retry the status check. Press `q` to quit from navigation or run screens, `esc` to go back, or `x` to delete only the local saved profile, secrets, state, and run logs; delete does not change the remote server. The older one-off guided paths remain available from the advanced legacy setup entry. Setup does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
 
 For a quick preflight check without opening the TUI:
 
@@ -139,4 +139,12 @@ bin/aegisnode proxy \
   --server-secret 'replace-with-a-long-random-secret'
 ```
 
-The direct proxy command keeps `--server-secret` for scripts. Normal profile-aware setup generates this value automatically and reuses it from the profile secrets file. The proxy runner writes `/opt/aegisnode/proxy/docker-compose.yml`, Pangolin application config, and Traefik config files, prepares persistent data directories, opens TCP/80, TCP/443, UDP/51820, and UDP/21820 for Traefik and Gerbil/Pangolin ingress, starts Traefik, Pangolin, and Gerbil with Docker Compose, and verifies all three services are running. DNS registrar changes remain external; create `A example.com -> 203.0.113.10` and `A *.example.com -> 203.0.113.10` before expecting Let's Encrypt HTTP-01 issuance to complete. On first boot, open `https://pangolin.example.com/auth/initial-setup` and replace `example.com` with your domain.
+The direct proxy command keeps `--server-secret` for scripts. Normal profile-aware setup generates this value automatically and reuses it from the profile secrets file. AegisNode also generates Pangolin's distinct one-time admin setup token, saves it with the profile, passes it to Pangolin through the supported `PANGOLIN_SETUP_TOKEN` environment variable, and prints it after deployment. The proxy runner writes `/opt/aegisnode/proxy/docker-compose.yml`, Pangolin application config, and Traefik config files, prepares persistent data directories, opens TCP/80, TCP/443, UDP/51820, and UDP/21820 for Traefik and Gerbil/Pangolin ingress, starts Traefik, Pangolin, and Gerbil with Docker Compose, and verifies all three services are running. DNS registrar changes remain external; create `A example.com -> 203.0.113.10` and `A *.example.com -> 203.0.113.10` before expecting Let's Encrypt HTTP-01 issuance to complete.
+
+Retrieve the saved token again before completing initial admin registration:
+
+```sh
+bin/aegisnode pangolin-token --ip 203.0.113.10
+```
+
+If more than one saved profile uses that IP, rerun with the profile ID shown in the error: `bin/aegisnode pangolin-token --profile <id>`. Then open `https://pangolin.example.com/auth/initial-setup` and enter the token. Existing profiles created before this feature need the Proxy stage run once to generate and deploy a deterministic token; AegisNode does not claim an undeployed local token matches an older Pangolin-generated token.

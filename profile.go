@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"sort"
@@ -67,7 +68,8 @@ type SetupStageStatus struct {
 }
 
 type ProfileSecrets struct {
-	ServerSecret string `json:"server_secret"`
+	ServerSecret       string `json:"server_secret"`
+	PangolinSetupToken string `json:"pangolin_setup_token"`
 }
 
 func (secrets *ProfileSecrets) EnsureServerSecret() error {
@@ -88,6 +90,31 @@ func GenerateServerSecret() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func (secrets *ProfileSecrets) EnsurePangolinSetupToken() error {
+	if secrets.PangolinSetupToken != "" {
+		return nil
+	}
+	generated, err := GeneratePangolinSetupToken()
+	if err != nil {
+		return err
+	}
+	secrets.PangolinSetupToken = generated
+	return nil
+}
+
+func GeneratePangolinSetupToken() (string, error) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	token := make([]byte, 32)
+	for i := range token {
+		index, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			return "", err
+		}
+		token[i] = alphabet[index.Int64()]
+	}
+	return string(token), nil
 }
 
 type ProfileStore interface {

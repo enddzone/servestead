@@ -70,9 +70,11 @@ func TestPangolinComposeFileContainsConfiguredServices(t *testing.T) {
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
 		ServerSecret:     "secret password",
+		SetupToken:       "0123456789abcdefghijklmnopqrstuv",
 	})
 	for _, expected := range []string{
 		"image: docker.io/fosrl/pangolin:latest",
+		"PANGOLIN_SETUP_TOKEN: \"0123456789abcdefghijklmnopqrstuv\"",
 		"image: docker.io/fosrl/gerbil:latest",
 		"image: docker.io/traefik:v3.6",
 		"./config:/app/config",
@@ -196,6 +198,7 @@ func TestRunProxyUsesRemoteClientAndPrintsDNSGuidance(t *testing.T) {
 		"--domain", "example.com",
 		"--email", "admin@example.com",
 		"--server-secret", "secret",
+		"--setup-token", "0123456789abcdefghijklmnopqrstuv",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatal(err)
@@ -203,6 +206,8 @@ func TestRunProxyUsesRemoteClientAndPrintsDNSGuidance(t *testing.T) {
 	for _, expected := range []string{
 		"proxy deployment complete: https://pangolin.example.com",
 		"required DNS: A example.com -> 203.0.113.10 and A *.example.com -> 203.0.113.10",
+		"Pangolin initial setup: https://pangolin.example.com/auth/initial-setup",
+		"Pangolin setup token: 0123456789abcdefghijklmnopqrstuv",
 	} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("proxy output missing %q:\n%s", expected, stdout.String())
@@ -210,6 +215,21 @@ func TestRunProxyUsesRemoteClientAndPrintsDNSGuidance(t *testing.T) {
 	}
 	if len(client.commands) != len(proxyTasks(proxyConfig{SSHUser: "aegisadmin", BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com", ServerSecret: "secret"})) {
 		t.Fatalf("unexpected command count: %d", len(client.commands))
+	}
+}
+
+func TestValidateProxyConfigRejectsInvalidSetupToken(t *testing.T) {
+	err := validateProxyConfig(proxyConfig{
+		Host:             "203.0.113.10",
+		SSHUser:          "aegisadmin",
+		PrivateKeyPath:   "/tmp/key",
+		BaseDomain:       "example.com",
+		LetsEncryptEmail: "admin@example.com",
+		ServerSecret:     "secret",
+		SetupToken:       "not-valid",
+	})
+	if err == nil || err.Error() != "--setup-token must contain exactly 32 lowercase letters or digits" {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

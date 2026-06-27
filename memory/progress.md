@@ -8,7 +8,7 @@ UX overhaul handoff source: `ux_overhaul_plan.html`.
 ## Current status
 
 - Overall blueprint: **12 of 15 repository tasks implemented (80%)**
-- UX overhaul backend: **complete enough for UI work to begin**
+- UX overhaul: **complete (24 of 24 UX checklist items implemented)**
 - Phase 1 — Local CLI Coordinator & VPS Bootstrapping: **complete**
 - Phase 2 — Operating System & Kernel Hardening: **complete**
 - Phase 2.5 — Guided Live-Test UX: **complete**
@@ -16,7 +16,7 @@ UX overhaul handoff source: `ux_overhaul_plan.html`.
 - Phase 4 — Pangolin & Reverse Proxy: **complete for repository automation; live DNS/ACME validation requires an external domain**
 - Phase 5: **not started**
 
-The interactive HTML checklist uses browser-local storage. `ux_overhaul_plan.html` now defaults backend-complete UX tasks to checked when no browser-local checklist exists. This file records repository implementation progress independently of browser state.
+The interactive HTML checklist uses browser-local storage. `ux_overhaul_plan.html` now defaults all completed UX overhaul tasks to checked when no browser-local checklist exists. This file records repository implementation progress independently of browser state.
 
 ## UX overhaul backend handoff — 2026-06-26
 
@@ -46,10 +46,13 @@ UI/dashboard follow-up implementation:
 - The new TUI lists saved profiles, opens a dashboard backed by `ProfileState`, collects required full-run values up front, exposes advanced SSH/profile fields, supports fresh profile creation, and renders a final plan review before remote execution starts.
 - Saved profiles can be deleted from the dashboard with confirmation. Deletion removes only local profile files, secrets, state, and run logs.
 - Fresh profile creation from an existing bootstrapped profile seeds bootstrap as complete and uses the saved admin user for remaining stages, avoiding root login on already-hardened servers.
-- The TUI uses `bubbles/list` for profile selection, `bubbles/table` for stage state, `bubbles/progress` for completion, `bubbles/viewport` for the plan preview, and `bubbles/help`/`key` for footer hints.
+- The TUI uses `bubbles/list` for profile selection, `bubbles/table` for stage state, `bubbles/progress` for completion and live run progress, `bubbles/viewport` for the plan preview and live log scrollback, `bubbles/spinner` for active runs, and `bubbles/help`/`key` for footer hints.
 - The older one-off setup modes remain reachable through an advanced legacy setup entry.
 - Direct command compatibility and scripted `setup --ip --domain ... --email ... --yes` behavior are preserved.
-- Live remote execution still uses the existing synchronous runner/output path; structured events continue to persist profile state and JSONL logs during the run.
+- Interactive profile-aware setup now runs remote execution inside a Bubble Tea command loop. The run view shows spinner status, task progress, current stage/task, per-stage rows, and inline stdout/stderr/task logs while structured events continue to persist profile state and JSONL logs.
+- Saved profile dashboards support one-time stage runs from the stage table: `j`/`k` selects Bootstrap, Harden, Network, or Proxy, `r` runs the selected stage even when prior profile state marks it complete, and `v` opens the full-plan review. `esc` goes back; `q` quits from navigation and run screens while remaining normal text inside focused input fields. Full-run resume behavior still skips previously completed stages.
+- Non-interactive and `--yes` profile-aware runs intentionally keep the existing script-friendly stdout/stderr runner path.
+- Live run view tests cover event-driven rendering and structured log-line conversion; `go test ./...` passes after the final UX implementation.
 
 ## Phase checklist
 
