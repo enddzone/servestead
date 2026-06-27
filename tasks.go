@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
 type Task struct {
 	Name  string
 	Apply string
+	Stdin string
 }
 
 func runTasks(ctx context.Context, client remoteClient, sshUser string, tasks []Task, progress io.Writer) error {
@@ -58,7 +60,18 @@ func runTasksWithReporter(ctx context.Context, client remoteClient, sshUser stri
 		if progress != nil {
 			fmt.Fprintf(progress, "- %s\n", task.Name)
 		}
-		if err := client.Run(ctx, privilegedCommand(sshUser, task.Apply)); err != nil {
+		var err error
+		if task.Stdin != "" {
+			stdinClient, ok := client.(remoteStdinClient)
+			if !ok {
+				err = fmt.Errorf("remote client does not support standard input")
+			} else {
+				err = stdinClient.RunWithStdin(ctx, privilegedCommand(sshUser, task.Apply), strings.NewReader(task.Stdin))
+			}
+		} else {
+			err = client.Run(ctx, privilegedCommand(sshUser, task.Apply))
+		}
+		if err != nil {
 			reportTaskEvent(reporter, TaskEvent{Type: TaskFailed, RunID: runID, Stage: stage, TaskIndex: index + 1, TaskTotal: len(tasks), TaskName: task.Name, Error: err.Error(), Time: time.Now()})
 			return fmt.Errorf("task %q failed: %w", task.Name, err)
 		}

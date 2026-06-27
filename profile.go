@@ -31,17 +31,18 @@ const (
 )
 
 type Profile struct {
-	ID                 string    `json:"id"`
-	Name               string    `json:"name"`
-	IP                 string    `json:"ip"`
-	InitialSSHUser     string    `json:"initial_ssh_user"`
-	AdminUser          string    `json:"admin_user"`
-	PrivateKeyPath     string    `json:"private_key_path"`
-	BaseDomain         string    `json:"base_domain,omitempty"`
-	LetsEncryptEmail   string    `json:"lets_encrypt_email,omitempty"`
-	PangolinAdminEmail string    `json:"pangolin_admin_email,omitempty"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ID                   string    `json:"id"`
+	Name                 string    `json:"name"`
+	IP                   string    `json:"ip"`
+	InitialSSHUser       string    `json:"initial_ssh_user"`
+	AdminUser            string    `json:"admin_user"`
+	PrivateKeyPath       string    `json:"private_key_path"`
+	BaseDomain           string    `json:"base_domain,omitempty"`
+	LetsEncryptEmail     string    `json:"lets_encrypt_email,omitempty"`
+	PangolinAdminEmail   string    `json:"pangolin_admin_email,omitempty"`
+	ConfigRepositoryPath string    `json:"config_repository_path,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 type ProfileSummary struct {
@@ -232,7 +233,8 @@ type ProfileStore interface {
 }
 
 type fileProfileStore struct {
-	root string
+	root        string
+	defaultRoot bool
 }
 
 func newDefaultProfileStore() (ProfileStore, error) {
@@ -240,7 +242,7 @@ func newDefaultProfileStore() (ProfileStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve user config directory: %w", err)
 	}
-	return newFileProfileStore(filepath.Join(configDirectory, "aegisnode")), nil
+	return &fileProfileStore{root: filepath.Join(configDirectory, "aegisnode"), defaultRoot: true}, nil
 }
 
 func newFileProfileStore(root string) *fileProfileStore {

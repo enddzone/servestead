@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AegisNode Declarative Design</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --background: #f7f7f5;
+      --surface: #ffffff;
+      --text: #202124;
+      --muted: #5f6368;
+      --border: #d9d9d4;
+      --accent: #185abc;
+      --code: #f0f1f2;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --background: #161718;
+        --surface: #202124;
+        --text: #e8eaed;
+        --muted: #aeb4ba;
+        --border: #3c4043;
+        --accent: #8ab4f8;
+        --code: #2b2d30;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--text);
+      font: 16px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(920px, calc(100% - 2rem));
+      margin: 3rem auto;
+    }
+
+    header,
+    section {
+      margin-bottom: 1.25rem;
+      padding: 1.5rem 1.75rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+
+    h1,
+    h2 {
+      line-height: 1.25;
+    }
+
+    h1 {
+      margin: 0 0 0.5rem;
+      font-size: clamp(2rem, 5vw, 3rem);
+    }
+
+    h2 {
+      margin: 0 0 0.75rem;
+      font-size: 1.3rem;
+    }
+
+    p {
+      margin: 0.5rem 0;
+    }
+
+    ul {
+      margin: 0.5rem 0 0;
+      padding-left: 1.4rem;
+    }
+
+    li + li {
+      margin-top: 0.45rem;
+    }
+
+    .eyebrow,
+    .summary {
+      color: var(--muted);
+    }
+
+    .eyebrow {
+      margin: 0 0 0.35rem;
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    code {
+      padding: 0.12rem 0.35rem;
+      background: var(--code);
+      border-radius: 4px;
+      font-size: 0.92em;
+    }
+
+    a {
+      color: var(--accent);
+    }
+
+    footer {
+      padding: 0.5rem 0;
+      color: var(--muted);
+      text-align: center;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">AegisNode design plan</p>
+      <h1>Git-Backed, Consumer-Owned Compose Configuration</h1>
+      <p class="summary">
+        Make Git the source of truth for declarative stack configuration, beginning
+        with the observability Compose file.
+      </p>
+    </header>
+
+    <section>
+      <h2>Summary</h2>
+      <ul>
+        <li>Git-backed storage is viable. AegisNode creates initial files, validates them, deploys exact commits, and detects drift.</li>
+        <li>Consumers own tracked configuration. AegisNode must never silently overwrite their edits.</li>
+        <li>Implement a concrete Git workflow first instead of introducing a speculative multi-backend abstraction.</li>
+        <li>Start with <code>stacks/observability/compose.yaml</code>. Migrating the proxy stack remains future work.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Repository and User Interface</h2>
+      <ul>
+        <li>Use one repository per saved server profile.</li>
+        <li>Add <code>config_repository_path</code> to the profile model while preserving compatibility with existing profiles.</li>
+        <li>Default repositories to <code>$XDG_CONFIG_HOME/aegisnode/repositories/&lt;profile-id&gt;</code>, falling back to <code>$HOME/.config/aegisnode/repositories/&lt;profile-id&gt;</code>.</li>
+        <li>Deleting an AegisNode profile must not delete its repository.</li>
+        <li>Add <code>--config-repo &lt;path&gt;</code> to use or create a local repository.</li>
+        <li>Add <code>--github-repo &lt;https-url&gt;</code> to clone a GitHub repository, optionally into the configured local path.</li>
+        <li>Read private GitHub credentials from <code>AEGISNODE_GITHUB_TOKEN</code>.</li>
+        <li>Interactive setup offers three choices: create a local repository, use an existing checkout, or clone a GitHub HTTPS repository.</li>
+        <li>Initialize new repositories on <code>main</code> and commit the scaffold as <code>AegisNode &lt;aegisnode@localhost&gt;</code>.</li>
+        <li>If a supplied repository lacks the Compose file, write the scaffold and stop before deployment so the consumer can review, commit, and push it.</li>
+        <li>Deploy committed <code>HEAD</code> only. Dirty observability paths block deployment; unrelated working-tree changes do not.</li>
+        <li>Official v1 remote support is GitHub HTTPS only.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Deployment and Ownership Model</h2>
+      <ul>
+        <li>Store the consumer-owned Compose file at <code>stacks/observability/compose.yaml</code>.</li>
+        <li>Allow edits to images, resource limits, environment, and other settings while enforcing the required AegisNode contract.</li>
+        <li>The required contract includes the <code>beszel</code>, <code>beszel-agent</code>, and <code>dozzle</code> services, the external <code>aegis-public</code> network, stable Pangolin resource labels and targets, and no public Beszel or Dozzle ports.</li>
+        <li>When a newer AegisNode version requires an incompatible contract, fail with migration guidance instead of regenerating the file.</li>
+        <li>For local-only repositories, upload the committed file over SSH and record its commit and file hash on the VPS.</li>
+        <li>For repositories with a GitHub <code>origin</code>, fetch on the VPS and check out the exact local commit. Require that commit to have been pushed first.</li>
+        <li>Use <code>/opt/aegisnode/repository</code> for the remote checkout or snapshot.</li>
+        <li>Keep runtime data under <code>/opt/aegisnode/stacks/observability</code>.</li>
+        <li>Refuse dirty remote checkouts or hash mismatches. Do not discard or import remote edits automatically.</li>
+        <li>Reconcile only during an explicit AegisNode run; do not install a timer, webhook, or daemon in v1.</li>
+        <li>Validate the rendered Compose model before stopping the current stack.</li>
+        <li>Preserve Beszel data and keys during migration. Remove the old secret-bearing Compose file only after the new stack starts successfully, retaining it for recovery if migration fails.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Secrets and Security</h2>
+      <ul>
+        <li>Replace literal credentials in the tracked Compose file with environment substitutions.</li>
+        <li>Generate <code>/etc/aegisnode/observability.env</code> as a root-owned file with mode <code>0600</code>, and pass it explicitly to every Compose command.</li>
+        <li>Keep Beszel data, generated configuration, and key material outside Git.</li>
+        <li>Never persist the GitHub token on the VPS or include it in repository URLs, logs, process arguments, commits, or profile files.</li>
+        <li>Send the token transiently over SSH standard input to an askpass flow, then delete all temporary credential material.</li>
+        <li>Recommend a fine-grained token restricted to the selected repository.</li>
+        <li>Extend setup preflight and <code>doctor</code> to require the local Git CLI.</li>
+        <li>Continue using the Git package already installed remotely during bootstrap.</li>
+      </ul>
+      <p>
+        Reference:
+        <a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens">
+          GitHub personal access token guidance
+        </a>.
+      </p>
+    </section>
+
+    <section>
+      <h2>Verification</h2>
+      <ul>
+        <li>Unit-test XDG path resolution, backward-compatible profiles, scaffolding policy, exact-commit selection, dirty-path rejection, GitHub URL validation, token redaction, and secret-free generated Compose.</li>
+        <li>Integration-test local initialization, supplied-repository review flow, GitHub-origin command construction, local snapshot deployment, remote drift rejection, and transition from an uploaded snapshot to a GitHub checkout.</li>
+        <li>Validate generated and consumer-edited files with Docker Compose and verify the required service and Pangolin contract.</li>
+        <li>Confirm migration preserves existing Beszel data.</li>
+        <li>Confirm committed consumer changes are deployed without regeneration.</li>
+        <li>Normal automated tests must not contact GitHub or a live VPS.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Deferred Alternatives</h2>
+      <ul>
+        <li>Read-only deploy keys for future unattended pulls.</li>
+        <li>SOPS-encrypted Git secrets if secrets later require declarative versioning.</li>
+        <li>GitHub Actions or a systemd timer for push-driven reconciliation.</li>
+        <li>Automatic GitHub repository creation and pushes.</li>
+        <li>Generic Git interfaces after a second remote provider is required.</li>
+      </ul>
+    </section>
+
+    <footer>
+      Planning artifact only. Implementation is intentionally deferred.
+    </footer>
+  </main>
+</body>
+</html>

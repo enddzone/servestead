@@ -25,6 +25,10 @@ type remoteClient interface {
 	Close() error
 }
 
+type remoteStdinClient interface {
+	RunWithStdin(context.Context, string, io.Reader) error
+}
+
 type sshRemoteClient struct {
 	client *ssh.Client
 	stdout io.Writer
@@ -69,6 +73,10 @@ func newSSHRemoteClient(ctx context.Context, host, user, privateKeyPath string, 
 }
 
 func (client *sshRemoteClient) Run(ctx context.Context, command string) error {
+	return client.RunWithStdin(ctx, command, nil)
+}
+
+func (client *sshRemoteClient) RunWithStdin(ctx context.Context, command string, stdin io.Reader) error {
 	session, err := client.client.NewSession()
 	if err != nil {
 		return fmt.Errorf("create SSH session: %w", err)
@@ -76,6 +84,7 @@ func (client *sshRemoteClient) Run(ctx context.Context, command string) error {
 	defer session.Close()
 	session.Stdout = client.stdout
 	session.Stderr = client.stderr
+	session.Stdin = stdin
 
 	done := make(chan error, 1)
 	go func() {

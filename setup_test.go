@@ -497,6 +497,76 @@ func TestProfileSetupModelCollectsNewProfileInputs(t *testing.T) {
 	}
 }
 
+func TestProfileSetupRepositoryFlowDefaultsToCreateBeforeSSH(t *testing.T) {
+	model := newProfileSetupModel(nil)
+	if model.repositoryMode != "create" {
+		t.Fatalf("unexpected default repository mode: %s", model.repositoryMode)
+	}
+	model.screen = profileSetupScreenRepository
+	view := model.View()
+	for _, expected := range []string{
+		"Create a new local repository",
+		"Use an existing local checkout",
+		"Clone a GitHub repository",
+		"after plan confirmation and before any SSH commands run",
+	} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("repository choice view missing %q:\n%s", expected, view)
+		}
+	}
+
+	updated, _ := model.updateRepositoryChoice(tea.KeyMsg{Type: tea.KeyEnter})
+	result := updated.(profileSetupModel)
+	if result.screen != profileSetupScreenReview || result.repositoryMode != "create" {
+		t.Fatalf("create choice did not proceed to review: %+v", result)
+	}
+	review := result.reviewView()
+	if !strings.Contains(review, "create and commit a new local repository") ||
+		!strings.Contains(review, "prepares the repository first") {
+		t.Fatalf("review does not explain repository timing:\n%s", review)
+	}
+}
+
+func TestProfileSetupRepositoryFlowUsesExistingCheckout(t *testing.T) {
+	repository := t.TempDir()
+	requireGit(t)
+	runGitCommand(t, repository, "init", "-b", "main")
+	model := newProfileSetupModel(nil)
+	model.repositoryList.Select(1)
+	updated, _ := model.updateRepositoryChoice(tea.KeyMsg{Type: tea.KeyEnter})
+	result := updated.(profileSetupModel)
+	if result.screen != profileSetupScreenRepositoryDetails || result.repositoryMode != "existing" {
+		t.Fatalf("existing choice did not request details: %+v", result)
+	}
+	for index, value := range []string{"203.0.113.10", "/tmp/aegis-key", "example.com", "admin@example.com"} {
+		result.inputs[index].SetValue(value)
+	}
+	result.repositoryInputs[0].SetValue(repository)
+	updated, _ = result.updateRepositoryDetails(tea.KeyMsg{Type: tea.KeyEnter})
+	result = updated.(profileSetupModel)
+	if result.screen != profileSetupScreenReview {
+		t.Fatalf("existing checkout did not proceed to review: %s", result.err)
+	}
+	options, err := result.optionsFromInputs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.ConfigRepositoryPath != repository {
+		t.Fatalf("existing repository was not retained: %+v", options)
+	}
+}
+
+func TestProfileSetupRepositoryFlowRejectsMissingExistingCheckout(t *testing.T) {
+	model := newProfileSetupModel(nil)
+	model.repositoryMode = "existing"
+	model.repositoryInputs[0].SetValue(filepath.Join(t.TempDir(), "missing"))
+	updated, _ := model.updateRepositoryDetails(tea.KeyMsg{Type: tea.KeyEnter})
+	result := updated.(profileSetupModel)
+	if result.screen == profileSetupScreenReview || !strings.Contains(result.err, "choose create") {
+		t.Fatalf("missing checkout was not rejected clearly: %+v", result)
+	}
+}
+
 func TestProfileSetupModelFreshUsesAdminAsInitialUser(t *testing.T) {
 	choice := profileChoice{
 		Profile: Profile{

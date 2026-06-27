@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -38,27 +40,34 @@ const (
 )
 
 type setupConfig struct {
-	Mode                  setupMode
-	Host                  string
-	InitialSSHUser        string
-	AdminUser             string
-	AdminPublicKeyPath    string
-	PrivateKeyPath        string
-	ProviderKeyPath       string
-	ProviderKeyComment    string
-	BaseDomain            string
-	LetsEncryptEmail      string
-	ServerSecret          string
-	PangolinSetupToken    string
-	PangolinAdminEmail    string
-	PangolinAdminPassword string
-	NewtID                string
-	NewtSecret            string
-	BeszelAdminPassword   string
-	BeszelSystemToken     string
-	BeszelHubPrivateKey   string
-	BeszelHubPublicKey    string
-	ProfileID             string
+	Mode                    setupMode
+	Host                    string
+	InitialSSHUser          string
+	AdminUser               string
+	AdminPublicKeyPath      string
+	PrivateKeyPath          string
+	ProviderKeyPath         string
+	ProviderKeyComment      string
+	BaseDomain              string
+	LetsEncryptEmail        string
+	ServerSecret            string
+	PangolinSetupToken      string
+	PangolinAdminEmail      string
+	PangolinAdminPassword   string
+	NewtID                  string
+	NewtSecret              string
+	BeszelAdminPassword     string
+	BeszelSystemToken       string
+	BeszelHubPrivateKey     string
+	BeszelHubPublicKey      string
+	ConfigRepositoryPath    string
+	GitHubRepositoryURL     string
+	ConfigRepositoryCommit  string
+	ConfigRepositoryOrigin  string
+	ConfigRepositoryCompose string
+	ConfigRepositorySHA256  string
+	GitHubToken             string
+	ProfileID               string
 }
 
 type setupCLIOptions struct {
@@ -74,6 +83,8 @@ type setupCLIOptions struct {
 	LetsEncryptEmail      string
 	PangolinAdminEmail    string
 	PangolinAdminPassword string
+	ConfigRepositoryPath  string
+	GitHubRepositoryURL   string
 }
 
 type preflightCheck struct {
@@ -113,6 +124,8 @@ func runSetup(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	flags.StringVar(&options.BaseDomain, "domain", "", "base domain for Pangolin, for example example.com")
 	flags.StringVar(&options.LetsEncryptEmail, "email", "", "Let's Encrypt account email")
 	flags.StringVar(&options.PangolinAdminEmail, "pangolin-admin-email", "", "Pangolin administrator email (defaults to --email)")
+	flags.StringVar(&options.ConfigRepositoryPath, "config-repo", "", "local Git repository containing declarative stack configuration")
+	flags.StringVar(&options.GitHubRepositoryURL, "github-repo", "", "GitHub HTTPS repository to clone for declarative stack configuration")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -298,6 +311,8 @@ const (
 	profileSetupScreenDashboard
 	profileSetupScreenIntake
 	profileSetupScreenAdvanced
+	profileSetupScreenRepository
+	profileSetupScreenRepositoryDetails
 	profileSetupScreenReview
 	profileSetupScreenDeleteConfirm
 )
@@ -332,29 +347,32 @@ func (item profileListItem) Description() string { return item.description }
 func (item profileListItem) FilterValue() string { return item.title + " " + item.description }
 
 type profileSetupModel struct {
-	screen          profileSetupScreen
-	profiles        []profileChoice
-	profileList     list.Model
-	stageTable      table.Model
-	progress        progress.Model
-	planViewport    viewport.Model
-	help            help.Model
-	selectedIndex   int
-	deleteProfileID string
-	singleStage     string
-	pangolinStatus  pangolinRegistrationStatus
-	pangolinError   string
-	showSetupToken  bool
-	fresh           bool
-	inputs          []textinput.Model
-	advanced        []textinput.Model
-	focus           int
-	err             string
-	width           int
-	height          int
-	done            bool
-	legacy          bool
-	cancelled       bool
+	screen           profileSetupScreen
+	profiles         []profileChoice
+	profileList      list.Model
+	repositoryList   list.Model
+	stageTable       table.Model
+	progress         progress.Model
+	planViewport     viewport.Model
+	help             help.Model
+	selectedIndex    int
+	deleteProfileID  string
+	singleStage      string
+	pangolinStatus   pangolinRegistrationStatus
+	pangolinError    string
+	showSetupToken   bool
+	fresh            bool
+	inputs           []textinput.Model
+	advanced         []textinput.Model
+	repositoryInputs []textinput.Model
+	repositoryMode   string
+	focus            int
+	err              string
+	width            int
+	height           int
+	done             bool
+	legacy           bool
+	cancelled        bool
 }
 
 func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
@@ -384,20 +402,45 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 	profileList.SetFilteringEnabled(false)
 	profileList.DisableQuitKeybindings()
 
+	repositoryList := list.New([]list.Item{
+		profileListItem{
+			kind:        "create",
+			title:       "Create a new local repository",
+			description: "AegisNode creates and commits the scaffold after confirmation, before any SSH commands run.",
+		},
+		profileListItem{
+			kind:        "existing",
+			title:       "Use an existing local checkout",
+			description: "Select a Git repository already present on this computer.",
+		},
+		profileListItem{
+			kind:        "github",
+			title:       "Clone a GitHub repository",
+			description: "Clone a GitHub HTTPS repository after confirmation, before any SSH commands run.",
+		},
+	}, delegate, 82, 14)
+	repositoryList.Title = "Observability configuration repository"
+	repositoryList.SetShowStatusBar(false)
+	repositoryList.SetFilteringEnabled(false)
+	repositoryList.DisableQuitKeybindings()
+
 	model := profileSetupModel{
-		screen:        profileSetupScreenPicker,
-		profiles:      profiles,
-		profileList:   profileList,
-		stageTable:    newProfileStageTable(nil),
-		progress:      progress.New(progress.WithWidth(42)),
-		planViewport:  viewport.New(82, 10),
-		help:          help.New(),
-		selectedIndex: -1,
-		width:         82,
-		height:        24,
+		screen:         profileSetupScreenPicker,
+		profiles:       profiles,
+		profileList:    profileList,
+		repositoryList: repositoryList,
+		stageTable:     newProfileStageTable(nil),
+		progress:       progress.New(progress.WithWidth(42)),
+		planViewport:   viewport.New(82, 10),
+		help:           help.New(),
+		selectedIndex:  -1,
+		width:          82,
+		height:         24,
 	}
 	model.inputs = setupProfileInputs(setupCLIOptions{})
 	model.advanced = setupAdvancedInputs(setupCLIOptions{})
+	model.repositoryInputs = setupRepositoryInputs(setupCLIOptions{})
+	model.repositoryMode = "create"
 	model.inputs[0].Focus()
 	return model
 }
@@ -418,6 +461,13 @@ func setupAdvancedInputs(options setupCLIOptions) []textinput.Model {
 		{label: "Admin SSH user", value: firstNonEmpty(options.AdminUser, "aegisadmin")},
 		{label: "Pangolin admin email", placeholder: "defaults to Let's Encrypt email", value: options.PangolinAdminEmail},
 		{label: "Pangolin admin password", placeholder: "generated for fresh installs", value: options.PangolinAdminPassword, secret: true},
+	})
+}
+
+func setupRepositoryInputs(options setupCLIOptions) []textinput.Model {
+	return newSetupInputs([]setupInputField{
+		{label: "Local checkout path", placeholder: "/path/to/aegisnode-config", value: options.ConfigRepositoryPath},
+		{label: "GitHub HTTPS URL", placeholder: "https://github.com/owner/repository.git", value: options.GitHubRepositoryURL},
 	})
 }
 
@@ -514,6 +564,7 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		model.width = msg.Width
 		model.height = msg.Height
 		model.profileList.SetSize(clampInt(msg.Width-4, 40, 100), clampInt(msg.Height-8, 8, 18))
+		model.repositoryList.SetSize(clampInt(msg.Width-4, 40, 100), clampInt(msg.Height-8, 12, 16))
 		model.planViewport.Width = clampInt(msg.Width-4, 40, 100)
 		model.progress.Width = clampInt(msg.Width-8, 24, 64)
 		return model, nil
@@ -560,6 +611,10 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return model.updateProfileInput(msg, false)
 		case profileSetupScreenAdvanced:
 			return model.updateProfileInput(msg, true)
+		case profileSetupScreenRepository:
+			return model.updateRepositoryChoice(msg)
+		case profileSetupScreenRepositoryDetails:
+			return model.updateRepositoryDetails(msg)
 		case profileSetupScreenReview:
 			return model.updateProfileReview(msg)
 		case profileSetupScreenDeleteConfirm:
@@ -714,14 +769,124 @@ func (model profileSetupModel) updateProfileInput(key tea.KeyMsg, advanced bool)
 			return model, tea.Quit
 		}
 		model.err = ""
-		model.refreshPlanPreview()
-		model.screen = profileSetupScreenReview
+		model.screen = profileSetupScreenRepository
 		return model, nil
 	}
 	var cmd tea.Cmd
 	inputs[model.focus], cmd = inputs[model.focus].Update(key)
 	model.storeFocusedInputs(inputs, advanced)
 	return model, cmd
+}
+
+func (model profileSetupModel) updateRepositoryChoice(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.String() == "enter" {
+		selected, ok := model.repositoryList.SelectedItem().(profileListItem)
+		if !ok {
+			return model, nil
+		}
+		model.repositoryMode = selected.kind
+		model.err = ""
+		switch selected.kind {
+		case "create":
+			model.repositoryInputs[0].SetValue("")
+			model.repositoryInputs[1].SetValue("")
+			model.refreshPlanPreview()
+			model.screen = profileSetupScreenReview
+			return model, nil
+		case "existing":
+			model.repositoryInputs[1].SetValue("")
+			model.focus = 0
+			model.repositoryInputs[0].Focus()
+		case "github":
+			model.focus = 1
+			model.repositoryInputs[1].Focus()
+		}
+		model.screen = profileSetupScreenRepositoryDetails
+		return model, nil
+	}
+	var cmd tea.Cmd
+	model.repositoryList, cmd = model.repositoryList.Update(key)
+	return model, cmd
+}
+
+func (model profileSetupModel) updateRepositoryDetails(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	indexes := model.repositoryDetailIndexes()
+	switch key.String() {
+	case "tab", "down":
+		model.repositoryInputs[model.focus].Blur()
+		position := 0
+		for index, inputIndex := range indexes {
+			if inputIndex == model.focus {
+				position = index
+				break
+			}
+		}
+		model.focus = indexes[(position+1)%len(indexes)]
+		model.repositoryInputs[model.focus].Focus()
+		return model, nil
+	case "shift+tab", "up":
+		model.repositoryInputs[model.focus].Blur()
+		position := 0
+		for index, inputIndex := range indexes {
+			if inputIndex == model.focus {
+				position = index
+				break
+			}
+		}
+		position--
+		if position < 0 {
+			position = len(indexes) - 1
+		}
+		model.focus = indexes[position]
+		model.repositoryInputs[model.focus].Focus()
+		return model, nil
+	case "enter":
+		if model.repositoryMode == "existing" {
+			path := expandUserPath(strings.TrimSpace(model.repositoryInputs[0].Value()))
+			if path == "" {
+				model.err = "existing repository path is required"
+				return model, nil
+			}
+			if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					model.err = "no Git repository exists at that path; go back and choose create"
+				} else {
+					model.err = err.Error()
+				}
+				return model, nil
+			}
+		}
+		if model.repositoryMode == "github" {
+			repositoryURL := strings.TrimSpace(model.repositoryInputs[1].Value())
+			if repositoryURL == "" {
+				model.err = "GitHub repository URL is required"
+				return model, nil
+			}
+			if err := validateGitHubRepositoryURL(repositoryURL); err != nil {
+				model.err = err.Error()
+				return model, nil
+			}
+		}
+		if _, err := model.optionsFromInputs(); err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		model.repositoryInputs[model.focus].Blur()
+		model.err = ""
+		model.refreshPlanPreview()
+		model.screen = profileSetupScreenReview
+		return model, nil
+	}
+	var cmd tea.Cmd
+	model.repositoryInputs[model.focus], cmd = model.repositoryInputs[model.focus].Update(key)
+	return model, cmd
+}
+
+func (model profileSetupModel) repositoryDetailIndexes() []int {
+	if model.repositoryMode == "existing" {
+		return []int{0}
+	}
+	return []int{1, 0}
 }
 
 func (model profileSetupModel) updateProfileReview(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -743,6 +908,9 @@ func (model profileSetupModel) updateProfileReview(key tea.KeyMsg) (tea.Model, t
 		model.focus = 0
 		model.advanced[0].Focus()
 		model.screen = profileSetupScreenAdvanced
+	case "c", "C":
+		model.err = ""
+		model.screen = profileSetupScreenRepository
 	case "d", "D":
 		if model.selectedIndex >= 0 {
 			model.screen = profileSetupScreenDashboard
@@ -786,6 +954,10 @@ func (model *profileSetupModel) goBack() {
 		} else {
 			model.screen = profileSetupScreenIntake
 		}
+	case profileSetupScreenRepository:
+		model.screen = profileSetupScreenIntake
+	case profileSetupScreenRepositoryDetails:
+		model.screen = profileSetupScreenRepository
 	case profileSetupScreenReview:
 		if model.selectedIndex >= 0 {
 			model.screen = profileSetupScreenDashboard
@@ -813,11 +985,13 @@ func (model *profileSetupModel) setInputsFromChoice(fresh bool) {
 		LetsEncryptEmail:      choice.Profile.LetsEncryptEmail,
 		PangolinAdminEmail:    firstNonEmpty(choice.Profile.PangolinAdminEmail, choice.Profile.LetsEncryptEmail),
 		PangolinAdminPassword: choice.Secrets.PangolinAdminPassword,
+		ConfigRepositoryPath:  choice.Profile.ConfigRepositoryPath,
 		Fresh:                 fresh,
 	}
 	if fresh {
 		options.ProfileID = ""
 		options.Name = choice.Profile.Name + " fresh"
+		options.ConfigRepositoryPath = ""
 		if completedSetupStages(choice.State)["bootstrap"] && options.AdminUser != "" {
 			options.InitialSSHUser = options.AdminUser
 		}
@@ -828,6 +1002,23 @@ func (model *profileSetupModel) setInputsFromChoice(fresh bool) {
 func (model *profileSetupModel) setInputsFromOptions(options setupCLIOptions) {
 	model.inputs = setupProfileInputs(options)
 	model.advanced = setupAdvancedInputs(options)
+	model.repositoryInputs = setupRepositoryInputs(options)
+	switch {
+	case options.GitHubRepositoryURL != "":
+		model.repositoryMode = "github"
+		model.repositoryList.Select(2)
+	case options.ConfigRepositoryPath != "":
+		if _, err := os.Stat(expandUserPath(options.ConfigRepositoryPath)); errors.Is(err, os.ErrNotExist) {
+			model.repositoryMode = "create"
+			model.repositoryList.Select(0)
+		} else {
+			model.repositoryMode = "existing"
+			model.repositoryList.Select(1)
+		}
+	default:
+		model.repositoryMode = "create"
+		model.repositoryList.Select(0)
+	}
 	model.focus = 0
 	model.inputs[0].Focus()
 }
@@ -929,6 +1120,15 @@ func (model profileSetupModel) optionsFromInputs() (setupCLIOptions, error) {
 		PangolinAdminPassword: value(model.advanced, 4),
 		Fresh:                 model.fresh,
 	}
+	switch model.repositoryMode {
+	case "create":
+		options.ConfigRepositoryPath = expandUserPath(strings.TrimSpace(model.repositoryInputs[0].Value()))
+	case "existing":
+		options.ConfigRepositoryPath = expandUserPath(strings.TrimSpace(model.repositoryInputs[0].Value()))
+	case "github":
+		options.ConfigRepositoryPath = expandUserPath(strings.TrimSpace(model.repositoryInputs[0].Value()))
+		options.GitHubRepositoryURL = strings.TrimSpace(model.repositoryInputs[1].Value())
+	}
 	if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
 		options.ProfileID = model.profiles[model.selectedIndex].Profile.ID
 		options.IP = model.profiles[model.selectedIndex].Profile.IP
@@ -956,7 +1156,7 @@ func (model profileSetupModel) optionsForSelectedProfile() (setupCLIOptions, err
 		return setupCLIOptions{}, errors.New("no profile selected")
 	}
 	profile := model.profiles[model.selectedIndex].Profile
-	return setupCLIOptions{
+	options := setupCLIOptions{
 		IP:                    profile.IP,
 		ProfileID:             profile.ID,
 		Name:                  profile.Name,
@@ -967,7 +1167,15 @@ func (model profileSetupModel) optionsForSelectedProfile() (setupCLIOptions, err
 		LetsEncryptEmail:      profile.LetsEncryptEmail,
 		PangolinAdminEmail:    firstNonEmpty(strings.TrimSpace(model.advanced[3].Value()), profile.PangolinAdminEmail, profile.LetsEncryptEmail),
 		PangolinAdminPassword: strings.TrimSpace(model.advanced[4].Value()),
-	}, nil
+	}
+	switch model.repositoryMode {
+	case "create", "existing":
+		options.ConfigRepositoryPath = expandUserPath(strings.TrimSpace(model.repositoryInputs[0].Value()))
+	case "github":
+		options.ConfigRepositoryPath = expandUserPath(strings.TrimSpace(model.repositoryInputs[0].Value()))
+		options.GitHubRepositoryURL = strings.TrimSpace(model.repositoryInputs[1].Value())
+	}
+	return options, nil
 }
 
 func (model profileSetupModel) selectedDashboardStage() (string, error) {
@@ -997,6 +1205,10 @@ func (model profileSetupModel) View() string {
 		builder.WriteString(model.inputView(false))
 	case profileSetupScreenAdvanced:
 		builder.WriteString(model.inputView(true))
+	case profileSetupScreenRepository:
+		builder.WriteString(model.repositoryChoiceView())
+	case profileSetupScreenRepositoryDetails:
+		builder.WriteString(model.repositoryDetailsView())
 	case profileSetupScreenReview:
 		builder.WriteString(model.reviewView())
 	case profileSetupScreenDeleteConfirm:
@@ -1023,7 +1235,15 @@ func (model profileSetupModel) dashboardView() string {
 	var builder strings.Builder
 	builder.WriteString(fmt.Sprintf("Dashboard for %s (%s)\n\n", firstNonEmpty(choice.Profile.Name, choice.Profile.IP), choice.Profile.IP))
 	builder.WriteString(fmt.Sprintf("Domain: %s\n", firstNonEmpty(choice.Profile.BaseDomain, "(missing)")))
-	builder.WriteString(fmt.Sprintf("Email:  %s\n\n", firstNonEmpty(choice.Profile.LetsEncryptEmail, "(missing)")))
+	builder.WriteString(fmt.Sprintf("Email:  %s\n", firstNonEmpty(choice.Profile.LetsEncryptEmail, "(missing)")))
+	repositoryPath := choice.Profile.ConfigRepositoryPath
+	if repositoryPath == "" {
+		builder.WriteString("Config repository: not created; choose one during full setup review.\n\n")
+	} else if _, err := os.Stat(expandUserPath(repositoryPath)); errors.Is(err, os.ErrNotExist) {
+		builder.WriteString(fmt.Sprintf("Config repository: %s (will be created before the next run)\n\n", repositoryPath))
+	} else {
+		builder.WriteString(fmt.Sprintf("Config repository: %s\n\n", repositoryPath))
+	}
 	builder.WriteString(model.pangolinRegistrationView(choice))
 	builder.WriteString("\n\n")
 	builder.WriteString(model.progress.ViewAs(profileCompletion(&choice.State)))
@@ -1111,6 +1331,31 @@ func (model profileSetupModel) inputView(advanced bool) string {
 	return builder.String()
 }
 
+func (model profileSetupModel) repositoryChoiceView() string {
+	var builder strings.Builder
+	builder.WriteString(model.repositoryList.View())
+	builder.WriteString("\n")
+	builder.WriteString(setupHelpStyle.Render("Repository creation or cloning occurs only after plan confirmation and before any SSH commands run."))
+	return builder.String()
+}
+
+func (model profileSetupModel) repositoryDetailsView() string {
+	var builder strings.Builder
+	switch model.repositoryMode {
+	case "existing":
+		builder.WriteString("Use an existing local checkout\n\n")
+		builder.WriteString(model.repositoryInputs[0].View())
+	case "github":
+		builder.WriteString("Clone a GitHub repository\n")
+		builder.WriteString(setupHelpStyle.Render("The local path is optional; leave it blank to use the profile default."))
+		builder.WriteString("\n\n")
+		builder.WriteString(model.repositoryInputs[1].View())
+		builder.WriteString("\n")
+		builder.WriteString(model.repositoryInputs[0].View())
+	}
+	return builder.String()
+}
+
 func (model profileSetupModel) reviewView() string {
 	var builder strings.Builder
 	builder.WriteString("Review full setup plan\n\n")
@@ -1123,7 +1368,17 @@ func (model profileSetupModel) reviewView() string {
 	} else {
 		builder.WriteString("Profile action: create a new profile.\n")
 	}
-	builder.WriteString("Remote execution starts only after confirmation.\n")
+	switch model.repositoryMode {
+	case "create":
+		path := firstNonEmpty(strings.TrimSpace(model.repositoryInputs[0].Value()), "the profile default path")
+		builder.WriteString(fmt.Sprintf("Repository action: create and commit a new local repository at %s.\n", path))
+	case "existing":
+		builder.WriteString(fmt.Sprintf("Repository action: use existing checkout at %s.\n", strings.TrimSpace(model.repositoryInputs[0].Value())))
+	case "github":
+		path := firstNonEmpty(strings.TrimSpace(model.repositoryInputs[0].Value()), "the profile default path")
+		builder.WriteString(fmt.Sprintf("Repository action: clone %s into %s.\n", strings.TrimSpace(model.repositoryInputs[1].Value()), path))
+	}
+	builder.WriteString("After confirmation, AegisNode prepares the repository first. SSH execution starts only after repository preparation succeeds.\n")
 	return builder.String()
 }
 
@@ -1187,9 +1442,22 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 			key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("ctrl+e", "intake")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		}
+	case profileSetupScreenRepository:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "select")),
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "choose")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	case profileSetupScreenRepositoryDetails:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "review")),
+			key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "field")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
 	case profileSetupScreenReview:
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "run")),
+			key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "repository")),
 			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "advanced")),
 			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
@@ -1349,16 +1617,18 @@ func prepareProfileSetup(options setupCLIOptions, store ProfileStore, output io.
 	applySetupOptionsToProfile(&profile, options)
 
 	config := setupConfig{
-		Mode:               setupModeFullRun,
-		Host:               profile.IP,
-		InitialSSHUser:     profile.InitialSSHUser,
-		AdminUser:          profile.AdminUser,
-		PrivateKeyPath:     expandUserPath(profile.PrivateKeyPath),
-		AdminPublicKeyPath: publicKeyPath(expandUserPath(profile.PrivateKeyPath)),
-		BaseDomain:         profile.BaseDomain,
-		LetsEncryptEmail:   profile.LetsEncryptEmail,
-		PangolinAdminEmail: firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail),
-		ProfileID:          profile.ID,
+		Mode:                 setupModeFullRun,
+		Host:                 profile.IP,
+		InitialSSHUser:       profile.InitialSSHUser,
+		AdminUser:            profile.AdminUser,
+		PrivateKeyPath:       expandUserPath(profile.PrivateKeyPath),
+		AdminPublicKeyPath:   publicKeyPath(expandUserPath(profile.PrivateKeyPath)),
+		BaseDomain:           profile.BaseDomain,
+		LetsEncryptEmail:     profile.LetsEncryptEmail,
+		PangolinAdminEmail:   firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail),
+		ProfileID:            profile.ID,
+		ConfigRepositoryPath: profile.ConfigRepositoryPath,
+		GitHubRepositoryURL:  options.GitHubRepositoryURL,
 	}
 	if config.BaseDomain == "" || config.LetsEncryptEmail == "" {
 		if options.Yes || !isInteractiveWriter(output) {
@@ -1435,16 +1705,18 @@ func prepareProfileStageSetup(options setupCLIOptions, store ProfileStore, stage
 	}
 	applySetupOptionsToProfile(&profile, options)
 	config := setupConfig{
-		Mode:               setupModeForStage(stage),
-		Host:               profile.IP,
-		InitialSSHUser:     firstNonEmpty(profile.InitialSSHUser, "root"),
-		AdminUser:          firstNonEmpty(profile.AdminUser, "aegisadmin"),
-		PrivateKeyPath:     expandUserPath(firstNonEmpty(profile.PrivateKeyPath, defaultKeygenConfig().Path)),
-		AdminPublicKeyPath: publicKeyPath(expandUserPath(firstNonEmpty(profile.PrivateKeyPath, defaultKeygenConfig().Path))),
-		BaseDomain:         profile.BaseDomain,
-		LetsEncryptEmail:   profile.LetsEncryptEmail,
-		PangolinAdminEmail: firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail),
-		ProfileID:          profile.ID,
+		Mode:                 setupModeForStage(stage),
+		Host:                 profile.IP,
+		InitialSSHUser:       firstNonEmpty(profile.InitialSSHUser, "root"),
+		AdminUser:            firstNonEmpty(profile.AdminUser, "aegisadmin"),
+		PrivateKeyPath:       expandUserPath(firstNonEmpty(profile.PrivateKeyPath, defaultKeygenConfig().Path)),
+		AdminPublicKeyPath:   publicKeyPath(expandUserPath(firstNonEmpty(profile.PrivateKeyPath, defaultKeygenConfig().Path))),
+		BaseDomain:           profile.BaseDomain,
+		LetsEncryptEmail:     profile.LetsEncryptEmail,
+		PangolinAdminEmail:   firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail),
+		ProfileID:            profile.ID,
+		ConfigRepositoryPath: profile.ConfigRepositoryPath,
+		GitHubRepositoryURL:  options.GitHubRepositoryURL,
 	}
 	if err := validateStageRunConfig(stage, config); err != nil {
 		return Profile{}, ProfileState{}, setupConfig{}, err
@@ -1625,14 +1897,15 @@ func freshProfileSeedState(sourceState ProfileState) ProfileState {
 
 func createSetupProfile(options setupCLIOptions, store ProfileStore, seedState ProfileState) (Profile, ProfileState, error) {
 	profile, err := store.Create(Profile{
-		Name:               firstNonEmpty(options.Name, options.IP),
-		IP:                 options.IP,
-		InitialSSHUser:     firstNonEmpty(options.InitialSSHUser, "root"),
-		AdminUser:          firstNonEmpty(options.AdminUser, "aegisadmin"),
-		PrivateKeyPath:     expandUserPath(firstNonEmpty(options.PrivateKeyPath, defaultKeygenConfig().Path)),
-		BaseDomain:         options.BaseDomain,
-		LetsEncryptEmail:   options.LetsEncryptEmail,
-		PangolinAdminEmail: firstNonEmpty(options.PangolinAdminEmail, options.LetsEncryptEmail),
+		Name:                 firstNonEmpty(options.Name, options.IP),
+		IP:                   options.IP,
+		InitialSSHUser:       firstNonEmpty(options.InitialSSHUser, "root"),
+		AdminUser:            firstNonEmpty(options.AdminUser, "aegisadmin"),
+		PrivateKeyPath:       expandUserPath(firstNonEmpty(options.PrivateKeyPath, defaultKeygenConfig().Path)),
+		BaseDomain:           options.BaseDomain,
+		LetsEncryptEmail:     options.LetsEncryptEmail,
+		PangolinAdminEmail:   firstNonEmpty(options.PangolinAdminEmail, options.LetsEncryptEmail),
+		ConfigRepositoryPath: options.ConfigRepositoryPath,
 	})
 	if err != nil {
 		return Profile{}, ProfileState{}, err
@@ -1663,6 +1936,7 @@ func applySetupOptionsToProfile(profile *Profile, options setupCLIOptions) {
 	profile.BaseDomain = firstNonEmpty(options.BaseDomain, profile.BaseDomain)
 	profile.LetsEncryptEmail = firstNonEmpty(options.LetsEncryptEmail, profile.LetsEncryptEmail)
 	profile.PangolinAdminEmail = firstNonEmpty(options.PangolinAdminEmail, profile.PangolinAdminEmail, profile.LetsEncryptEmail)
+	profile.ConfigRepositoryPath = firstNonEmpty(options.ConfigRepositoryPath, profile.ConfigRepositoryPath)
 }
 
 func validateFullRunConfig(config setupConfig) error {
@@ -1695,6 +1969,13 @@ func runProfileSetupPlan(ctx context.Context, store ProfileStore, profile Profil
 	if err := runPreflight(config, stdout); err != nil {
 		return err
 	}
+	fmt.Fprintln(stdout, "Preparing the configuration repository before SSH execution...")
+	var err error
+	profile, config, err = prepareDeclarativeSetup(ctx, store, profile, state, config)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Configuration repository ready: %s at %s\n\n", config.ConfigRepositoryPath, config.ConfigRepositoryCommit)
 
 	completedStages := completedSetupStages(state)
 	runID := newSetupRunID()
@@ -1737,6 +2018,13 @@ func runProfileSetupPlanWithRunView(ctx context.Context, store ProfileStore, pro
 	if err := runPreflight(config, stdout); err != nil {
 		return err
 	}
+	fmt.Fprintln(stdout, "Preparing the configuration repository before SSH execution...")
+	var err error
+	profile, config, err = prepareDeclarativeSetup(ctx, store, profile, state, config)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Configuration repository ready: %s at %s\n\n", config.ConfigRepositoryPath, config.ConfigRepositoryCommit)
 
 	completedStages := completedSetupStages(state)
 	runID := newSetupRunID()
@@ -1791,6 +2079,15 @@ func runProfileSetupStagePlan(ctx context.Context, store ProfileStore, profile P
 	if err := runPreflight(config, stdout); err != nil {
 		return err
 	}
+	if stage == "observability" {
+		fmt.Fprintln(stdout, "Preparing the configuration repository before SSH execution...")
+		var err error
+		profile, config, err = prepareDeclarativeSetup(ctx, store, profile, state, config)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Configuration repository ready: %s at %s\n\n", config.ConfigRepositoryPath, config.ConfigRepositoryCommit)
+	}
 
 	runID := newSetupRunID()
 	state.ActiveRunID = runID
@@ -1824,6 +2121,15 @@ func runProfileSetupStagePlanWithRunView(ctx context.Context, store ProfileStore
 	fmt.Fprintf(stdout, "Selected one-time stage: %s\n\n", profileRunStageLabel(stage))
 	if err := runPreflight(config, stdout); err != nil {
 		return err
+	}
+	if stage == "observability" {
+		fmt.Fprintln(stdout, "Preparing the configuration repository before SSH execution...")
+		var err error
+		profile, config, err = prepareDeclarativeSetup(ctx, store, profile, state, config)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Configuration repository ready: %s at %s\n\n", config.ConfigRepositoryPath, config.ConfigRepositoryCommit)
 	}
 
 	runID := newSetupRunID()
@@ -1984,6 +2290,8 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 		BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
 		AdminPassword: config.BeszelAdminPassword, PangolinPassword: config.PangolinAdminPassword, SystemToken: config.BeszelSystemToken,
 		HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
+		RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
+		RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256, GitHubToken: config.GitHubToken,
 	}
 	observabilityClient, err := newObservabilityRemoteClient(ctx, observabilityConfig, stageStdout, stageStderr)
 	if err != nil {
@@ -2080,6 +2388,8 @@ func runSetupStage(ctx context.Context, profile Profile, config setupConfig, run
 			BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
 			AdminPassword: config.BeszelAdminPassword, PangolinPassword: config.PangolinAdminPassword, SystemToken: config.BeszelSystemToken,
 			HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
+			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
+			RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256, GitHubToken: config.GitHubToken,
 		}
 		fmt.Fprintln(stageStdout, "One-time stage: deploy observability stack.")
 		observabilityClient, err := newObservabilityRemoteClient(ctx, observabilityConfig, stageStdout, stageStderr)
@@ -2816,6 +3126,7 @@ func preflightChecks(config setupConfig) []preflightCheck {
 		return checks
 	}
 	checks = append(checks, nativeCapabilityCheck("native SSH runner"))
+	checks = append(checks, executableCheck("Git CLI", "git"))
 
 	privateKeyRequired := config.Mode == setupModeBootstrapHarden || config.Mode == setupModeHardenOnly || config.Mode == setupModeNetwork || config.Mode == setupModeProxy || config.Mode == setupModeObservability || config.Mode == setupModeFullRun
 	checks = append(checks, fileCheck("private key", config.PrivateKeyPath, privateKeyRequired))
@@ -2823,6 +3134,14 @@ func preflightChecks(config setupConfig) []preflightCheck {
 	publicKeyRequired := config.Mode == setupModeBootstrapHarden || config.Mode == setupModeFullRun
 	checks = append(checks, adminPublicKeyCheck(config.AdminPublicKeyPath, publicKeyRequired))
 	return checks
+}
+
+func executableCheck(name, executable string) preflightCheck {
+	path, err := exec.LookPath(executable)
+	if err != nil {
+		return preflightCheck{Name: name, Detail: err.Error(), OK: false, Required: true}
+	}
+	return preflightCheck{Name: name, Detail: path, OK: true, Required: true}
 }
 
 func nativeCapabilityCheck(name string) preflightCheck {
@@ -3317,13 +3636,14 @@ func setupPlanSummary(config setupConfig) string {
 		)
 	case setupModeFullRun:
 		return fmt.Sprintf(
-			"- Use profile %s for %s.\n- Connect first as %s, create or update %s, then harden the server.\n- Configure Docker networking and UFW as %s.\n- Deploy Traefik, Pangolin, Gerbil, Newt, Beszel, and Dozzle for %s.\n- Pangolin and observability secrets are generated, saved, and reused without printing them.\n- %s.\n",
+			"- Use profile %s for %s.\n- Connect first as %s, create or update %s, then harden the server.\n- Configure Docker networking and UFW as %s.\n- Deploy Traefik, Pangolin, Gerbil, Newt, Beszel, and Dozzle for %s.\n- Deploy committed observability configuration from %s.\n- Pangolin and observability secrets are generated, saved, and reused without printing them.\n- %s.\n",
 			firstNonEmpty(config.ProfileID, "(unsaved)"),
 			config.Host,
 			config.InitialSSHUser,
 			config.AdminUser,
 			config.AdminUser,
 			config.BaseDomain,
+			firstNonEmpty(config.ConfigRepositoryPath, "the profile's default repository"),
 			requiredDNSGuidance(config.BaseDomain, config.Host),
 		)
 	default:

@@ -8,6 +8,8 @@ import (
 )
 
 const observabilityStackDirectory = "/opt/aegisnode/stacks/observability"
+const observabilityRepositoryDirectory = "/opt/aegisnode/repository"
+const observabilityEnvironmentPath = "/etc/aegisnode/observability.env"
 
 const (
 	beszelImage      = "docker.io/henrygd/beszel:0.18.7"
@@ -16,16 +18,21 @@ const (
 )
 
 type observabilityConfig struct {
-	Host             string
-	SSHUser          string
-	PrivateKeyPath   string
-	BaseDomain       string
-	AdminEmail       string
-	AdminPassword    string
-	PangolinPassword string
-	SystemToken      string
-	HubPrivateKey    string
-	HubPublicKey     string
+	Host              string
+	SSHUser           string
+	PrivateKeyPath    string
+	BaseDomain        string
+	AdminEmail        string
+	AdminPassword     string
+	PangolinPassword  string
+	SystemToken       string
+	HubPrivateKey     string
+	HubPublicKey      string
+	RepositoryCommit  string
+	RepositoryOrigin  string
+	RepositoryCompose string
+	RepositorySHA256  string
+	GitHubToken       string
 }
 
 type observabilityRemoteClientFactory func(context.Context, observabilityConfig, io.Writer, io.Writer) (remoteClient, error)
@@ -40,36 +47,127 @@ func runObservabilityStepsWithReporter(ctx context.Context, client remoteClient,
 
 func observabilityTasks(config observabilityConfig) []Task {
 	composePath := observabilityStackDirectory + "/docker-compose.yml"
+	composeCommand := "docker compose -f " + shellQuote(composePath)
+	declarative := config.RepositoryCommit != "" && config.RepositoryCompose != ""
+	if declarative {
+		composePath = observabilityRepositoryDirectory + "/" + observabilityComposeRepositoryPath
+		composeCommand = "docker compose --env-file " + shellQuote(observabilityEnvironmentPath) + " -p observability -f " + shellQuote(composePath)
+	}
 	group := firstNonEmpty(config.SSHUser, "root")
-	return []Task{
+	tasks := []Task{
 		{Name: "Prepare observability directories", Apply: commandScript(
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote("/opt/aegisnode/stacks"),
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory),
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory+"/beszel_data"),
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory+"/agent_keys"),
+			"install -d -m 0750 -o root -g "+shellQuote(group)+" /etc/aegisnode",
 		)},
 		{Name: "Write Beszel system configuration", Apply: remoteWriteFileCommand(observabilityStackDirectory+"/beszel_data/config.yml", beszelConfigFile(config), "root", group, 0600)},
 		{Name: "Write Beszel Hub private key", Apply: remoteWriteFileCommand(observabilityStackDirectory+"/beszel_data/id_ed25519", config.HubPrivateKey, "root", group, 0600)},
 		{Name: "Write Beszel agent public key", Apply: remoteWriteFileCommand(observabilityStackDirectory+"/agent_keys/id_ed25519.pub", config.HubPublicKey+"\n", "root", group, 0600)},
-		{Name: "Write observability compose file", Apply: remoteWriteFileCommand(composePath, observabilityComposeFile(config), "root", group, 0600)},
-		{Name: "Validate observability compose file", Apply: commandScript(
-			"docker compose -f " + shellQuote(composePath) + " config --quiet",
-		)},
-		{Name: "Reconcile Pangolin observability resources", Apply: observabilityResourceReconcileCommand(config, composePath)},
-		{Name: "Start observability stack", Apply: commandScript(
+	}
+	if declarative {
+		tasks = append(tasks,
+			Task{Name: "Write observability environment", Apply: remoteWriteFileCommand(observabilityEnvironmentPath, observabilityEnvironmentFile(config), "root", "root", 0600)},
+			observabilityRepositoryTask(config, group),
+			Task{Name: "Validate observability compose file", Apply: commandScript(
+				"[ ! -f "+shellQuote(observabilityStackDirectory+"/docker-compose.yml")+" ] || docker compose -f "+shellQuote(observabilityStackDirectory+"/docker-compose.yml")+" config --quiet",
+				composeCommand+" config --quiet",
+			)},
+		)
+	} else {
+		tasks = append(tasks,
+			Task{Name: "Write observability compose file", Apply: remoteWriteFileCommand(composePath, observabilityComposeFile(config), "root", group, 0600)},
+			Task{Name: "Validate observability compose file", Apply: commandScript(composeCommand + " config --quiet")},
+		)
+	}
+	tasks = append(tasks,
+		Task{Name: "Reconcile Pangolin observability resources", Apply: observabilityResourceReconcileCommand(config, composeCommand)},
+		Task{Name: "Start observability stack", Apply: commandScript(
 			"start_result=0",
-			"docker compose -f "+shellQuote(composePath)+" pull && docker compose -f "+shellQuote(composePath)+" up -d --remove-orphans || start_result=$?",
+			composeCommand+" pull && "+composeCommand+" up -d --remove-orphans || start_result=$?",
 			"docker start aegis-newt >/dev/null",
 			"exit \"$start_result\"",
 		)},
-		{Name: "Verify Pangolin observability resources", Apply: observabilityResourceVerifyCommand(config)},
-		{Name: "Verify observability stack", Apply: commandScript(
-			"running=\"$(docker compose -f "+shellQuote(composePath)+" ps --services --status running)\"",
+		Task{Name: "Verify Pangolin observability resources", Apply: observabilityResourceVerifyCommand(config)},
+		Task{Name: "Verify observability stack", Apply: commandScript(
+			"running=\"$("+composeCommand+" ps --services --status running)\"",
 			"for service in beszel beszel-agent dozzle; do",
 			"  printf '%s\\n' \"$running\" | grep -Fx \"$service\" >/dev/null",
 			"done",
-			"docker compose -f "+shellQuote(composePath)+" ps",
+			composeCommand+" ps",
 		)},
+	)
+	if declarative {
+		tasks = append(tasks, Task{Name: "Remove migrated legacy compose file", Apply: commandScript(
+			"rm -f " + shellQuote(observabilityStackDirectory+"/docker-compose.yml"),
+		)})
+	}
+	return tasks
+}
+
+func observabilityEnvironmentFile(config observabilityConfig) string {
+	return strings.Join([]string{
+		"BESZEL_ADMIN_PASSWORD=" + config.AdminPassword,
+		"BESZEL_SYSTEM_TOKEN=" + config.SystemToken,
+		"",
+	}, "\n")
+}
+
+func observabilityRepositoryTask(config observabilityConfig, group string) Task {
+	deploymentPath := observabilityRepositoryDirectory + ".deployment"
+	verifySnapshot := commandScript(
+		"if [ -e "+shellQuote(observabilityRepositoryDirectory)+" ] && [ ! -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+" ] && [ ! -f "+shellQuote(deploymentPath)+" ]; then",
+		"  echo 'remote configuration directory is not managed by AegisNode' >&2",
+		"  exit 1",
+		"fi",
+		"if [ -f "+shellQuote(deploymentPath)+" ] && [ ! -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+" ]; then",
+		"  recorded_hash=\"$(sed -n 's/^sha256=//p' "+shellQuote(deploymentPath)+")\"",
+		"  actual_hash=\"$(sha256sum "+shellQuote(observabilityRepositoryDirectory+"/"+observabilityComposeRepositoryPath)+" | awk '{print $1}')\"",
+		"  [ \"$recorded_hash\" = \"$actual_hash\" ] || { echo 'remote configuration snapshot has drifted' >&2; exit 1; }",
+		"fi",
+	)
+	if config.RepositoryOrigin == "" {
+		metadata := "commit=" + config.RepositoryCommit + "\nsha256=" + config.RepositorySHA256 + "\n"
+		return Task{Name: "Deploy committed configuration snapshot", Apply: commandScript(
+			verifySnapshot,
+			"if [ -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+" ]; then echo 'remote Git checkout exists; refusing snapshot overwrite' >&2; exit 1; fi",
+			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityRepositoryDirectory+"/stacks/observability"),
+			remoteWriteFileCommand(observabilityRepositoryDirectory+"/"+observabilityComposeRepositoryPath, config.RepositoryCompose, "root", group, 0640),
+			remoteWriteFileCommand(deploymentPath, metadata, "root", group, 0640),
+		)}
+	}
+
+	script := commandScript(
+		"IFS= read -r AEGISNODE_GITHUB_TOKEN || true",
+		"export AEGISNODE_GITHUB_TOKEN",
+		"askpass=\"$(mktemp)\"",
+		"checkout=\"$(mktemp -d)\"",
+		"cleanup_git_credentials() { rm -f \"$askpass\"; rm -rf \"$checkout\"; unset AEGISNODE_GITHUB_TOKEN; }",
+		"trap cleanup_git_credentials EXIT",
+		"printf '%s\\n' '#!/bin/sh' 'case \"$1\" in *Username*) printf \"%s\\\\n\" x-access-token;; *) printf \"%s\\\\n\" \"$AEGISNODE_GITHUB_TOKEN\";; esac' >\"$askpass\"",
+		"chmod 0700 \"$askpass\"",
+		"export GIT_ASKPASS=\"$askpass\" GIT_TERMINAL_PROMPT=0",
+		verifySnapshot,
+		"if [ -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+" ]; then",
+		"  [ -z \"$(git -C "+shellQuote(observabilityRepositoryDirectory)+" status --porcelain)\" ] || { echo 'remote configuration checkout is dirty' >&2; exit 1; }",
+		"  [ \"$(git -C "+shellQuote(observabilityRepositoryDirectory)+" remote get-url origin)\" = "+shellQuote(config.RepositoryOrigin)+" ] || { echo 'remote configuration origin differs' >&2; exit 1; }",
+		"  git -C "+shellQuote(observabilityRepositoryDirectory)+" fetch --prune origin",
+		"else",
+		"  git clone --no-checkout -- "+shellQuote(config.RepositoryOrigin)+" \"$checkout/repository\"",
+		"  rm -rf "+shellQuote(observabilityRepositoryDirectory),
+		"  mv \"$checkout/repository\" "+shellQuote(observabilityRepositoryDirectory),
+		"fi",
+		"git -C "+shellQuote(observabilityRepositoryDirectory)+" cat-file -e "+shellQuote(config.RepositoryCommit+"^{commit}"),
+		"git -C "+shellQuote(observabilityRepositoryDirectory)+" checkout --detach --force "+shellQuote(config.RepositoryCommit),
+		"actual_hash=\"$(sha256sum "+shellQuote(observabilityRepositoryDirectory+"/"+observabilityComposeRepositoryPath)+" | awk '{print $1}')\"",
+		"[ \"$actual_hash\" = "+shellQuote(config.RepositorySHA256)+" ] || { echo 'checked-out configuration hash differs' >&2; exit 1; }",
+		remoteWriteFileCommand(deploymentPath, "commit="+config.RepositoryCommit+"\nsha256="+config.RepositorySHA256+"\n", "root", group, 0640),
+	)
+	return Task{
+		Name:  "Check out committed GitHub configuration",
+		Apply: script,
+		Stdin: config.GitHubToken + "\n",
 	}
 }
 
@@ -115,14 +213,14 @@ func observabilityComposeFile(config observabilityConfig) string {
 		"      - no-new-privileges:true",
 		"    environment:",
 		"      USER_EMAIL: " + yamlDoubleQuote(config.AdminEmail),
-		"      USER_PASSWORD: " + yamlDoubleQuote(config.AdminPassword),
+		"      USER_PASSWORD: ${BESZEL_ADMIN_PASSWORD}",
 		"      TRUSTED_AUTH_HEADER: \"Remote-Email\"",
 		"      APP_URL: " + yamlDoubleQuote("https://beszel."+config.BaseDomain),
 		"      DISABLE_PASSWORD_AUTH: \"true\"",
 		"    expose:",
 		"      - \"8090\"",
 		"    volumes:",
-		"      - ./beszel_data:/beszel_data",
+		"      - " + observabilityStackDirectory + "/beszel_data:/beszel_data",
 		"    networks:",
 		"      - " + aegisPublicNetwork,
 		"    labels:",
@@ -138,11 +236,11 @@ func observabilityComposeFile(config observabilityConfig) string {
 		"      - beszel",
 		"    environment:",
 		"      HUB_URL: \"http://beszel:8090\"",
-		"      TOKEN: "+yamlDoubleQuote(config.SystemToken),
+		"      TOKEN: ${BESZEL_SYSTEM_TOKEN}",
 		"      KEY_FILE: \"/keys/id_ed25519.pub\"",
 		"      DOCKER_HOST: \"tcp://socket-proxy:2375\"",
 		"    volumes:",
-		"      - ./agent_keys:/keys:ro",
+		"      - "+observabilityStackDirectory+"/agent_keys:/keys:ro",
 		"      - /proc:/host/proc:ro",
 		"      - /sys:/host/sys:ro",
 		"      - /etc/os-release:/etc/os-release:ro",
@@ -177,7 +275,7 @@ func observabilityComposeFile(config observabilityConfig) string {
 	return strings.Join(lines, "\n")
 }
 
-func observabilityResourceReconcileCommand(config observabilityConfig, composePath string) string {
+func observabilityResourceReconcileCommand(config observabilityConfig, composeCommand string) string {
 	loginPayload := fmt.Sprintf(`{"email":%s,"password":%s}`,
 		jsonString(config.AdminEmail), jsonString(config.PangolinPassword))
 	specs := observabilityResourceSpecs(config.BaseDomain)
@@ -193,7 +291,7 @@ for spec in specs:
    print(resource["resourceId"])`
 	return commandScript(
 		"docker stop aegis-newt >/dev/null",
-		"docker compose -f "+shellQuote(composePath)+" down --remove-orphans >/dev/null 2>&1 || true",
+		composeCommand+" down --remove-orphans >/dev/null 2>&1 || true",
 		"sleep 2",
 		`api='http://127.0.0.1:3000/api/v1'`,
 		`cookie_file="$(mktemp)"`,
