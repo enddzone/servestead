@@ -29,6 +29,16 @@ func TestObservabilityComposeUsesPinnedReadOnlyServicesAndPangolinLabels(t *test
 		"pangolin.public-resources.aegisnode-dozzle.full-domain=dozzle.example.com",
 		"pangolin.public-resources.aegisnode-beszel.auth.sso-users[0]=admin@example.com",
 		"pangolin.public-resources.aegisnode-beszel.targets[0].hostname=beszel",
+		"pangolin.public-resources.aegisnode-beszel.targets[0].healthcheck.enabled=true",
+		"pangolin.public-resources.aegisnode-beszel.targets[0].healthcheck.hostname=beszel",
+		"pangolin.public-resources.aegisnode-beszel.targets[0].healthcheck.port=8090",
+		"pangolin.public-resources.aegisnode-beszel.targets[0].healthcheck.scheme=http",
+		"pangolin.public-resources.aegisnode-beszel.targets[0].healthcheck.path=/",
+		"pangolin.public-resources.aegisnode-dozzle.targets[0].healthcheck.enabled=true",
+		"pangolin.public-resources.aegisnode-dozzle.targets[0].healthcheck.hostname=dozzle",
+		"pangolin.public-resources.aegisnode-dozzle.targets[0].healthcheck.port=8080",
+		"pangolin.public-resources.aegisnode-dozzle.targets[0].healthcheck.scheme=http",
+		"pangolin.public-resources.aegisnode-dozzle.targets[0].healthcheck.path=/healthcheck",
 		"external: true",
 	} {
 		if !strings.Contains(compose, expected) {
@@ -117,7 +127,9 @@ func TestObservabilityTasksValidateAndVerifyStack(t *testing.T) {
 		`nice_id`,
 		`DELETE "$api/resource/$resource_id"`,
 		"docker start aegis-newt",
-		"did not converge to exactly one managed Beszel and Dozzle resource",
+		`targets[0].get("hcEnabled") is True`,
+		`"$api/resource/$resource_id/targets"`,
+		"did not converge to exactly one managed Beszel and Dozzle resource with health checks enabled",
 		"for service in beszel beszel-agent dozzle; do",
 	} {
 		if !strings.Contains(joined, expected) {

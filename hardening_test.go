@@ -15,6 +15,7 @@ func TestHardeningCommandsContainBaseline(t *testing.T) {
 		"Validate sysctl keys",
 		"Apply package upgrades",
 		"Install hardening prerequisites",
+		"Configure swap",
 		"Write sshd hardening config",
 		"Validate and reload SSH",
 		"Write sysctl hardening config",
@@ -36,6 +37,14 @@ func TestHardeningCommandsContainBaseline(t *testing.T) {
 		"apt-get -o DPkg::Lock::Timeout=300 autoremove -y",
 		"apt-get -o DPkg::Lock::Timeout=300 install -y 'apt-transport-https' 'ca-certificates' 'curl' 'gnupg' 'iptables' 'unattended-upgrades'",
 		"/etc/ssh/sshd_config.d/99-aegisnode-hardening.conf",
+		`ram_gib="$(( (mem_kib + 1048575) / 1048576 ))"`,
+		`if [ "$ram_gib" -lt 2 ]; then swap_gib="$((ram_gib * 2))"; elif [ "$ram_gib" -le 8 ]; then swap_gib="$ram_gib"; else swap_gib=4; fi`,
+		`swapon --show=NAME --noheadings --raw`,
+		`fallocate -l "${swap_gib}G" /swapfile`,
+		`dd if=/dev/zero of=/swapfile`,
+		`chmod 600 /swapfile`,
+		`mkswap /swapfile`,
+		`/swapfile none swap sw 0 0`,
 		"passwd -l root",
 		"install -d -m 0755 -o root -g root /run/sshd",
 		"/usr/sbin/sshd -t",
@@ -55,6 +64,11 @@ func TestHardeningCommandsContainBaseline(t *testing.T) {
 	config := strings.Join(sysctlConfigLines(), "\n")
 	if !strings.Contains(config, "kernel.unprivileged_bpf_disabled = 1") {
 		t.Fatalf("sysctl config missing expected setting:\n%s", config)
+	}
+	for _, expected := range []string{"vm.swappiness = 10", "vm.vfs_cache_pressure = 50"} {
+		if !strings.Contains(config, expected) {
+			t.Fatalf("sysctl config missing %q:\n%s", expected, config)
+		}
 	}
 	sshdConfig := sshdHardeningConfig()
 	for _, expected := range []string{

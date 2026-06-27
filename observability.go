@@ -87,7 +87,7 @@ func beszelConfigFile(config observabilityConfig) string {
 }
 
 func observabilityComposeFile(config observabilityConfig) string {
-	labels := func(key, name, host string, port int) []string {
+	labels := func(key, name, host string, port int, healthPath string) []string {
 		prefix := "pangolin.public-resources." + key
 		return []string{
 			"      - " + prefix + ".name=" + name,
@@ -98,6 +98,11 @@ func observabilityComposeFile(config observabilityConfig) string {
 			"      - " + prefix + ".targets[0].hostname=" + host,
 			fmt.Sprintf("      - %s.targets[0].port=%d", prefix, port),
 			"      - " + prefix + ".targets[0].method=http",
+			"      - " + prefix + ".targets[0].healthcheck.enabled=true",
+			"      - " + prefix + ".targets[0].healthcheck.hostname=" + host,
+			fmt.Sprintf("      - %s.targets[0].healthcheck.port=%d", prefix, port),
+			"      - " + prefix + ".targets[0].healthcheck.scheme=http",
+			"      - " + prefix + ".targets[0].healthcheck.path=" + healthPath,
 		}
 	}
 	lines := []string{
@@ -122,7 +127,7 @@ func observabilityComposeFile(config observabilityConfig) string {
 		"      - " + aegisPublicNetwork,
 		"    labels:",
 	}
-	lines = append(lines, labels("aegisnode-beszel", "Beszel", "beszel", 8090)...)
+	lines = append(lines, labels("aegisnode-beszel", "Beszel", "beszel", 8090, "/")...)
 	lines = append(lines,
 		"",
 		"  beszel-agent:",
@@ -161,7 +166,7 @@ func observabilityComposeFile(config observabilityConfig) string {
 		"      - "+aegisPublicNetwork,
 		"    labels:",
 	)
-	lines = append(lines, labels("aegisnode-dozzle", "Dozzle", "dozzle", 8080)...)
+	lines = append(lines, labels("aegisnode-dozzle", "Dozzle", "dozzle", 8080, "/healthcheck")...)
 	lines = append(lines,
 		"",
 		"networks:",
@@ -221,6 +226,12 @@ for spec in specs:
  canonical=[r for r in matches if r.get("niceId")==spec["nice_id"]]
  if len(matches)!=1 or len(canonical)!=1:
   ok=False
+ else:
+  print(canonical[0]["resourceId"])
+sys.exit(0 if ok else 1)`
+	verifyTargets := `import json,sys
+targets=json.load(sys.stdin)["data"]["targets"]
+ok=len(targets)==1 and targets[0].get("hcEnabled") is True
 sys.exit(0 if ok else 1)`
 	return commandScript(
 		`api='http://127.0.0.1:3000/api/v1'`,
@@ -229,10 +240,17 @@ sys.exit(0 if ok else 1)`
 		`curl -fsS -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data `+shellQuote(loginPayload)+` >/dev/null`,
 		`for attempt in $(seq 1 30); do`,
 		`  resources="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/resources?pageSize=100")"`,
-		`  if printf '%s' "$resources" | python3 -c `+shellQuote(verifyResources)+` `+shellQuote(specs)+`; then exit 0; fi`,
+		`  if resource_ids="$(printf '%s' "$resources" | python3 -c `+shellQuote(verifyResources)+` `+shellQuote(specs)+`)"; then`,
+		`    healthchecks_enabled=1`,
+		`    for resource_id in $resource_ids; do`,
+		`      targets="$(curl -fsS -b "$cookie_file" "$api/resource/$resource_id/targets")"`,
+		`      if ! printf '%s' "$targets" | python3 -c `+shellQuote(verifyTargets)+`; then healthchecks_enabled=0; fi`,
+		`    done`,
+		`    if [ "$healthchecks_enabled" = "1" ]; then exit 0; fi`,
+		`  fi`,
 		`  sleep 2`,
 		`done`,
-		`echo 'Pangolin did not converge to exactly one managed Beszel and Dozzle resource.' >&2`,
+		`echo 'Pangolin did not converge to exactly one managed Beszel and Dozzle resource with health checks enabled.' >&2`,
 		`exit 1`,
 	)
 }
