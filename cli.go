@@ -26,6 +26,7 @@ Direct commands:
   aegisnode proxy --host <ipv4> --private-key <path> --domain <domain> --email <email> --server-secret <secret>
   aegisnode pangolin-token (--profile <id> | --ip <ipv4>)
   aegisnode pangolin-credentials --profile <id>
+  aegisnode stack add --profile <id> --compose <path>
   aegisnode doctor
 
 Run "aegisnode <command> -help" for command-specific options.
@@ -87,6 +88,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv ge
 		return err
 	case "keygen":
 		err := runKeygen(ctx, args[1:], stdout, stderr)
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	case "stack":
+		err := runStack(ctx, args[1:], stdout, stderr)
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}

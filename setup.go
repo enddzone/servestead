@@ -67,6 +67,7 @@ type setupConfig struct {
 	ConfigRepositoryCompose string
 	ConfigRepositorySHA256  string
 	GitHubToken             string
+	Stacks                  []configuredStack
 	ProfileID               string
 }
 
@@ -165,6 +166,13 @@ func runSetup(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		}
 		return nil
 	}
+	if request.StackCompose != "" {
+		return runStack(ctx, []string{
+			"add",
+			"--profile", request.ProfileOptions.ProfileID,
+			"--compose", request.StackCompose,
+		}, stdout, stderr)
+	}
 	if request.Stage != "" {
 		profile, state, config, err := prepareProfileStageSetup(request.ProfileOptions, store, request.Stage)
 		if err != nil {
@@ -236,6 +244,13 @@ func collectSetupRequest(store ProfileStore, output io.Writer) (setupRequest, er
 		if !result.done {
 			return setupRequest{}, errors.New("setup did not complete")
 		}
+		if result.addStackCompose != "" {
+			options, err := result.optionsForSelectedProfile()
+			if err != nil {
+				return setupRequest{}, err
+			}
+			return setupRequest{ProfileOptions: options, StackCompose: result.addStackCompose}, nil
+		}
 		if result.singleStage != "" {
 			options, err := result.optionsForSelectedProfile()
 			if err != nil {
@@ -276,6 +291,7 @@ type setupRequest struct {
 	LegacyConfig   setupConfig
 	ProfileOptions setupCLIOptions
 	Stage          string
+	StackCompose   string
 }
 
 type profileChoice struct {
@@ -313,6 +329,7 @@ const (
 	profileSetupScreenAdvanced
 	profileSetupScreenRepository
 	profileSetupScreenRepositoryDetails
+	profileSetupScreenStackCompose
 	profileSetupScreenReview
 	profileSetupScreenDeleteConfirm
 )
@@ -347,32 +364,34 @@ func (item profileListItem) Description() string { return item.description }
 func (item profileListItem) FilterValue() string { return item.title + " " + item.description }
 
 type profileSetupModel struct {
-	screen           profileSetupScreen
-	profiles         []profileChoice
-	profileList      list.Model
-	repositoryList   list.Model
-	stageTable       table.Model
-	progress         progress.Model
-	planViewport     viewport.Model
-	help             help.Model
-	selectedIndex    int
-	deleteProfileID  string
-	singleStage      string
-	pangolinStatus   pangolinRegistrationStatus
-	pangolinError    string
-	showSetupToken   bool
-	fresh            bool
-	inputs           []textinput.Model
-	advanced         []textinput.Model
-	repositoryInputs []textinput.Model
-	repositoryMode   string
-	focus            int
-	err              string
-	width            int
-	height           int
-	done             bool
-	legacy           bool
-	cancelled        bool
+	screen            profileSetupScreen
+	profiles          []profileChoice
+	profileList       list.Model
+	repositoryList    list.Model
+	stageTable        table.Model
+	progress          progress.Model
+	planViewport      viewport.Model
+	help              help.Model
+	selectedIndex     int
+	deleteProfileID   string
+	singleStage       string
+	pangolinStatus    pangolinRegistrationStatus
+	pangolinError     string
+	showSetupToken    bool
+	fresh             bool
+	inputs            []textinput.Model
+	advanced          []textinput.Model
+	repositoryInputs  []textinput.Model
+	stackComposeInput textinput.Model
+	repositoryMode    string
+	focus             int
+	err               string
+	width             int
+	height            int
+	done              bool
+	legacy            bool
+	cancelled         bool
+	addStackCompose   string
 }
 
 func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
@@ -441,6 +460,9 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 	model.advanced = setupAdvancedInputs(setupCLIOptions{})
 	model.repositoryInputs = setupRepositoryInputs(setupCLIOptions{})
 	model.repositoryMode = "create"
+	model.stackComposeInput = newSetupInputs([]setupInputField{{
+		label: "Docker Compose file", placeholder: "/path/to/docker-compose.yml",
+	}})[0]
 	model.inputs[0].Focus()
 	return model
 }
@@ -491,7 +513,7 @@ func profileStageRows(state *ProfileState) []table.Row {
 		"harden":        "Harden",
 		"network":       "Network",
 		"proxy":         "Proxy",
-		"observability": "Observability",
+		"observability": "Obs. & stacks",
 	}
 	completed := map[string]bool{}
 	if state != nil {
@@ -615,6 +637,8 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return model.updateRepositoryChoice(msg)
 		case profileSetupScreenRepositoryDetails:
 			return model.updateRepositoryDetails(msg)
+		case profileSetupScreenStackCompose:
+			return model.updateStackCompose(msg)
 		case profileSetupScreenReview:
 			return model.updateProfileReview(msg)
 		case profileSetupScreenDeleteConfirm:
@@ -693,6 +717,11 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 	case "a", "A":
 		model.err = ""
 		model.screen = profileSetupScreenAdvanced
+	case "s", "S":
+		model.err = ""
+		model.stackComposeInput.SetValue("")
+		model.stackComposeInput.Focus()
+		model.screen = profileSetupScreenStackCompose
 	case "f", "F":
 		model.fresh = true
 		model.setInputsFromChoice(true)
@@ -882,6 +911,34 @@ func (model profileSetupModel) updateRepositoryDetails(key tea.KeyMsg) (tea.Mode
 	return model, cmd
 }
 
+func (model profileSetupModel) updateStackCompose(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.String() == "enter" {
+		path := expandUserPath(strings.TrimSpace(model.stackComposeInput.Value()))
+		if path == "" {
+			model.err = "Docker Compose file path is required"
+			return model, nil
+		}
+		if _, err := inspectComposeFile(path); err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		model.addStackCompose = path
+		model.done = true
+		return model, tea.Quit
+	}
+	var command tea.Cmd
+	model.stackComposeInput, command = model.stackComposeInput.Update(key)
+	return model, command
+}
+
+func inspectComposeFile(path string) ([]composeServiceSummary, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read Compose file: %w", err)
+	}
+	return inspectComposeServices(data)
+}
+
 func (model profileSetupModel) repositoryDetailIndexes() []int {
 	if model.repositoryMode == "existing" {
 		return []int{0}
@@ -958,6 +1015,8 @@ func (model *profileSetupModel) goBack() {
 		model.screen = profileSetupScreenIntake
 	case profileSetupScreenRepositoryDetails:
 		model.screen = profileSetupScreenRepository
+	case profileSetupScreenStackCompose:
+		model.screen = profileSetupScreenDashboard
 	case profileSetupScreenReview:
 		if model.selectedIndex >= 0 {
 			model.screen = profileSetupScreenDashboard
@@ -1209,6 +1268,11 @@ func (model profileSetupModel) View() string {
 		builder.WriteString(model.repositoryChoiceView())
 	case profileSetupScreenRepositoryDetails:
 		builder.WriteString(model.repositoryDetailsView())
+	case profileSetupScreenStackCompose:
+		builder.WriteString("Add application stack\n")
+		builder.WriteString(setupHelpStyle.Render("Choose any Docker Compose file. AegisNode will inspect its services and guide Pangolin configuration next."))
+		builder.WriteString("\n\n")
+		builder.WriteString(model.stackComposeInput.View())
 	case profileSetupScreenReview:
 		builder.WriteString(model.reviewView())
 	case profileSetupScreenDeleteConfirm:
@@ -1417,6 +1481,7 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 			key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "stage")),
 			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
 			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "advanced")),
+			key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "add stack")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 			key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		}
@@ -1452,6 +1517,11 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "review")),
 			key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "field")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	case profileSetupScreenStackCompose:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "inspect")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		}
 	case profileSetupScreenReview:
@@ -2292,6 +2362,7 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 		HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
 		RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
 		RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256, GitHubToken: config.GitHubToken,
+		Stacks: config.Stacks,
 	}
 	observabilityClient, err := newObservabilityRemoteClient(ctx, observabilityConfig, stageStdout, stageStderr)
 	if err != nil {
@@ -2390,6 +2461,7 @@ func runSetupStage(ctx context.Context, profile Profile, config setupConfig, run
 			HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
 			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
 			RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256, GitHubToken: config.GitHubToken,
+			Stacks: config.Stacks,
 		}
 		fmt.Fprintln(stageStdout, "One-time stage: deploy observability stack.")
 		observabilityClient, err := newObservabilityRemoteClient(ctx, observabilityConfig, stageStdout, stageStderr)
@@ -2636,6 +2708,9 @@ func setupRunStageTaskTotals(config setupConfig) map[string]int {
 			BaseDomain: config.BaseDomain, AdminEmail: firstNonEmpty(config.PangolinAdminEmail, config.LetsEncryptEmail),
 			AdminPassword: config.BeszelAdminPassword, PangolinPassword: config.PangolinAdminPassword, SystemToken: config.BeszelSystemToken,
 			HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
+			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
+			RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256,
+			GitHubToken: config.GitHubToken, Stacks: config.Stacks,
 		})),
 	}
 }
@@ -2908,7 +2983,7 @@ func profileRunStageLabel(stage string) string {
 	case "proxy":
 		return "Proxy"
 	case "observability":
-		return "Observability"
+		return "Observability & stacks"
 	default:
 		return "Run"
 	}

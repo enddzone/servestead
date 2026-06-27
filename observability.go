@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -33,6 +37,7 @@ type observabilityConfig struct {
 	RepositoryCompose string
 	RepositorySHA256  string
 	GitHubToken       string
+	Stacks            []configuredStack
 }
 
 type observabilityRemoteClientFactory func(context.Context, observabilityConfig, io.Writer, io.Writer) (remoteClient, error)
@@ -98,12 +103,125 @@ func observabilityTasks(config observabilityConfig) []Task {
 			composeCommand+" ps",
 		)},
 	)
+	for _, stack := range config.Stacks {
+		tasks = append(tasks, configuredStackTasks(config, stack, group)...)
+	}
 	if declarative {
 		tasks = append(tasks, Task{Name: "Remove migrated legacy compose file", Apply: commandScript(
 			"rm -f " + shellQuote(observabilityStackDirectory+"/docker-compose.yml"),
 		)})
 	}
 	return tasks
+}
+
+func configuredStackTasks(config observabilityConfig, stack configuredStack, group string) []Task {
+	composePath := observabilityRepositoryDirectory + "/stacks/" + stack.Name + "/compose.yaml"
+	overridePath := "/opt/aegisnode/generated/" + stack.Name + ".pangolin.yaml"
+	deploymentPath := observabilityRepositoryDirectory + ".stack-" + stack.Name + ".deployment"
+	composeCommand := "docker compose -p " + shellQuote("aegisnode-"+stack.Name) +
+		" -f " + shellQuote(composePath) + " -f " + shellQuote(overridePath)
+
+	tasks := []Task{}
+	if config.RepositoryOrigin == "" {
+		files := stack.Files
+		if len(files) == 0 {
+			files = map[string]string{"compose.yaml": stack.Compose, stackMetadataFilename: stack.Metadata}
+		}
+		names := make([]string, 0, len(files))
+		for name := range files {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		manifestLines := make([]string, 0, len(names))
+		deployCommands := []string{
+			"if [ -f " + shellQuote(deploymentPath) + " ]; then",
+			"  (cd " + shellQuote(filepath.Dir(composePath)) + " && sha256sum -c " + shellQuote(deploymentPath) + ") || { echo 'remote " + stack.Name + " stack files have drifted' >&2; exit 1; }",
+			"  while IFS= read -r entry; do managed_file=\"${entry#*  }\"; rm -f -- " + shellQuote(filepath.Dir(composePath)) + "/\"$managed_file\"; done < " + shellQuote(deploymentPath),
+			"fi",
+		}
+		for _, name := range names {
+			remotePath := filepath.Join(filepath.Dir(composePath), filepath.FromSlash(name))
+			deployCommands = append(deployCommands, remoteWriteFileCommand(remotePath, files[name], "root", group, 0640))
+			manifestLines = append(manifestLines, sha256Hex(files[name])+"  "+name)
+		}
+		deployCommands = append(deployCommands, remoteWriteFileCommand(
+			deploymentPath, strings.Join(manifestLines, "\n")+"\n", "root", group, 0640,
+		))
+		tasks = append(tasks, Task{Name: "Deploy committed " + stack.Name + " stack", Apply: commandScript(deployCommands...)})
+	}
+	tasks = append(tasks,
+		Task{Name: "Generate " + stack.Name + " Pangolin override", Apply: commandScript(
+			"install -d -m 0750 -o root -g "+shellQuote(group)+" /opt/aegisnode/generated",
+			remoteWriteFileCommand(overridePath, stack.Override, "root", group, 0640),
+		)},
+		Task{Name: "Validate " + stack.Name + " Compose and Pangolin labels", Apply: commandScript(
+			composeCommand+" config --quiet",
+			composeCommand+" config --format json | python3 -c "+shellQuote(`import json,sys
+data=json.load(sys.stdin)
+labels={}
+for service in data["services"].values():
+ labels.update(service.get("labels",{}))
+required=[".full-domain",".targets[0].hostname",".targets[0].port"]
+ok=all(any(key.endswith(suffix) for key in labels) for suffix in required)
+sys.exit(0 if ok else 1)`),
+		)},
+		Task{Name: "Start " + stack.Name + " stack and reconcile Pangolin", Apply: commandScript(
+			"docker stop aegis-newt >/dev/null",
+			"start_result=0",
+			composeCommand+" pull && "+composeCommand+" up -d --remove-orphans || start_result=$?",
+			"docker start aegis-newt >/dev/null",
+			"exit \"$start_result\"",
+		)},
+		Task{Name: "Verify " + stack.Name + " Pangolin public resources", Apply: stackResourceVerifyCommand(config, stack)},
+		Task{Name: "Verify " + stack.Name + " stack", Apply: commandScript(
+			"expected=\"$("+composeCommand+" config --services)\"",
+			"running=\"$("+composeCommand+" ps --services --status running)\"",
+			"for service in $expected; do printf '%s\\n' \"$running\" | grep -Fx \"$service\" >/dev/null; done",
+			composeCommand+" ps",
+		)},
+	)
+	return tasks
+}
+
+func stackResourceVerifyCommand(config observabilityConfig, stack configuredStack) string {
+	specs := make([]string, 0, len(stack.Resources))
+	for _, resource := range stack.Resources {
+		specs = append(specs, fmt.Sprintf(
+			`{"nice_id":%s,"domain":%s}`,
+			jsonString("aegisnode-"+stack.Name+"-"+slugifyStackValue(resource.Service)),
+			jsonString(resource.Subdomain+"."+config.BaseDomain),
+		))
+	}
+	specification := "[" + strings.Join(specs, ",") + "]"
+	loginPayload := fmt.Sprintf(`{"email":%s,"password":%s}`,
+		jsonString(config.AdminEmail), jsonString(config.PangolinPassword))
+	verify := `import json,sys
+resources=json.load(sys.stdin)["data"]["resources"]
+specs=json.loads(sys.argv[1])
+ok=True
+for spec in specs:
+ matches=[r for r in resources if r.get("niceId")==spec["nice_id"] and r.get("fullDomain")==spec["domain"]]
+ if len(matches)!=1:
+  ok=False
+sys.exit(0 if ok else 1)`
+	return commandScript(
+		`api='http://127.0.0.1:3000/api/v1'`,
+		`cookie_file="$(mktemp)"`,
+		`trap 'rm -f "$cookie_file"' EXIT`,
+		`curl -fsS -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data `+shellQuote(loginPayload)+` >/dev/null`,
+		`for attempt in $(seq 1 30); do`,
+		`  resources="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/resources?pageSize=100")"`,
+		`  if printf '%s' "$resources" | python3 -c `+shellQuote(verify)+` `+shellQuote(specification)+`; then exit 0; fi`,
+		`  sleep 2`,
+		`done`,
+		`echo `+shellQuote("Pangolin did not create the expected public resources for stack "+stack.Name)+` >&2`,
+		`exit 1`,
+	)
+}
+
+func sha256Hex(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func observabilityEnvironmentFile(config observabilityConfig) string {

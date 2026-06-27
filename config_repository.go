@@ -26,6 +26,7 @@ type configRepositoryRevision struct {
 	Compose    string
 	ComposeSHA string
 	Origin     string
+	Stacks     []repositoryStack
 }
 
 func defaultConfigRepositoryPath(profileID string) (string, error) {
@@ -84,6 +85,28 @@ func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Pr
 	config.ConfigRepositoryCompose = revision.Compose
 	config.ConfigRepositorySHA256 = revision.ComposeSHA
 	config.GitHubToken = os.Getenv("AEGISNODE_GITHUB_TOKEN")
+	for _, stack := range revision.Stacks {
+		services, err := inspectComposeServices([]byte(stack.Compose))
+		if err != nil {
+			return profile, config, fmt.Errorf("stack %s: %w", stack.Name, err)
+		}
+		override, err := generateStackPangolinOverride(stack.Name, stack.Metadata, services, profile)
+		if err != nil {
+			return profile, config, fmt.Errorf("stack %s: %w", stack.Name, err)
+		}
+		config.Stacks = append(config.Stacks, configuredStack{
+			Name:          stack.Name,
+			Compose:       stack.Compose,
+			Metadata:      stack.MetadataContent,
+			Override:      override,
+			ComposeSHA256: stack.ComposeSHA256,
+			Resources:     stack.Metadata.PublicResources,
+			Files:         stack.Files,
+		})
+	}
+	if err := validateConfiguredStackSet(config.Stacks); err != nil {
+		return profile, config, err
+	}
 	if err := store.Save(profile, state); err != nil {
 		return profile, config, err
 	}
@@ -169,6 +192,13 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 	if strings.TrimSpace(status) != "" {
 		return configRepositoryRevision{}, fmt.Errorf("uncommitted changes in %s block deployment", observabilityComposeRepositoryPath)
 	}
+	stackStatus, err := runGit(ctx, path, nil, "status", "--porcelain", "--", "stacks")
+	if err != nil {
+		return configRepositoryRevision{}, err
+	}
+	if strings.TrimSpace(stackStatus) != "" {
+		return configRepositoryRevision{}, errors.New("uncommitted changes under stacks/ block deployment; review and commit them first")
+	}
 	commit, err := runGit(ctx, path, nil, "rev-parse", "HEAD")
 	if err != nil {
 		return configRepositoryRevision{}, err
@@ -203,13 +233,87 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 	}
 
 	sum := sha256.Sum256([]byte(compose))
+	stacks, err := loadCommittedStacks(ctx, path)
+	if err != nil {
+		return configRepositoryRevision{}, err
+	}
 	return configRepositoryRevision{
 		Path:       path,
 		Commit:     strings.TrimSpace(commit),
 		Compose:    compose,
 		ComposeSHA: hex.EncodeToString(sum[:]),
 		Origin:     origin,
+		Stacks:     stacks,
 	}, nil
+}
+
+type repositoryStack struct {
+	Name            string
+	Compose         string
+	MetadataContent string
+	Metadata        stackMetadata
+	ComposeSHA256   string
+	Files           map[string]string
+}
+
+func loadCommittedStacks(ctx context.Context, repositoryPath string) ([]repositoryStack, error) {
+	output, err := runGit(ctx, repositoryPath, nil, "ls-tree", "-d", "--name-only", "HEAD:stacks")
+	if err != nil {
+		return nil, err
+	}
+	stacks := []repositoryStack{}
+	for _, name := range strings.Fields(output) {
+		if name == "observability" {
+			continue
+		}
+		if !stackSlugPattern.MatchString(name) {
+			return nil, fmt.Errorf("stack directory %q must be a lowercase DNS label", name)
+		}
+		base := "stacks/" + name + "/"
+		compose, err := runGit(ctx, repositoryPath, nil, "show", "HEAD:"+base+"compose.yaml")
+		if err != nil {
+			return nil, fmt.Errorf("stack %s: committed compose.yaml is required", name)
+		}
+		metadataContent, err := runGit(ctx, repositoryPath, nil, "show", "HEAD:"+base+stackMetadataFilename)
+		if err != nil {
+			return nil, fmt.Errorf("stack %s is not configured; run aegisnode stack add --profile <id> --compose %s", name, filepath.Join(repositoryPath, filepath.FromSlash(base+"compose.yaml")))
+		}
+		var metadata stackMetadata
+		if err := yaml.Unmarshal([]byte(metadataContent), &metadata); err != nil {
+			return nil, fmt.Errorf("stack %s metadata: %w", name, err)
+		}
+		sum := sha256.Sum256([]byte(compose))
+		files, err := loadCommittedStackFiles(ctx, repositoryPath, base)
+		if err != nil {
+			return nil, fmt.Errorf("stack %s files: %w", name, err)
+		}
+		stacks = append(stacks, repositoryStack{
+			Name: name, Compose: compose, MetadataContent: metadataContent,
+			Metadata: metadata, ComposeSHA256: hex.EncodeToString(sum[:]), Files: files,
+		})
+	}
+	return stacks, nil
+}
+
+func loadCommittedStackFiles(ctx context.Context, repositoryPath, base string) (map[string]string, error) {
+	output, err := runGit(ctx, repositoryPath, nil, "ls-tree", "-r", "--name-only", "HEAD", "--", strings.TrimSuffix(base, "/"))
+	if err != nil {
+		return nil, err
+	}
+	files := map[string]string{}
+	for _, repositoryFile := range strings.Split(strings.TrimSpace(output), "\n") {
+		repositoryFile = strings.TrimSpace(repositoryFile)
+		relative := strings.TrimPrefix(repositoryFile, base)
+		if relative == "" || strings.Contains(relative, "\n") {
+			continue
+		}
+		content, err := runGit(ctx, repositoryPath, nil, "show", "HEAD:"+repositoryFile)
+		if err != nil {
+			return nil, err
+		}
+		files[relative] = content
+	}
+	return files, nil
 }
 
 func runGit(ctx context.Context, directory string, extraEnv []string, arguments ...string) (string, error) {

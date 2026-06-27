@@ -474,6 +474,30 @@ func TestProfileSetupModelRendersDashboardFromProfileState(t *testing.T) {
 	}
 }
 
+func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
+	composePath := filepath.Join(t.TempDir(), "compose.yaml")
+	if err := os.WriteFile(composePath, []byte("services:\n  web:\n    image: nginx\n    expose:\n      - 80\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{ID: "profile-1", IP: "203.0.113.10"},
+		State:   ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenDashboard
+	updated, _ := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	result := updated.(profileSetupModel)
+	if result.screen != profileSetupScreenStackCompose {
+		t.Fatalf("stack shortcut did not open Compose intake: %v", result.screen)
+	}
+	result.stackComposeInput.SetValue(composePath)
+	updated, _ = result.updateStackCompose(tea.KeyMsg{Type: tea.KeyEnter})
+	result = updated.(profileSetupModel)
+	if !result.done || result.addStackCompose != composePath {
+		t.Fatalf("Compose intake did not complete: %+v", result)
+	}
+}
+
 func TestProfileSetupModelCollectsNewProfileInputs(t *testing.T) {
 	model := newProfileSetupModel(nil)
 	model.setInputsFromOptions(setupCLIOptions{})

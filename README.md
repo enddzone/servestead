@@ -147,6 +147,28 @@ Observability configuration is consumer-owned and Git-backed at `stacks/observab
 
 AegisNode deploys the exact committed `HEAD`. Uncommitted changes to the observability Compose file block deployment, while unrelated working-tree changes do not. If an existing checkout has no observability file, AegisNode creates the scaffold and stops so it can be reviewed and committed. Secrets remain outside Git in `/etc/aegisnode/observability.env`, and remote snapshot or checkout drift is rejected rather than overwritten.
 
+## Add an application stack
+
+Use `stack add` to import any Docker Compose file and configure one of its services as a Pangolin public resource:
+
+```sh
+bin/aegisnode stack add \
+  --profile <profile-id> \
+  --compose /path/to/docker-compose.yml
+```
+
+The terminal UI shows detected services and container ports, then asks for the service, port, public subdomain, display name, and health-check path. AegisNode copies the original file to `stacks/<name>/compose.yaml` and writes the reviewed public-resource contract to `stacks/<name>/aegisnode.yaml`. It does not inject labels into the consumer-owned Compose file.
+
+During deployment, AegisNode generates an override that:
+
+- Connects the selected service to the external `aegis-public` network.
+- Adds stable Pangolin resource, target, SSO, and health-check labels.
+- Removes direct host port publishing from the selected service so Pangolin remains the public entry point.
+- Validates the merged Compose model before stopping or replacing containers.
+- Restarts Newt and verifies that Pangolin created exactly one expected public resource.
+
+Review and commit the generated stack files, then open the profile dashboard, select the Observability stage, and press `r`. AegisNode deploys committed stack configuration only.
+
 DNS registrar changes remain external. Create records for `pangolin.<domain>`, `beszel.<domain>`, and `dozzle.<domain>` pointing to the VPS. Traefik uses HTTP-01 to issue a separate certificate for each hostname, so TCP port 80 must remain reachable.
 
 Retrieve the generated Pangolin administrator credentials:
