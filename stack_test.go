@@ -212,6 +212,12 @@ func TestRunStackAddImportsMultiplePublicationsAndEnvironment(t *testing.T) {
 	if strings.Contains(stdout.String(), "API_KEY=secret") {
 		t.Fatalf("stack add exposed an environment value:\n%s", stdout.String())
 	}
+	if _, err := os.Stat(filepath.Join(repository, filepath.FromSlash(observabilityComposeRepositoryPath))); err != nil {
+		t.Fatalf("stack add did not complete the repository scaffold: %v", err)
+	}
+	if !strings.Contains(stdout.String(), " add stacks\n") || strings.Contains(stdout.String(), "add stacks/suite") {
+		t.Fatalf("stack add did not recommend one complete repository commit:\n%s", stdout.String())
+	}
 }
 
 func TestGeneratedStackOverridePassesDockerComposeMerge(t *testing.T) {

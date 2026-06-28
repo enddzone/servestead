@@ -164,13 +164,11 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 	}
 
 	composePath := filepath.Join(path, filepath.FromSlash(observabilityComposeRepositoryPath))
-	if _, err := os.Stat(composePath); errors.Is(err, os.ErrNotExist) {
-		if err := os.MkdirAll(filepath.Dir(composePath), 0700); err != nil {
-			return configRepositoryRevision{}, err
-		}
-		if err := os.WriteFile(composePath, []byte(scaffold), 0600); err != nil {
-			return configRepositoryRevision{}, err
-		}
+	scaffoldCreated, err := ensureConfigRepositoryScaffold(path, scaffold)
+	if err != nil {
+		return configRepositoryRevision{}, err
+	}
+	if scaffoldCreated {
 		if existed {
 			return configRepositoryRevision{}, fmt.Errorf("%w: created %s; commit it and rerun AegisNode", errRepositoryReviewRequired, composePath)
 		}
@@ -186,8 +184,6 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 		if _, err := runGit(ctx, path, env, "commit", "-m", "Initialize AegisNode configuration"); err != nil {
 			return configRepositoryRevision{}, err
 		}
-	} else if err != nil {
-		return configRepositoryRevision{}, err
 	}
 
 	status, err := runGit(ctx, path, nil, "status", "--porcelain", "--", observabilityComposeRepositoryPath)
@@ -202,7 +198,7 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 		return configRepositoryRevision{}, err
 	}
 	if strings.TrimSpace(stackStatus) != "" {
-		return configRepositoryRevision{}, errors.New("uncommitted changes under stacks/ block deployment; review and commit them first")
+		return configRepositoryRevision{}, fmt.Errorf("configuration repository %s has uncommitted changes under stacks/; review and commit them first", path)
 	}
 	commit, err := runGit(ctx, path, nil, "rev-parse", "HEAD")
 	if err != nil {
@@ -250,6 +246,32 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 		Origin:     origin,
 		Stacks:     stacks,
 	}, nil
+}
+
+func ensureConfigRepositoryScaffold(path, scaffold string) (bool, error) {
+	path, err := filepath.Abs(expandUserPath(path))
+	if err != nil {
+		return false, fmt.Errorf("resolve configuration repository path: %w", err)
+	}
+	if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("%s is not a Git repository", path)
+		}
+		return false, err
+	}
+	composePath := filepath.Join(path, filepath.FromSlash(observabilityComposeRepositoryPath))
+	if _, err := os.Stat(composePath); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if err := os.MkdirAll(filepath.Dir(composePath), 0700); err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(composePath, []byte(scaffold), 0600); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 type repositoryStack struct {

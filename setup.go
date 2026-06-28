@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/bubbles/filepicker"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
@@ -145,7 +147,7 @@ func runSetup(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 			return err
 		}
 		if shouldUseProfileRunView(options, stderr) {
-			return runProfileSetupPlanWithRunView(ctx, store, profile, state, config, stdout, stderr)
+			return runProfileSetupPlanWithRunView(ctx, store, profile, state, config, stdout, stderr, false)
 		}
 		return runProfileSetupPlan(ctx, store, profile, state, config, stdout, stderr)
 	}
@@ -157,31 +159,44 @@ func runSetup(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if !isInteractiveWriter(stderr) {
 		return errors.New("interactive setup requires a terminal; use setup --ip with --domain, --email, and --yes for scripts")
 	}
-	request, err := collectSetupRequest(store, stderr)
-	if err != nil {
-		return err
-	}
-	if request.Legacy {
-		if err := runSetupPlan(ctx, request.LegacyConfig, stdout, stderr); err != nil {
-			return err
-		}
-		return nil
-	}
-	if request.Stage != "" {
-		profile, state, config, err := prepareProfileStageSetup(request.ProfileOptions, store, request.Stage)
+	resume := setupResume{}
+	for {
+		request, err := collectSetupRequest(store, stderr, resume)
 		if err != nil {
 			return err
 		}
-		return runProfileSetupStagePlanWithRunView(ctx, store, profile, state, config, request.Stage, stdout, stderr)
+		if request.Legacy {
+			if err := runSetupPlan(ctx, request.LegacyConfig, stdout, stderr); err != nil {
+				return err
+			}
+			return nil
+		}
+		if request.Stage != "" {
+			profile, state, config, err := prepareProfileStageSetup(request.ProfileOptions, store, request.Stage)
+			if err != nil {
+				return err
+			}
+			err = runProfileSetupStagePlanWithRunView(ctx, store, profile, state, config, request.Stage, stdout, stderr, true)
+			if errors.Is(err, errReturnToSetup) {
+				resume = resumeAfterStage(request.ProfileOptions.ProfileID, request.Stage)
+				continue
+			}
+			return err
+		}
+		profile, state, config, err := prepareProfileSetup(request.ProfileOptions, store, stderr)
+		if err != nil {
+			return err
+		}
+		if shouldUseProfileRunView(request.ProfileOptions, stderr) {
+			err = runProfileSetupPlanWithRunView(ctx, store, profile, state, config, stdout, stderr, true)
+			if errors.Is(err, errReturnToSetup) {
+				resume = setupResume{ProfileID: profile.ID, Screen: profileSetupScreenDashboard}
+				continue
+			}
+			return err
+		}
+		return runProfileSetupPlan(ctx, store, profile, state, config, stdout, stderr)
 	}
-	profile, state, config, err := prepareProfileSetup(request.ProfileOptions, store, stderr)
-	if err != nil {
-		return err
-	}
-	if shouldUseProfileRunView(request.ProfileOptions, stderr) {
-		return runProfileSetupPlanWithRunView(ctx, store, profile, state, config, stdout, stderr)
-	}
-	return runProfileSetupPlan(ctx, store, profile, state, config, stdout, stderr)
 }
 
 func runDoctor(args []string, stdout, stderr io.Writer) error {
@@ -203,7 +218,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 	return runPreflight(config, stdout)
 }
 
-func collectSetupRequest(store ProfileStore, output io.Writer) (setupRequest, error) {
+func collectSetupRequest(store ProfileStore, output io.Writer, resume setupResume) (setupRequest, error) {
 	for {
 		profiles, err := loadProfileChoices(store)
 		if err != nil {
@@ -211,6 +226,7 @@ func collectSetupRequest(store ProfileStore, output io.Writer) (setupRequest, er
 		}
 		model := newProfileSetupModel(profiles)
 		model.profileStore = store
+		applySetupResume(&model, resume)
 		program := tea.NewProgram(model, tea.WithOutput(output), tea.WithAltScreen())
 		finalModel, err := program.Run()
 		if err != nil {
@@ -251,6 +267,43 @@ func collectSetupRequest(store ProfileStore, output io.Writer) (setupRequest, er
 			return setupRequest{}, err
 		}
 		return setupRequest{ProfileOptions: options}, nil
+	}
+}
+
+type setupResume struct {
+	ProfileID string
+	Screen    profileSetupScreen
+}
+
+func resumeAfterStage(profileID, stage string) setupResume {
+	screen := profileSetupScreenDashboard
+	if stage == "stacks" || strings.HasPrefix(stage, "stack:") {
+		screen = profileSetupScreenStacks
+	}
+	return setupResume{ProfileID: profileID, Screen: screen}
+}
+
+func applySetupResume(model *profileSetupModel, resume setupResume) {
+	if resume.ProfileID == "" {
+		return
+	}
+	for index, choice := range model.profiles {
+		if choice.Profile.ID != resume.ProfileID {
+			continue
+		}
+		model.selectedIndex = index
+		model.fresh = false
+		model.setInputsFromChoice(false)
+		model.refreshDashboard()
+		switch resume.Screen {
+		case profileSetupScreenStacks:
+			model.screen = profileSetupScreenStacks
+			model.refreshStacks()
+			model.stackTable.Focus()
+		default:
+			model.screen = profileSetupScreenDashboard
+		}
+		return
 	}
 }
 
@@ -318,9 +371,11 @@ const (
 	profileSetupScreenRepositoryDetails
 	profileSetupScreenStacks
 	profileSetupScreenStackCompose
+	profileSetupScreenStackServices
 	profileSetupScreenStackEditor
 	profileSetupScreenStackResourceEditor
 	profileSetupScreenStackEnvironment
+	profileSetupScreenStackReview
 	profileSetupScreenStackDeleteConfirm
 	profileSetupScreenStackDiff
 	profileSetupScreenStackCommit
@@ -359,55 +414,82 @@ func (item profileListItem) Description() string { return item.description }
 func (item profileListItem) FilterValue() string { return item.title + " " + item.description }
 
 type profileSetupModel struct {
-	screen                profileSetupScreen
-	profiles              []profileChoice
-	profileList           list.Model
-	repositoryList        list.Model
-	stageTable            table.Model
-	progress              progress.Model
-	planViewport          viewport.Model
-	help                  help.Model
-	selectedIndex         int
-	deleteProfileID       string
-	singleStage           string
-	pangolinStatus        pangolinRegistrationStatus
-	pangolinError         string
-	showSetupToken        bool
-	fresh                 bool
-	inputs                []textinput.Model
-	advanced              []textinput.Model
-	repositoryInputs      []textinput.Model
-	stackComposeInput     textinput.Model
-	stackTable            table.Model
-	stacks                []editableStack
-	stackInputs           []textinput.Model
-	stackServices         []composeServiceSummary
-	stackCompose          string
-	stackOriginalName     string
-	stackResources        []stackPublicResource
-	stackResourceTable    table.Model
-	stackResourceInputs   []textinput.Model
-	stackResourceIndex    int
-	stackEnvironmentInput textinput.Model
-	stackEnvironment      string
-	stackEnvironmentKeys  []string
-	stackEnvironmentDirty bool
-	profileStore          ProfileStore
-	stackNotice           string
-	stackGitStatus        string
-	stackHead             string
-	stackNeedsPush        bool
-	stackSyncStatus       string
-	stackDiffViewport     viewport.Model
-	stackCommitInput      textinput.Model
-	repositoryMode        string
-	focus                 int
-	err                   string
-	width                 int
-	height                int
-	done                  bool
-	legacy                bool
-	cancelled             bool
+	screen                   profileSetupScreen
+	profiles                 []profileChoice
+	profileList              list.Model
+	repositoryList           list.Model
+	stageTable               table.Model
+	progress                 progress.Model
+	planViewport             viewport.Model
+	help                     help.Model
+	selectedIndex            int
+	deleteProfileID          string
+	singleStage              string
+	pangolinStatus           pangolinRegistrationStatus
+	pangolinError            string
+	showSetupToken           bool
+	fresh                    bool
+	inputs                   []textinput.Model
+	advanced                 []textinput.Model
+	repositoryInputs         []textinput.Model
+	stackComposeInput        textinput.Model
+	stackComposePicker       filepicker.Model
+	stackComposeManual       bool
+	stackComposePath         string
+	stackTable               table.Model
+	stacks                   []editableStack
+	stackInputs              []textinput.Model
+	stackServices            []composeServiceSummary
+	stackServiceTable        table.Model
+	stackCompose             string
+	stackOriginalName        string
+	stackResources           []stackPublicResource
+	stackResourceTable       table.Model
+	stackResourceInputs      []textinput.Model
+	stackResourceIndex       int
+	stackResourceReturn      profileSetupScreen
+	stackResourceAdvanced    bool
+	stackEnvironmentInput    textinput.Model
+	stackEnvironmentPicker   filepicker.Model
+	stackEnvironmentMode     stackEnvironmentMode
+	stackEnvironmentOptions  []stackEnvironmentOption
+	stackEnvironmentCursor   int
+	stackEnvironmentReturn   profileSetupScreen
+	stackEnvironment         string
+	stackEnvironmentOriginal string
+	stackEnvironmentKeys     []string
+	stackEnvironmentDirty    bool
+	profileStore             ProfileStore
+	stackNotice              string
+	stackGitStatus           string
+	stackHead                string
+	stackNeedsPush           bool
+	stackSyncStatus          string
+	stackDiffViewport        viewport.Model
+	stackCommitInput         textinput.Model
+	repositoryMode           string
+	focus                    int
+	err                      string
+	width                    int
+	height                   int
+	done                     bool
+	legacy                   bool
+	cancelled                bool
+}
+
+type stackEnvironmentMode int
+
+const (
+	stackEnvironmentChoose stackEnvironmentMode = iota
+	stackEnvironmentBrowse
+	stackEnvironmentManual
+)
+
+type stackEnvironmentOption struct {
+	kind   string
+	label  string
+	detail string
+	path   string
 }
 
 func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
@@ -466,6 +548,7 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 		repositoryList:    repositoryList,
 		stageTable:        newProfileStageTable(nil),
 		stackTable:        newStackTable(nil, "", nil),
+		stackServiceTable: newStackServiceTable(nil, nil),
 		stackDiffViewport: viewport.New(100, 18),
 		progress:          progress.New(progress.WithWidth(42)),
 		planViewport:      viewport.New(82, 10),
@@ -484,11 +567,26 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 	model.stackEnvironmentInput = newSetupInputs([]setupInputField{{
 		label: "Runtime .env file", placeholder: "/path/to/.env",
 	}})[0]
+	model.stackComposePicker = newStackFilePicker(".", []string{".yaml", ".yml"}, false)
+	model.stackEnvironmentPicker = newStackFilePicker(".", nil, true)
 	model.stackCommitInput = newSetupInputs([]setupInputField{{
 		label: "Commit message", placeholder: "Update application stacks",
 	}})[0]
 	model.inputs[0].Focus()
 	return model
+}
+
+func newStackFilePicker(directory string, allowedTypes []string, showHidden bool) filepicker.Model {
+	picker := filepicker.New()
+	picker.CurrentDirectory = firstNonEmpty(directory, ".")
+	picker.AllowedTypes = allowedTypes
+	picker.ShowHidden = showHidden
+	picker.ShowPermissions = false
+	picker.ShowSize = true
+	picker.SetHeight(12)
+	picker.Styles.Cursor = setupTitleStyle
+	picker.Styles.Selected = setupTitleStyle
+	return picker
 }
 
 func setupProfileInputs(options setupCLIOptions) []textinput.Model {
@@ -689,7 +787,10 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		model.stackDiffViewport.Width = contentWidth
 		model.stackDiffViewport.Height = max(6, msg.Height-10)
 		model.progress.Width = clampInt(msg.Width-8, 24, 64)
+		model.stackComposePicker.SetHeight(max(4, msg.Height-13))
+		model.stackEnvironmentPicker.SetHeight(max(4, msg.Height-13))
 		model.resizeStackTable()
+		model.resizeStackServiceTable()
 		return model, nil
 	case pangolinRegistrationStatusMsg:
 		if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) || model.profiles[model.selectedIndex].Profile.ID != msg.profileID {
@@ -742,12 +843,16 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return model.updateStacks(msg)
 		case profileSetupScreenStackCompose:
 			return model.updateStackCompose(msg)
+		case profileSetupScreenStackServices:
+			return model.updateStackServices(msg)
 		case profileSetupScreenStackEditor:
 			return model.updateStackEditor(msg)
 		case profileSetupScreenStackResourceEditor:
 			return model.updateStackResourceEditor(msg)
 		case profileSetupScreenStackEnvironment:
 			return model.updateStackEnvironment(msg)
+		case profileSetupScreenStackReview:
+			return model.updateStackReview(msg)
 		case profileSetupScreenStackDeleteConfirm:
 			return model.updateStackDeleteConfirm(msg)
 		case profileSetupScreenStackDiff:
@@ -762,6 +867,12 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return model, nil
 		}
 	default:
+		switch model.screen {
+		case profileSetupScreenStackCompose:
+			return model.updateStackCompose(msg)
+		case profileSetupScreenStackEnvironment:
+			return model.updateStackEnvironment(msg)
+		}
 		return model, nil
 	}
 }
@@ -770,7 +881,7 @@ func profileSetupScreenAcceptsText(screen profileSetupScreen) bool {
 	switch screen {
 	case profileSetupScreenIntake, profileSetupScreenAdvanced, profileSetupScreenRepositoryDetails,
 		profileSetupScreenStackCompose, profileSetupScreenStackEditor, profileSetupScreenStackResourceEditor,
-		profileSetupScreenStackEnvironment, profileSetupScreenStackCommit:
+		profileSetupScreenStackEnvironment, profileSetupScreenStackReview, profileSetupScreenStackCommit:
 		return true
 	default:
 		return false
@@ -1053,57 +1164,87 @@ func (model profileSetupModel) updateRepositoryDetails(key tea.KeyMsg) (tea.Mode
 	return model, cmd
 }
 
-func (model profileSetupModel) updateStackCompose(key tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.String() == "enter" {
-		path := expandUserPath(strings.TrimSpace(model.stackComposeInput.Value()))
-		if path == "" {
-			model.err = "Docker Compose file path is required"
-			return model, nil
+func (model profileSetupModel) updateStackCompose(msg tea.Msg) (tea.Model, tea.Cmd) {
+	key, isKey := msg.(tea.KeyMsg)
+	if model.stackComposeManual {
+		if isKey && key.String() == "enter" {
+			return model.loadStackCompose(model.stackComposeInput.Value())
 		}
-		services, err := inspectComposeFile(path)
-		if err != nil {
-			model.err = err.Error()
-			return model, nil
-		}
-		compose, err := os.ReadFile(path)
-		if err != nil {
-			model.err = fmt.Sprintf("read Compose file: %v", err)
-			return model, nil
-		}
-		options := withStackAddDefaults(stackAddOptions{Compose: path}, services)
-		resources := []stackPublicResource{}
-		if resource, ok := suggestedStackResource(options.Name, services); ok {
-			resources = append(resources, resource)
-		}
-		model.stackCompose = string(compose)
-		model.stackServices = services
-		model.stackOriginalName = ""
-		model.stackResources = resources
-		model.stackResourceTable = newStackResourceTable(resources)
-		model.stackEnvironment = ""
-		model.stackEnvironmentKeys = nil
-		model.stackEnvironmentDirty = false
-		model.stackInputs = stackEditorInputs(options)
-		model.stackComposeInput.Blur()
-		model.focus = 0
-		model.stackInputs[0].Focus()
+		var command tea.Cmd
+		model.stackComposeInput, command = model.stackComposeInput.Update(msg)
+		return model, command
+	}
+	if isKey && key.String() == "/" {
+		model.stackComposeManual = true
+		model.stackComposeInput.SetValue("")
+		model.stackComposeInput.Focus()
 		model.err = ""
-		model.screen = profileSetupScreenStackEditor
-		return model, nil
+		return model, textinput.Blink
 	}
 	var command tea.Cmd
-	model.stackComposeInput, command = model.stackComposeInput.Update(key)
+	model.stackComposePicker, command = model.stackComposePicker.Update(msg)
+	if selected, path := model.stackComposePicker.DidSelectFile(msg); selected {
+		return model.loadStackCompose(path)
+	}
+	if disabled, path := model.stackComposePicker.DidSelectDisabledFile(msg); disabled {
+		model.err = fmt.Sprintf("%s is not a YAML file", filepath.Base(path))
+	}
 	return model, command
+}
+
+func (model profileSetupModel) loadStackCompose(selectedPath string) (tea.Model, tea.Cmd) {
+	path := expandUserPath(strings.TrimSpace(selectedPath))
+	if path == "" {
+		model.err = "Docker Compose file path is required"
+		return model, nil
+	}
+	services, err := inspectComposeFile(path)
+	if err != nil {
+		model.err = err.Error()
+		return model, nil
+	}
+	compose, err := os.ReadFile(path)
+	if err != nil {
+		model.err = fmt.Sprintf("read Compose file: %v", err)
+		return model, nil
+	}
+	options := withStackAddDefaults(stackAddOptions{Compose: path}, services)
+	model.stackComposePath = path
+	model.stackCompose = string(compose)
+	model.stackServices = services
+	model.stackOriginalName = ""
+	model.stackResources = nil
+	model.stackResourceTable = newStackResourceTable(nil)
+	model.stackServiceTable = newStackServiceTable(services, nil)
+	model.resizeStackServiceTable()
+	model.stackEnvironment = ""
+	model.stackEnvironmentOriginal = ""
+	model.stackEnvironmentKeys = nil
+	model.stackEnvironmentDirty = false
+	model.stackInputs = stackEditorInputs(options)
+	model.stackComposeInput.Blur()
+	model.stackServiceTable.Focus()
+	model.focus = 0
+	model.err = ""
+	model.screen = profileSetupScreenStackServices
+	return model, nil
 }
 
 func (model profileSetupModel) updateStacks(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "a", "A":
+		directory, err := os.Getwd()
+		if err != nil {
+			directory = "."
+		}
 		model.err = ""
 		model.stackNotice = ""
+		model.stackComposeManual = false
 		model.stackComposeInput.SetValue("")
-		model.stackComposeInput.Focus()
+		model.stackComposeInput.Blur()
+		model.stackComposePicker = newStackFilePicker(directory, []string{".yaml", ".yml"}, false)
 		model.screen = profileSetupScreenStackCompose
+		return model, model.stackComposePicker.Init()
 	case "enter", "e", "E":
 		stack, ok := model.selectedStack()
 		if !ok {
@@ -1122,6 +1263,14 @@ func (model profileSetupModel) updateStacks(key tea.KeyMsg) (tea.Model, tea.Cmd)
 		stack, ok := model.selectedStack()
 		if !ok {
 			model.err = "no stack selected"
+			return model, nil
+		}
+		if model.stackGitStatus != "clean" {
+			model.err = "stack changes are uncommitted; press v to review, g to stage, and c to commit"
+			return model, nil
+		}
+		if model.stackNeedsPush {
+			model.err = "the stack commit has not been pushed to origin; press p to push it"
 			return model, nil
 		}
 		model.singleStage = "stack:" + stack.Name
@@ -1190,6 +1339,43 @@ func (model profileSetupModel) updateStacks(key tea.KeyMsg) (tea.Model, tea.Cmd)
 	return model, nil
 }
 
+func (model profileSetupModel) updateStackServices(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	serviceIndex := model.stackServiceTable.Cursor()
+	if serviceIndex < 0 || serviceIndex >= len(model.stackServices) {
+		model.err = "no Compose service selected"
+		return model, nil
+	}
+	serviceName := model.stackServices[serviceIndex].Name
+	switch key.String() {
+	case " ", "space":
+		if indexes := stackResourceIndexesForService(model.stackResources, serviceName); len(indexes) > 0 {
+			model.stackResources = removeStackResourcesForService(model.stackResources, serviceName)
+			model.refreshStackServiceTable()
+			model.err = ""
+			return model, nil
+		}
+		model.openStackResourceEditorForService(-1, serviceIndex, profileSetupScreenStackServices)
+		return model, nil
+	case "enter", "e", "E":
+		indexes := stackResourceIndexesForService(model.stackResources, serviceName)
+		if len(indexes) == 0 {
+			model.openStackResourceEditorForService(-1, serviceIndex, profileSetupScreenStackServices)
+		} else {
+			model.openStackResourceEditorForService(indexes[0], serviceIndex, profileSetupScreenStackServices)
+		}
+		return model, nil
+	case "a", "A":
+		model.openStackResourceEditorForService(-1, serviceIndex, profileSetupScreenStackServices)
+		return model, nil
+	case "n", "N":
+		model.openStackEnvironment(profileSetupScreenStackReview)
+		return model, nil
+	}
+	var command tea.Cmd
+	model.stackServiceTable, command = model.stackServiceTable.Update(key)
+	return model, command
+}
+
 func (model profileSetupModel) updateStackEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if model.focus == 0 {
 		switch key.String() {
@@ -1231,10 +1417,7 @@ func (model profileSetupModel) updateStackEditor(key tea.KeyMsg) (tea.Model, tea
 		}
 		return model, nil
 	case "n", "N":
-		model.stackEnvironmentInput.SetValue("")
-		model.stackEnvironmentInput.Focus()
-		model.err = ""
-		model.screen = profileSetupScreenStackEnvironment
+		model.openStackEnvironment(profileSetupScreenStackEditor)
 		return model, nil
 	}
 	var command tea.Cmd
@@ -1251,6 +1434,19 @@ func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
 	}
 	options := stackAddOptions{Name: name, Resources: model.stackResources}
 	repositoryPath, err := model.selectedRepositoryPath()
+	if err != nil {
+		model.err = err.Error()
+		return model, nil
+	}
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		model.err = "no profile selected"
+		return model, nil
+	}
+	profile := model.profiles[model.selectedIndex].Profile
+	scaffoldCreated, err := ensureConfigRepositoryScaffold(repositoryPath, observabilityComposeFile(observabilityConfig{
+		BaseDomain: profile.BaseDomain,
+		AdminEmail: firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail),
+	}))
 	if err != nil {
 		model.err = err.Error()
 		return model, nil
@@ -1286,6 +1482,9 @@ func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
 		action = "added"
 	}
 	model.stackNotice = fmt.Sprintf("Stack %s. Press v to review the diff, g to stage, then c to commit.", action)
+	if scaffoldCreated {
+		model.stackNotice = fmt.Sprintf("Stack %s and repository scaffold prepared. Review and commit them together.", action)
+	}
 	model.err = ""
 	model.screen = profileSetupScreenStacks
 	model.refreshStacks()
@@ -1297,26 +1496,33 @@ func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
 }
 
 func (model profileSetupModel) updateStackResourceEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visible := stackResourceVisibleInputs(model.stackResourceAdvanced)
 	switch key.String() {
 	case "ctrl+s":
 		return model.saveStackResourceEditor()
+	case "ctrl+x":
+		model.stackResourceInputs[model.focus].Blur()
+		model.stackResourceAdvanced = !model.stackResourceAdvanced
+		visible = stackResourceVisibleInputs(model.stackResourceAdvanced)
+		if !containsInt(visible, model.focus) {
+			model.focus = visible[0]
+		}
+		model.stackResourceInputs[model.focus].Focus()
+		return model, nil
 	case "tab", "down":
 		model.stackResourceInputs[model.focus].Blur()
-		model.focus = (model.focus + 1) % len(model.stackResourceInputs)
+		model.focus = nextVisibleInput(visible, model.focus, 1)
 		model.stackResourceInputs[model.focus].Focus()
 		return model, nil
 	case "shift+tab", "up":
 		model.stackResourceInputs[model.focus].Blur()
-		model.focus--
-		if model.focus < 0 {
-			model.focus = len(model.stackResourceInputs) - 1
-		}
+		model.focus = nextVisibleInput(visible, model.focus, -1)
 		model.stackResourceInputs[model.focus].Focus()
 		return model, nil
 	case "enter":
-		if model.focus < len(model.stackResourceInputs)-1 {
+		if model.focus != visible[len(visible)-1] {
 			model.stackResourceInputs[model.focus].Blur()
-			model.focus++
+			model.focus = nextVisibleInput(visible, model.focus, 1)
 			model.stackResourceInputs[model.focus].Focus()
 			return model, nil
 		}
@@ -1325,6 +1531,32 @@ func (model profileSetupModel) updateStackResourceEditor(key tea.KeyMsg) (tea.Mo
 	var command tea.Cmd
 	model.stackResourceInputs[model.focus], command = model.stackResourceInputs[model.focus].Update(key)
 	return model, command
+}
+
+func stackResourceVisibleInputs(advanced bool) []int {
+	visible := []int{1, 2, 3, 5, 7}
+	if advanced {
+		visible = append(visible, 0, 4, 6)
+	}
+	return visible
+}
+
+func nextVisibleInput(visible []int, current, direction int) int {
+	for index, candidate := range visible {
+		if candidate == current {
+			return visible[(index+direction+len(visible))%len(visible)]
+		}
+	}
+	return visible[0]
+}
+
+func containsInt(values []int, target int) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (model profileSetupModel) saveStackResourceEditor() (tea.Model, tea.Cmd) {
@@ -1352,35 +1584,148 @@ func (model profileSetupModel) saveStackResourceEditor() (tea.Model, tea.Cmd) {
 	model.stackResourceTable.Focus()
 	model.focus = 1
 	model.err = ""
-	model.screen = profileSetupScreenStackEditor
+	model.screen = model.stackResourceReturn
+	if model.screen == profileSetupScreenStackServices {
+		model.refreshStackServiceTable()
+	}
 	return model, nil
 }
 
-func (model profileSetupModel) updateStackEnvironment(key tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.String() == "enter" {
-		path := strings.TrimSpace(model.stackEnvironmentInput.Value())
-		if path == "" {
-			model.stackEnvironment = ""
-			model.stackEnvironmentKeys = nil
-		} else {
-			environment, keys, err := readStackEnvironmentFile(path)
-			if err != nil {
-				model.err = err.Error()
+func (model *profileSetupModel) openStackEnvironment(returnScreen profileSetupScreen) {
+	model.stackEnvironmentReturn = returnScreen
+	model.stackEnvironmentMode = stackEnvironmentChoose
+	model.stackEnvironmentCursor = 0
+	model.stackEnvironmentOptions = nil
+	if model.stackEnvironment != "" {
+		model.stackEnvironmentOptions = append(model.stackEnvironmentOptions, stackEnvironmentOption{
+			kind: "keep", label: "Keep current runtime environment",
+			detail: fmt.Sprintf("%d key(s)", len(model.stackEnvironmentKeys)),
+		})
+	}
+	model.stackEnvironmentOptions = append(model.stackEnvironmentOptions, stackEnvironmentOption{
+		kind: "none", label: "No runtime environment",
+	})
+	if model.stackComposePath != "" {
+		adjacent := filepath.Join(filepath.Dir(model.stackComposePath), ".env")
+		if info, err := os.Stat(adjacent); err == nil && !info.IsDir() {
+			model.stackEnvironmentOptions = append(model.stackEnvironmentOptions, stackEnvironmentOption{
+				kind: "file", label: "Use adjacent .env", detail: adjacent, path: adjacent,
+			})
+		}
+	}
+	model.stackEnvironmentOptions = append(model.stackEnvironmentOptions, stackEnvironmentOption{
+		kind: "browse", label: "Browse for another file",
+	})
+	model.stackEnvironmentInput.SetValue("")
+	model.stackEnvironmentInput.Blur()
+	model.err = ""
+	model.screen = profileSetupScreenStackEnvironment
+}
+
+func (model profileSetupModel) updateStackEnvironment(msg tea.Msg) (tea.Model, tea.Cmd) {
+	key, isKey := msg.(tea.KeyMsg)
+	switch model.stackEnvironmentMode {
+	case stackEnvironmentChoose:
+		if !isKey {
+			return model, nil
+		}
+		switch key.String() {
+		case "j", "down":
+			if model.stackEnvironmentCursor < len(model.stackEnvironmentOptions)-1 {
+				model.stackEnvironmentCursor++
+			}
+		case "k", "up":
+			if model.stackEnvironmentCursor > 0 {
+				model.stackEnvironmentCursor--
+			}
+		case "enter":
+			if model.stackEnvironmentCursor < 0 || model.stackEnvironmentCursor >= len(model.stackEnvironmentOptions) {
+				model.err = "no runtime environment option selected"
 				return model, nil
 			}
-			model.stackEnvironment = environment
-			model.stackEnvironmentKeys = keys
+			option := model.stackEnvironmentOptions[model.stackEnvironmentCursor]
+			switch option.kind {
+			case "keep":
+				return model.finishStackEnvironment(model.stackEnvironment, model.stackEnvironmentKeys)
+			case "none":
+				return model.finishStackEnvironment("", nil)
+			case "file":
+				return model.loadStackEnvironment(option.path)
+			case "browse":
+				directory := "."
+				if model.stackComposePath != "" {
+					directory = filepath.Dir(model.stackComposePath)
+				} else if current, err := os.Getwd(); err == nil {
+					directory = current
+				}
+				model.stackEnvironmentPicker = newStackFilePicker(directory, nil, true)
+				model.stackEnvironmentMode = stackEnvironmentBrowse
+				model.err = ""
+				return model, model.stackEnvironmentPicker.Init()
+			}
 		}
-		model.stackEnvironmentDirty = true
-		model.stackEnvironmentInput.Blur()
-		model.focus = 1
-		model.stackResourceTable.Focus()
-		model.err = ""
-		model.screen = profileSetupScreenStackEditor
+		return model, nil
+	case stackEnvironmentManual:
+		if isKey && key.String() == "enter" {
+			return model.loadStackEnvironment(model.stackEnvironmentInput.Value())
+		}
+		var command tea.Cmd
+		model.stackEnvironmentInput, command = model.stackEnvironmentInput.Update(msg)
+		return model, command
+	default:
+		if isKey && key.String() == "/" {
+			model.stackEnvironmentMode = stackEnvironmentManual
+			model.stackEnvironmentInput.SetValue("")
+			model.stackEnvironmentInput.Focus()
+			model.err = ""
+			return model, textinput.Blink
+		}
+		var command tea.Cmd
+		model.stackEnvironmentPicker, command = model.stackEnvironmentPicker.Update(msg)
+		if selected, path := model.stackEnvironmentPicker.DidSelectFile(msg); selected {
+			return model.loadStackEnvironment(path)
+		}
+		return model, command
+	}
+}
+
+func (model profileSetupModel) loadStackEnvironment(path string) (tea.Model, tea.Cmd) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		model.err = "runtime environment file path is required"
 		return model, nil
 	}
+	environment, keys, err := readStackEnvironmentFile(path)
+	if err != nil {
+		model.err = err.Error()
+		return model, nil
+	}
+	return model.finishStackEnvironment(environment, keys)
+}
+
+func (model profileSetupModel) finishStackEnvironment(environment string, keys []string) (tea.Model, tea.Cmd) {
+	model.stackEnvironment = environment
+	model.stackEnvironmentDirty = environment != model.stackEnvironmentOriginal
+	model.stackEnvironmentKeys = keys
+	model.stackEnvironmentInput.Blur()
+	model.err = ""
+	model.screen = model.stackEnvironmentReturn
+	if model.screen == profileSetupScreenStackEditor {
+		model.focus = 1
+		model.stackResourceTable.Focus()
+	} else {
+		model.focus = 0
+		model.stackInputs[0].Focus()
+	}
+	return model, nil
+}
+
+func (model profileSetupModel) updateStackReview(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.String() == "enter" {
+		return model.saveStackEditor()
+	}
 	var command tea.Cmd
-	model.stackEnvironmentInput, command = model.stackEnvironmentInput.Update(key)
+	model.stackInputs[0], command = model.stackInputs[0].Update(key)
 	return model, command
 }
 
@@ -1501,16 +1846,21 @@ func stackResourceFromInputs(inputs []textinput.Model) (stackPublicResource, err
 func (model *profileSetupModel) openStackEditor(stack editableStack) {
 	options := stackAddOptions{Name: stack.Name}
 	model.stackOriginalName = stack.Name
+	repositoryPath, _ := model.selectedRepositoryPath()
+	model.stackComposePath = filepath.Join(repositoryPath, "stacks", stack.Name, "compose.yaml")
 	model.stackCompose = stack.Compose
 	model.stackServices = stack.Services
+	model.stackServiceTable = newStackServiceTable(model.stackServices, stack.Metadata.PublicResources)
 	model.stackResources = append([]stackPublicResource(nil), stack.Metadata.PublicResources...)
 	model.stackResourceTable = newStackResourceTable(model.stackResources)
 	model.stackInputs = stackEditorInputs(options)
 	model.stackEnvironment = ""
+	model.stackEnvironmentOriginal = ""
 	model.stackEnvironmentKeys = nil
 	model.stackEnvironmentDirty = false
 	if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
 		model.stackEnvironment = model.profiles[model.selectedIndex].Secrets.StackEnvironments[stack.Name]
+		model.stackEnvironmentOriginal = model.stackEnvironment
 		_, keys, _ := readStackEnvironmentContent(model.stackEnvironment)
 		model.stackEnvironmentKeys = keys
 	}
@@ -1522,25 +1872,145 @@ func (model *profileSetupModel) openStackEditor(stack editableStack) {
 }
 
 func (model *profileSetupModel) openStackResourceEditor(index int) {
+	serviceIndex := 0
+	if index >= 0 && index < len(model.stackResources) {
+		for candidateIndex, service := range model.stackServices {
+			if service.Name == model.stackResources[index].Service {
+				serviceIndex = candidateIndex
+				break
+			}
+		}
+	}
+	model.openStackResourceEditorForService(index, serviceIndex, profileSetupScreenStackEditor)
+}
+
+func (model *profileSetupModel) openStackResourceEditorForService(index, serviceIndex int, returnScreen profileSetupScreen) {
 	resource := stackPublicResource{Protocol: "http", SSO: true, Healthcheck: stackResourceHealthcheck{Enabled: true, Path: "/"}}
 	if index >= 0 && index < len(model.stackResources) {
 		resource = model.stackResources[index]
-	} else if len(model.stackServices) > 0 {
-		service := model.stackServices[0]
-		resource.ID = slugifyStackValue(service.Name)
+	} else if serviceIndex >= 0 && serviceIndex < len(model.stackServices) {
+		service := model.stackServices[serviceIndex]
+		resource.ID = uniqueStackResourceValue(slugifyStackValue(service.Name), model.stackResources, func(candidate stackPublicResource) string {
+			return candidate.ID
+		})
 		resource.Service = service.Name
-		resource.Subdomain = slugifyStackValue(service.Name)
-		resource.Name = titleFromSlug(service.Name)
+		resource.Subdomain = uniqueStackResourceValue(slugifyStackValue(service.Name), model.stackResources, func(candidate stackPublicResource) string {
+			return candidate.Subdomain
+		})
+		resource.Name = titleFromSlug(resource.ID)
 		if len(service.ContainerPorts) > 0 {
 			resource.Port = service.ContainerPorts[0]
 		}
 	}
 	model.stackResourceIndex = index
+	model.stackResourceReturn = returnScreen
+	model.stackResourceAdvanced = false
 	model.stackResourceInputs = stackResourceInputs(resource)
-	model.focus = 0
-	model.stackResourceInputs[0].Focus()
+	model.focus = 1
+	model.stackResourceInputs[model.focus].Focus()
 	model.err = ""
 	model.screen = profileSetupScreenStackResourceEditor
+}
+
+func uniqueStackResourceValue(base string, resources []stackPublicResource, value func(stackPublicResource) string) string {
+	candidate := base
+	for suffix := 2; ; suffix++ {
+		used := false
+		for _, resource := range resources {
+			if value(resource) == candidate {
+				used = true
+				break
+			}
+		}
+		if !used {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s-%d", base, suffix)
+	}
+}
+
+func stackResourceIndexesForService(resources []stackPublicResource, service string) []int {
+	indexes := []int{}
+	for index, resource := range resources {
+		if resource.Service == service {
+			indexes = append(indexes, index)
+		}
+	}
+	return indexes
+}
+
+func removeStackResourcesForService(resources []stackPublicResource, service string) []stackPublicResource {
+	filtered := make([]stackPublicResource, 0, len(resources))
+	for _, resource := range resources {
+		if resource.Service != service {
+			filtered = append(filtered, resource)
+		}
+	}
+	return filtered
+}
+
+func (model *profileSetupModel) refreshStackServiceTable() {
+	cursor := model.stackServiceTable.Cursor()
+	model.stackServiceTable = newStackServiceTable(model.stackServices, model.stackResources)
+	model.resizeStackServiceTable()
+	if len(model.stackServices) > 0 {
+		model.stackServiceTable.SetCursor(clampInt(cursor, 0, len(model.stackServices)-1))
+	}
+	model.stackServiceTable.Focus()
+}
+
+func (model *profileSetupModel) resizeStackServiceTable() {
+	contentWidth := max(40, model.width-4)
+	remaining := contentWidth - 8
+	serviceWidth := clampInt(remaining/3, 10, 18)
+	portsWidth := clampInt(remaining/4, 8, 16)
+	hostnameWidth := max(10, remaining-serviceWidth-portsWidth-4)
+	model.stackServiceTable.SetColumns([]table.Column{
+		{Title: "Public", Width: 8},
+		{Title: "Service", Width: serviceWidth},
+		{Title: "Ports", Width: portsWidth},
+		{Title: "Hostname", Width: hostnameWidth},
+	})
+	model.stackServiceTable.SetWidth(contentWidth)
+}
+
+func newStackServiceTable(services []composeServiceSummary, resources []stackPublicResource) table.Model {
+	rows := make([]table.Row, 0, len(services))
+	for _, service := range services {
+		ports := "none declared"
+		if len(service.ContainerPorts) > 0 {
+			values := make([]string, len(service.ContainerPorts))
+			for index, port := range service.ContainerPorts {
+				values[index] = strconv.Itoa(port)
+			}
+			ports = strings.Join(values, ", ")
+		}
+		hostnames := []string{}
+		for _, resource := range resources {
+			if resource.Service == service.Name {
+				hostnames = append(hostnames, resource.Subdomain)
+			}
+		}
+		published := "[ ]"
+		exposure := "private"
+		if len(hostnames) > 0 {
+			published = "[x]"
+			exposure = strings.Join(hostnames, ", ")
+		}
+		rows = append(rows, table.Row{published, service.Name, ports, exposure})
+	}
+	return table.New(
+		table.WithColumns([]table.Column{
+			{Title: "Public", Width: 8},
+			{Title: "Service", Width: 18},
+			{Title: "Ports", Width: 18},
+			{Title: "Hostname", Width: 24},
+		}),
+		table.WithRows(rows),
+		table.WithHeight(clampInt(len(rows)+1, 2, 12)),
+		table.WithWidth(76),
+		table.WithFocused(true),
+	)
 }
 
 func newStackResourceTable(resources []stackPublicResource) table.Model {
@@ -1725,11 +2195,35 @@ func (model *profileSetupModel) goBack() {
 	case profileSetupScreenStacks:
 		model.screen = profileSetupScreenDashboard
 	case profileSetupScreenStackCompose:
-		model.screen = profileSetupScreenStacks
+		if model.stackComposeManual {
+			model.stackComposeManual = false
+			model.stackComposeInput.Blur()
+		} else {
+			model.screen = profileSetupScreenStacks
+		}
+	case profileSetupScreenStackServices:
+		model.screen = profileSetupScreenStackCompose
 	case profileSetupScreenStackEditor:
 		model.screen = profileSetupScreenStacks
-	case profileSetupScreenStackResourceEditor, profileSetupScreenStackEnvironment:
-		model.screen = profileSetupScreenStackEditor
+	case profileSetupScreenStackResourceEditor:
+		model.screen = model.stackResourceReturn
+	case profileSetupScreenStackEnvironment:
+		switch model.stackEnvironmentMode {
+		case stackEnvironmentManual:
+			model.stackEnvironmentInput.Blur()
+			model.stackEnvironmentMode = stackEnvironmentBrowse
+		case stackEnvironmentBrowse:
+			model.stackEnvironmentMode = stackEnvironmentChoose
+		default:
+			if model.stackEnvironmentReturn == profileSetupScreenStackReview {
+				model.screen = profileSetupScreenStackServices
+			} else {
+				model.screen = model.stackEnvironmentReturn
+			}
+		}
+	case profileSetupScreenStackReview:
+		model.stackInputs[0].Blur()
+		model.openStackEnvironment(profileSetupScreenStackReview)
 	case profileSetupScreenStackDeleteConfirm:
 		model.screen = profileSetupScreenStacks
 	case profileSetupScreenStackDiff:
@@ -2006,18 +2500,25 @@ func (model profileSetupModel) View() string {
 		builder.WriteString(model.stacksView())
 	case profileSetupScreenStackCompose:
 		builder.WriteString("Add application stack\n")
-		builder.WriteString(setupHelpStyle.Render("Choose any Docker Compose file. AegisNode will inspect its services and guide Pangolin configuration next."))
+		builder.WriteString(setupHelpStyle.Render("Choose a Docker Compose file. Use the browser or press / to type a path."))
 		builder.WriteString("\n\n")
-		builder.WriteString(model.stackComposeInput.View())
+		if model.stackComposeManual {
+			builder.WriteString(model.stackComposeInput.View())
+		} else {
+			builder.WriteString(setupHelpStyle.Render(model.stackComposePicker.CurrentDirectory))
+			builder.WriteString("\n\n")
+			builder.WriteString(model.stackComposePicker.View())
+		}
+	case profileSetupScreenStackServices:
+		builder.WriteString(model.stackServicesView())
 	case profileSetupScreenStackEditor:
 		builder.WriteString(model.stackEditorView())
 	case profileSetupScreenStackResourceEditor:
 		builder.WriteString(model.stackResourceEditorView())
 	case profileSetupScreenStackEnvironment:
-		builder.WriteString("Import runtime environment\n")
-		builder.WriteString(setupHelpStyle.Render("The file is saved in the profile secret store and is never copied into Git. Leave the path blank to remove it."))
-		builder.WriteString("\n\n")
-		builder.WriteString(model.stackEnvironmentInput.View())
+		builder.WriteString(model.stackEnvironmentView())
+	case profileSetupScreenStackReview:
+		builder.WriteString(model.stackReviewView())
 	case profileSetupScreenStackDeleteConfirm:
 		builder.WriteString(model.stackDeleteConfirmView())
 	case profileSetupScreenStackDiff:
@@ -2039,9 +2540,12 @@ func (model profileSetupModel) View() string {
 	}
 	builder.WriteString("\n\n")
 	builder.WriteString(model.help.View(profileSetupHelp{
-		screen:        model.screen,
-		hasProfile:    model.selectedIndex >= 0,
-		hasSetupToken: model.selectedProfileHasSetupToken(),
+		screen:               model.screen,
+		hasProfile:           model.selectedIndex >= 0,
+		hasSetupToken:        model.selectedProfileHasSetupToken(),
+		stackComposeManual:   model.stackComposeManual,
+		stackEnvironmentMode: model.stackEnvironmentMode,
+		stackEditorFocus:     model.focus,
 	}))
 	return builder.String()
 }
@@ -2121,6 +2625,25 @@ func (model profileSetupModel) stacksView() string {
 	return builder.String()
 }
 
+func (model profileSetupModel) stackServicesView() string {
+	var builder strings.Builder
+	builder.WriteString("Choose public services\n")
+	builder.WriteString(setupHelpStyle.Render("Every detected service deploys. Only services with configured routes become public."))
+	builder.WriteString("\n\n")
+	builder.WriteString(model.stackServiceTable.View())
+	builder.WriteString("\n")
+	builder.WriteString(fmt.Sprintf("%d public route(s) across %d service(s).\n", len(model.stackResources), publishedStackServiceCount(model.stackResources)))
+	return builder.String()
+}
+
+func publishedStackServiceCount(resources []stackPublicResource) int {
+	services := map[string]struct{}{}
+	for _, resource := range resources {
+		services[resource.Service] = struct{}{}
+	}
+	return len(services)
+}
+
 func (model profileSetupModel) stackEditorView() string {
 	var builder strings.Builder
 	title := "Edit stack"
@@ -2161,6 +2684,70 @@ func (model profileSetupModel) stackEditorView() string {
 	return builder.String()
 }
 
+func (model profileSetupModel) stackEnvironmentView() string {
+	var builder strings.Builder
+	builder.WriteString("Runtime environment\n")
+	builder.WriteString(setupHelpStyle.Render("Values are stored in the owner-only profile secret store and never written to Git."))
+	builder.WriteString("\n\n")
+	switch model.stackEnvironmentMode {
+	case stackEnvironmentManual:
+		builder.WriteString(model.stackEnvironmentInput.View())
+	case stackEnvironmentBrowse:
+		builder.WriteString(setupHelpStyle.Render(model.stackEnvironmentPicker.CurrentDirectory))
+		builder.WriteString("\n\n")
+		builder.WriteString(model.stackEnvironmentPicker.View())
+	default:
+		for index, option := range model.stackEnvironmentOptions {
+			cursor := "  "
+			if index == model.stackEnvironmentCursor {
+				cursor = "> "
+			}
+			line := cursor + option.label
+			if option.detail != "" {
+				line += " — " + option.detail
+			}
+			if index == model.stackEnvironmentCursor {
+				builder.WriteString(setupTitleStyle.Render(line))
+			} else {
+				builder.WriteString(line)
+			}
+			builder.WriteByte('\n')
+		}
+	}
+	return builder.String()
+}
+
+func (model profileSetupModel) stackReviewView() string {
+	var builder strings.Builder
+	builder.WriteString("Review application stack\n")
+	builder.WriteString(setupHelpStyle.Render("Saving writes local repository files and profile secrets. It does not deploy or commit."))
+	builder.WriteString("\n\n")
+	builder.WriteString(model.stackInputs[0].View())
+	builder.WriteString("\n\n")
+	builder.WriteString(fmt.Sprintf("Compose: %s\n", model.stackComposePath))
+	builder.WriteString(fmt.Sprintf("Services: %d total, %d public, %d private\n",
+		len(model.stackServices),
+		publishedStackServiceCount(model.stackResources),
+		len(model.stackServices)-publishedStackServiceCount(model.stackResources),
+	))
+	if len(model.stackResources) == 0 {
+		builder.WriteString("Routes: none; this stack remains private\n")
+	} else {
+		builder.WriteString("Routes:\n")
+		for _, resource := range model.stackResources {
+			builder.WriteString(fmt.Sprintf("  %s: %s:%d → %s\n", resource.ID, resource.Service, resource.Port, resource.Subdomain))
+		}
+	}
+	if len(model.stackEnvironmentKeys) == 0 {
+		builder.WriteString("Runtime environment: none\n")
+	} else {
+		builder.WriteString(fmt.Sprintf("Runtime environment: %d key(s); values hidden\n", len(model.stackEnvironmentKeys)))
+	}
+	builder.WriteString("\n")
+	builder.WriteString(setupWarningStyle.Render("Next: review the diff, stage, and commit from the stack manager."))
+	return builder.String()
+}
+
 func (model profileSetupModel) stackResourceEditorView() string {
 	title := "Add public resource"
 	if model.stackResourceIndex >= 0 {
@@ -2168,10 +2755,14 @@ func (model profileSetupModel) stackResourceEditorView() string {
 	}
 	var builder strings.Builder
 	builder.WriteString(title + "\n")
-	builder.WriteString(setupHelpStyle.Render("Resource IDs are stable Pangolin identifiers. The health-check path can be blank."))
+	builder.WriteString(setupHelpStyle.Render("Common route fields are shown first. Press ctrl+x to toggle stable ID, display name, and health check."))
 	builder.WriteString("\n\n")
-	for _, input := range model.stackResourceInputs {
-		builder.WriteString(input.View())
+	for _, index := range stackResourceVisibleInputs(model.stackResourceAdvanced) {
+		builder.WriteString(model.stackResourceInputs[index].View())
+		builder.WriteByte('\n')
+	}
+	if !model.stackResourceAdvanced {
+		builder.WriteString(setupHelpStyle.Render("Advanced fields are using generated defaults."))
 		builder.WriteByte('\n')
 	}
 	return builder.String()
@@ -2330,9 +2921,12 @@ func (model profileSetupModel) deleteConfirmView() string {
 }
 
 type profileSetupHelp struct {
-	screen        profileSetupScreen
-	hasProfile    bool
-	hasSetupToken bool
+	screen               profileSetupScreen
+	hasProfile           bool
+	hasSetupToken        bool
+	stackComposeManual   bool
+	stackEnvironmentMode stackEnvironmentMode
+	stackEditorFocus     int
 }
 
 func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
@@ -2404,11 +2998,36 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		}
 	case profileSetupScreenStackCompose:
+		if helpMap.stackComposeManual {
+			return []key.Binding{
+				key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "inspect")),
+				key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "browser")),
+			}
+		}
 		return []key.Binding{
-			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "inspect")),
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select/open")),
+			key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "select")),
+			key.NewBinding(key.WithKeys("h"), key.WithHelp("h", "parent")),
+			key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "type path")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	case profileSetupScreenStackServices:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "public/private")),
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "configure")),
+			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "another route")),
+			key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "next")),
+			key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "service")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		}
 	case profileSetupScreenStackEditor:
+		if helpMap.stackEditorFocus == 0 {
+			return []key.Binding{
+				key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "save")),
+				key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "routes")),
+				key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+			}
+		}
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "save")),
 			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add route")),
@@ -2423,11 +3042,33 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 			key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "save route")),
 			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "next/save")),
 			key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "field")),
+			key.NewBinding(key.WithKeys("ctrl+x"), key.WithHelp("ctrl+x", "advanced")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		}
 	case profileSetupScreenStackEnvironment:
+		if helpMap.stackEnvironmentMode == stackEnvironmentManual {
+			return []key.Binding{
+				key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "use file")),
+				key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "browser")),
+			}
+		}
+		if helpMap.stackEnvironmentMode == stackEnvironmentBrowse {
+			return []key.Binding{
+				key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select/open")),
+				key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "select")),
+				key.NewBinding(key.WithKeys("h"), key.WithHelp("h", "parent")),
+				key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "type path")),
+				key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "choices")),
+			}
+		}
 		return []key.Binding{
-			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "import/remove")),
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "choose")),
+			key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "select")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	case profileSetupScreenStackReview:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "save locally")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		}
 	case profileSetupScreenStackDeleteConfirm:
@@ -2968,6 +3609,20 @@ func shouldUseProfileRunView(options setupCLIOptions, output io.Writer) bool {
 	return !options.Yes && isInteractiveWriter(output)
 }
 
+type tuiPresentedError struct {
+	err error
+}
+
+var errReturnToSetup = errors.New("return to setup")
+
+func (presented tuiPresentedError) Error() string {
+	return presented.err.Error()
+}
+
+func (presented tuiPresentedError) Unwrap() error {
+	return presented.err
+}
+
 func runProfileSetupPlan(ctx context.Context, store ProfileStore, profile Profile, state ProfileState, config setupConfig, stdout, stderr io.Writer) error {
 	fmt.Fprintln(stdout, "Selected plan:")
 	fmt.Fprint(stdout, setupPlanSummary(config))
@@ -3017,27 +3672,28 @@ func runProfileSetupPlan(ctx context.Context, store ProfileStore, profile Profil
 	return nil
 }
 
-func runProfileSetupPlanWithRunView(ctx context.Context, store ProfileStore, profile Profile, state ProfileState, config setupConfig, stdout, stderr io.Writer) error {
-	fmt.Fprintln(stdout, "Selected plan:")
-	fmt.Fprint(stdout, setupPlanSummary(config))
-	fmt.Fprintln(stdout)
-	if err := runPreflight(config, stdout); err != nil {
-		return err
+func runProfileSetupPlanWithRunView(ctx context.Context, store ProfileStore, profile Profile, state ProfileState, config setupConfig, stdout, stderr io.Writer, allowReturn bool) error {
+	var preparation bytes.Buffer
+	fmt.Fprintln(&preparation, "Selected plan:")
+	fmt.Fprint(&preparation, setupPlanSummary(config))
+	fmt.Fprintln(&preparation)
+	if err := runPreflight(config, &preparation); err != nil {
+		return runProfileFailureView(profile, config, completedSetupStages(state), "", preparation.String(), err, stderr, allowReturn)
 	}
-	fmt.Fprintln(stdout, "Preparing the configuration repository before SSH execution...")
+	fmt.Fprintf(&preparation, "Preparing configuration repository: %s\n", firstNonEmpty(config.ConfigRepositoryPath, profile.ConfigRepositoryPath, "profile default"))
 	var err error
 	profile, config, err = prepareDeclarativeSetup(ctx, store, profile, state, config)
 	if err != nil {
-		return err
+		return runProfileFailureView(profile, config, completedSetupStages(state), "", preparation.String(), err, stderr, allowReturn)
 	}
-	fmt.Fprintf(stdout, "Configuration repository ready: %s at %s\n\n", config.ConfigRepositoryPath, config.ConfigRepositoryCommit)
+	fmt.Fprintf(&preparation, "Configuration repository ready: %s at %s\n", config.ConfigRepositoryPath, config.ConfigRepositoryCommit)
 
 	completedStages := completedSetupStages(state)
 	runID := newSetupRunID()
 	state.ActiveRunID = runID
 	state.Runs[runID] = newSetupRun(runID, completedStages)
 	if err := store.Save(profile, state); err != nil {
-		return err
+		return runProfileFailureView(profile, config, completedStages, "", preparation.String(), err, stderr, allowReturn)
 	}
 
 	profileReporter := &profileRunReporter{
@@ -3053,6 +3709,8 @@ func runProfileSetupPlanWithRunView(ctx context.Context, store ProfileStore, pro
 	liveReporter := profileRunUIReporter{messages: messages}
 	reporter := &synchronizedTaskReporter{reporters: []TaskReporter{profileReporter, liveReporter}}
 	model := newProfileRunModel(profile, config, runID, completedStages, "", messages, cancel)
+	model.allowReturn = allowReturn
+	appendProfileRunOutput(&model, preparation.String())
 	model.start = startProfileRunCommand(runContext, profile, config, runID, completedStages, reporter, profileReporter, messages)
 	program := tea.NewProgram(model, tea.WithOutput(stderr), tea.WithAltScreen())
 	finalModel, err := program.Run()
@@ -3066,11 +3724,14 @@ func runProfileSetupPlanWithRunView(ctx context.Context, store ProfileStore, pro
 	if result.cancelled {
 		return errors.New("setup cancelled")
 	}
+	if result.returnToSetup {
+		return errReturnToSetup
+	}
 	if result.err != nil {
-		return result.err
+		return tuiPresentedError{err: result.err}
 	}
 	if profileReporter.err != nil {
-		return profileReporter.err
+		return tuiPresentedError{err: profileReporter.err}
 	}
 	printSSHLoginGuidance(stdout, config)
 	fmt.Fprintf(stdout, "\nProxy URL: https://pangolin.%s\n", config.BaseDomain)
@@ -3126,26 +3787,27 @@ func runProfileSetupStagePlan(ctx context.Context, store ProfileStore, profile P
 	return nil
 }
 
-func runProfileSetupStagePlanWithRunView(ctx context.Context, store ProfileStore, profile Profile, state ProfileState, config setupConfig, stage string, stdout, stderr io.Writer) error {
-	fmt.Fprintf(stdout, "Selected one-time stage: %s\n\n", profileRunStageLabel(stage))
-	if err := runPreflight(config, stdout); err != nil {
-		return err
+func runProfileSetupStagePlanWithRunView(ctx context.Context, store ProfileStore, profile Profile, state ProfileState, config setupConfig, stage string, stdout, stderr io.Writer, allowReturn bool) error {
+	var preparation bytes.Buffer
+	fmt.Fprintf(&preparation, "Selected one-time stage: %s\n\n", profileRunStageLabel(stage))
+	if err := runPreflight(config, &preparation); err != nil {
+		return runProfileFailureView(profile, config, completedSetupStages(state), stage, preparation.String(), err, stderr, allowReturn)
 	}
 	if stage == "observability" || stage == "platform" || stage == "stacks" || strings.HasPrefix(stage, "stack:") {
-		fmt.Fprintln(stdout, "Preparing the configuration repository before SSH execution...")
+		fmt.Fprintf(&preparation, "Preparing configuration repository: %s\n", firstNonEmpty(config.ConfigRepositoryPath, profile.ConfigRepositoryPath, "profile default"))
 		var err error
 		profile, config, err = prepareDeclarativeSetup(ctx, store, profile, state, config)
 		if err != nil {
-			return err
+			return runProfileFailureView(profile, config, completedSetupStages(state), stage, preparation.String(), err, stderr, allowReturn)
 		}
-		fmt.Fprintf(stdout, "Configuration repository ready: %s at %s\n\n", config.ConfigRepositoryPath, config.ConfigRepositoryCommit)
+		fmt.Fprintf(&preparation, "Configuration repository ready: %s at %s\n", config.ConfigRepositoryPath, config.ConfigRepositoryCommit)
 	}
 
 	runID := newSetupRunID()
 	state.ActiveRunID = runID
 	state.Runs[runID] = newSetupRunForStage(runID, stage, completedSetupStages(state))
 	if err := store.Save(profile, state); err != nil {
-		return err
+		return runProfileFailureView(profile, config, completedSetupStages(state), stage, preparation.String(), err, stderr, allowReturn)
 	}
 
 	profileReporter := &profileRunReporter{
@@ -3161,6 +3823,8 @@ func runProfileSetupStagePlanWithRunView(ctx context.Context, store ProfileStore
 	liveReporter := profileRunUIReporter{messages: messages}
 	reporter := &synchronizedTaskReporter{reporters: []TaskReporter{profileReporter, liveReporter}}
 	model := newProfileRunModel(profile, config, runID, completedSetupStages(state), stage, messages, cancel)
+	model.allowReturn = allowReturn
+	appendProfileRunOutput(&model, preparation.String())
 	model.start = startProfileStageRunCommand(runContext, profile, config, runID, stage, reporter, profileReporter, messages)
 	program := tea.NewProgram(model, tea.WithOutput(stderr), tea.WithAltScreen())
 	finalModel, err := program.Run()
@@ -3174,14 +3838,53 @@ func runProfileSetupStagePlanWithRunView(ctx context.Context, store ProfileStore
 	if result.cancelled {
 		return errors.New("setup cancelled")
 	}
+	if result.returnToSetup {
+		return errReturnToSetup
+	}
 	if result.err != nil {
-		return result.err
+		return tuiPresentedError{err: result.err}
 	}
 	if profileReporter.err != nil {
-		return profileReporter.err
+		return tuiPresentedError{err: profileReporter.err}
 	}
 	printStageCompletionGuidance(stdout, config, stage)
 	return nil
+}
+
+func runProfileFailureView(profile Profile, config setupConfig, completedStages map[string]bool, stage, output string, runErr error, tuiOutput io.Writer, allowReturn bool) error {
+	model := newProfileRunFailureModel(profile, config, completedStages, stage, output, runErr, allowReturn)
+	program := tea.NewProgram(model, tea.WithOutput(tuiOutput), tea.WithAltScreen())
+	finalModel, err := program.Run()
+	if err != nil {
+		return fmt.Errorf("run setup TUI: %w", err)
+	}
+	if _, ok := finalModel.(profileRunModel); !ok {
+		return errors.New("setup run TUI returned an unexpected model")
+	}
+	result := finalModel.(profileRunModel)
+	if result.returnToSetup {
+		return errReturnToSetup
+	}
+	return tuiPresentedError{err: runErr}
+}
+
+func newProfileRunFailureModel(profile Profile, config setupConfig, completedStages map[string]bool, stage, output string, runErr error, allowReturn bool) profileRunModel {
+	model := newProfileRunModel(profile, config, "preparation", completedStages, stage, nil, nil)
+	model.done = true
+	model.err = runErr
+	model.allowReturn = allowReturn
+	if stage != "" {
+		model.setStageStatus(stage, stageStatusFailed)
+	}
+	appendProfileRunOutput(&model, output)
+	model.appendRunLog("Run failed: " + runErr.Error())
+	return model
+}
+
+func appendProfileRunOutput(model *profileRunModel, output string) {
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		model.appendRunLog(line)
+	}
 }
 
 func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig, runID string, completedStages map[string]bool, reporter TaskReporter, stdout, stderr io.Writer) error {
@@ -3645,6 +4348,8 @@ type profileRunModel struct {
 	height         int
 	done           bool
 	cancelled      bool
+	allowReturn    bool
+	returnToSetup  bool
 	err            error
 }
 
@@ -3777,6 +4482,9 @@ func setupRunStageTaskTotals(config setupConfig) map[string]int {
 }
 
 func (model profileRunModel) Init() tea.Cmd {
+	if model.done {
+		return nil
+	}
 	return tea.Batch(model.start, model.spinner.Tick, waitForProfileRunMessage(model.messages))
 }
 
@@ -3792,7 +4500,12 @@ func (model profileRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if model.done {
 			switch msg.String() {
-			case "q", "esc", "ctrl+c":
+			case "q", "ctrl+c":
+				return model, tea.Quit
+			case "esc":
+				if model.allowReturn {
+					model.returnToSetup = true
+				}
 				return model, tea.Quit
 			}
 		}
@@ -4015,7 +4728,11 @@ func (model profileRunModel) View() string {
 			builder.WriteString(setupErrorStyle.Render(model.err.Error()))
 			builder.WriteString("\n")
 		}
-		builder.WriteString(setupHelpStyle.Render("q exits. Run setup again to retry failed stages."))
+		if model.allowReturn {
+			builder.WriteString(setupHelpStyle.Render("esc returns to setup. q exits."))
+		} else {
+			builder.WriteString(setupHelpStyle.Render("esc/q exits. Run setup again to retry failed stages."))
+		}
 	} else {
 		builder.WriteString(setupHelpStyle.Render("q quits. Ctrl+C cancels. j/k or up/down scroll logs."))
 	}
@@ -4031,6 +4748,12 @@ func (model profileRunModel) taskProgress() float64 {
 
 func (model profileRunModel) currentTaskLabel() string {
 	if model.currentTask == "" {
+		if model.done && model.err != nil {
+			return "stopped before remote execution"
+		}
+		if model.done {
+			return "complete"
+		}
 		return "waiting for first remote task"
 	}
 	return fmt.Sprintf("%s - %s", profileRunStageLabel(model.currentStage), model.currentTask)

@@ -432,15 +432,20 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		return err
 	}
 	revision := configRepositoryRevision{Path: absoluteRepositoryPath}
+	repositoryScaffold := observabilityComposeFile(observabilityConfig{
+		BaseDomain: profile.BaseDomain,
+		AdminEmail: firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail),
+	})
 	if _, err := os.Stat(filepath.Join(absoluteRepositoryPath, ".git")); errors.Is(err, os.ErrNotExist) {
-		revision, err = prepareConfigRepository(ctx, repositoryPath, "", "", profile.ID, observabilityComposeFile(observabilityConfig{
-			BaseDomain: profile.BaseDomain,
-			AdminEmail: firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail),
-		}))
+		revision, err = prepareConfigRepository(ctx, repositoryPath, "", "", profile.ID, repositoryScaffold)
 		if err != nil {
 			return err
 		}
 	} else if err != nil {
+		return err
+	}
+	scaffoldCreated, err := ensureConfigRepositoryScaffold(revision.Path, repositoryScaffold)
+	if err != nil {
 		return err
 	}
 	profile.ConfigRepositoryPath = revision.Path
@@ -491,6 +496,9 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	}
 
 	fmt.Fprintf(stdout, "Stack scaffold created: %s\n", directory)
+	if scaffoldCreated {
+		fmt.Fprintln(stdout, "The configuration repository scaffold was created in the same change set.")
+	}
 	if sourcePath != destinationPath {
 		fmt.Fprintln(stdout, "Only the Compose file was imported. Copy any relative bind-mount, env, or configuration files into the stack directory before committing.")
 	}
@@ -510,8 +518,8 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	for _, label := range pangolinLabelsFromOverride(override) {
 		fmt.Fprintf(stdout, "  %s\n", label)
 	}
-	fmt.Fprintln(stdout, "\nReview the files, then commit them. AegisNode deploys committed configuration only:")
-	fmt.Fprintf(stdout, "  git -C %s add stacks/%s\n", shellQuote(revision.Path), options.Name)
+	fmt.Fprintln(stdout, "\nReview the complete configuration change, then commit it once. AegisNode deploys committed configuration only:")
+	fmt.Fprintf(stdout, "  git -C %s add stacks\n", shellQuote(revision.Path))
 	fmt.Fprintf(stdout, "  git -C %s commit -m %s\n", shellQuote(revision.Path), shellQuote("Add "+options.Name+" stack"))
 	fmt.Fprintln(stdout, "Then open the profile dashboard, press s, select this stack, and press r to deploy it independently.")
 	return nil

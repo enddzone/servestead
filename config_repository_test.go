@@ -69,6 +69,34 @@ func TestPrepareSuppliedRepositoryScaffoldsThenRequiresReview(t *testing.T) {
 	}
 }
 
+func TestEnsureConfigRepositoryScaffoldIsIdempotent(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init", "-b", "main")
+	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: "example.com", AdminEmail: "admin@example.com"})
+	created, err := ensureConfigRepositoryScaffold(repository, scaffold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("missing repository scaffold was not created")
+	}
+	created, err = ensureConfigRepositoryScaffold(repository, scaffold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Fatal("existing repository scaffold was recreated")
+	}
+	data, err := os.ReadFile(filepath.Join(repository, filepath.FromSlash(observabilityComposeRepositoryPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != scaffold {
+		t.Fatal("repository scaffold content changed")
+	}
+}
+
 func TestValidateGitHubRepositoryURL(t *testing.T) {
 	for _, valid := range []string{
 		"https://github.com/example/aegis-config",

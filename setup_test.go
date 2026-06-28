@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -483,7 +484,17 @@ func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
 	}
 	runGitCommand(t, repository, "init")
 	composePath := filepath.Join(directory, "compose.yaml")
-	if err := os.WriteFile(composePath, []byte("services:\n  web:\n    image: nginx\n    expose:\n      - 80\n"), 0600); err != nil {
+	if err := os.WriteFile(composePath, []byte(`services:
+  web:
+    image: nginx
+    expose: [80]
+  api:
+    image: example/api
+    expose: [3000]
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, ".env"), []byte("API_KEY=secret\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	model := newProfileSetupModel([]profileChoice{{
@@ -502,20 +513,126 @@ func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
 	if result.screen != profileSetupScreenStackCompose {
 		t.Fatalf("stack shortcut did not open Compose intake: %v", result.screen)
 	}
+	if result.stackComposeManual {
+		t.Fatal("Compose intake did not start in file-browser mode")
+	}
+	updated, _ = result.updateStackCompose(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	result = updated.(profileSetupModel)
+	if !result.stackComposeManual {
+		t.Fatal("manual Compose path fallback did not open")
+	}
 	result.stackComposeInput.SetValue(composePath)
 	updated, _ = result.updateStackCompose(tea.KeyMsg{Type: tea.KeyEnter})
 	result = updated.(profileSetupModel)
-	if result.screen != profileSetupScreenStackEditor {
-		t.Fatalf("Compose intake did not open stack editor: %+v", result)
+	if result.screen != profileSetupScreenStackServices || len(result.stackResources) != 0 {
+		t.Fatalf("Compose intake did not open private-by-default service selection: %v %+v", result.screen, result.stackResources)
+	}
+
+	updated, _ = result.updateStackServices(tea.KeyMsg{Type: tea.KeyEnter})
+	result = updated.(profileSetupModel)
+	if result.screen != profileSetupScreenStackResourceEditor || result.stackResourceInputs[1].Value() != result.stackServices[0].Name {
+		t.Fatalf("first service route editor did not open: %v %q", result.screen, result.stackResourceInputs[1].Value())
+	}
+	if strings.Contains(result.stackResourceEditorView(), "Resource ID") {
+		t.Fatal("advanced route fields were shown by default")
+	}
+	updated, _ = result.updateStackResourceEditor(tea.KeyMsg{Type: tea.KeyCtrlX})
+	result = updated.(profileSetupModel)
+	if !strings.Contains(result.stackResourceEditorView(), "Resource ID") {
+		t.Fatal("advanced route fields did not open")
+	}
+	updated, _ = result.updateStackResourceEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
+	result = updated.(profileSetupModel)
+	if result.screen != profileSetupScreenStackServices || len(result.stackResources) != 1 {
+		t.Fatalf("web route was not retained: %+v", result.stackResources)
+	}
+
+	updated, _ = result.updateStackServices(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	result = updated.(profileSetupModel)
+	updated, _ = result.updateStackServices(tea.KeyMsg{Type: tea.KeyEnter})
+	result = updated.(profileSetupModel)
+	if result.stackResourceInputs[1].Value() != result.stackServices[1].Name {
+		t.Fatalf("second service route editor did not open: %q", result.stackResourceInputs[1].Value())
+	}
+	updated, _ = result.updateStackResourceEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
+	result = updated.(profileSetupModel)
+
+	updated, _ = result.updateStackServices(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	result = updated.(profileSetupModel)
+	if result.screen != profileSetupScreenStackEnvironment || len(result.stackEnvironmentOptions) != 3 {
+		t.Fatalf("runtime environment choices were not prepared: %+v", result.stackEnvironmentOptions)
+	}
+	updated, _ = result.updateStackEnvironment(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	result = updated.(profileSetupModel)
+	updated, _ = result.updateStackEnvironment(tea.KeyMsg{Type: tea.KeyEnter})
+	result = updated.(profileSetupModel)
+	if result.screen != profileSetupScreenStackReview || len(result.stackEnvironmentKeys) != 1 {
+		t.Fatalf("adjacent environment did not open review: %v %+v", result.screen, result.stackEnvironmentKeys)
 	}
 	result.stackInputs[0].SetValue("site")
-	updated, _ = result.updateStackEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
+	updated, _ = result.updateStackReview(tea.KeyMsg{Type: tea.KeyEnter})
 	result = updated.(profileSetupModel)
 	if result.screen != profileSetupScreenStacks || len(result.stacks) != 1 || result.stacks[0].Name != "site" {
-		t.Fatalf("stack editor did not save in-session: %+v", result)
+		t.Fatalf("stack review did not save in-session: %+v", result)
 	}
 	if result.err != "" {
-		t.Fatalf("stack editor left an error: %s", result.err)
+		t.Fatalf("stack review left an error: %s", result.err)
+	}
+	if len(result.stacks[0].Metadata.PublicResources) != 2 {
+		t.Fatalf("multi-service routes were not saved: %+v", result.stacks[0].Metadata.PublicResources)
+	}
+	if _, err := os.Stat(filepath.Join(repository, filepath.FromSlash(observabilityComposeRepositoryPath))); err != nil {
+		t.Fatalf("repository scaffold was not prepared before commit: %v", err)
+	}
+}
+
+func TestSetupResumeReturnsToStackManagerForStackStages(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init")
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{ID: "profile-1", IP: "203.0.113.10", ConfigRepositoryPath: repository},
+		State:   ProfileState{Runs: map[string]SetupRun{}},
+	}})
+
+	applySetupResume(&model, resumeAfterStage("profile-1", "stacks"))
+	if model.selectedIndex != 0 || model.screen != profileSetupScreenStacks {
+		t.Fatalf("stack stage did not resume stack manager: %+v", model)
+	}
+
+	applySetupResume(&model, resumeAfterStage("profile-1", "harden"))
+	if model.screen != profileSetupScreenDashboard {
+		t.Fatalf("non-stack stage did not resume dashboard: %+v", model.screen)
+	}
+}
+
+func TestStackFilePickersSelectComposeAndShowHiddenEnvironmentFiles(t *testing.T) {
+	directory := t.TempDir()
+	composePath := filepath.Join(directory, "compose.yaml")
+	if err := os.WriteFile(composePath, []byte("services:\n  web:\n    image: nginx\n    expose: [80]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, ".env"), []byte("TOKEN=secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	model := newProfileSetupModel(nil)
+	model.screen = profileSetupScreenStackCompose
+	model.stackComposePicker = newStackFilePicker(directory, []string{".yaml", ".yml"}, false)
+	message := model.stackComposePicker.Init()()
+	updated, _ := model.updateStackCompose(message)
+	model = updated.(profileSetupModel)
+	updated, _ = model.updateStackCompose(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(profileSetupModel)
+	if model.screen != profileSetupScreenStackServices || model.stackComposePath != composePath {
+		t.Fatalf("Compose picker did not select the file: %v %q", model.screen, model.stackComposePath)
+	}
+
+	picker := newStackFilePicker(directory, nil, true)
+	message = picker.Init()()
+	picker, _ = picker.Update(message)
+	if !strings.Contains(picker.View(), ".env") {
+		t.Fatal("environment picker did not show hidden files")
 	}
 }
 
@@ -580,6 +697,7 @@ func TestStackEditorManagesMultipleResourcesAndRuntimeEnvironment(t *testing.T) 
 	}
 	updated, _ = model.updateStackEditor(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
 	model = updated.(profileSetupModel)
+	model.stackEnvironmentMode = stackEnvironmentManual
 	model.stackEnvironmentInput.SetValue(environmentPath)
 	updated, _ = model.updateStackEnvironment(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(profileSetupModel)
@@ -653,8 +771,14 @@ public_resources:
 		t.Fatalf("dashboard does not show detected stack:\n%s", view)
 	}
 	model.screen = profileSetupScreenStacks
-	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
 	blocked := updated.(profileSetupModel)
+	if command != nil || blocked.done || !strings.Contains(blocked.err, "uncommitted") {
+		t.Fatalf("dirty single-stack deployment was not blocked in the TUI: %+v", blocked)
+	}
+
+	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	blocked = updated.(profileSetupModel)
 	if command != nil || blocked.done || !strings.Contains(blocked.err, "uncommitted") {
 		t.Fatalf("dirty repository sync was not blocked: %+v", blocked)
 	}
@@ -1124,6 +1248,73 @@ func TestProfileRunModelRendersTaskProgressAndLogs(t *testing.T) {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("run view missing %q:\n%s", expected, view)
 		}
+	}
+}
+
+func TestProfileRunFailureRemainsInTUIOnEscape(t *testing.T) {
+	runErr := errors.New("uncommitted changes under stacks/ block deployment")
+	model := newProfileRunFailureModel(
+		Profile{Name: "production", IP: "203.0.113.10"},
+		setupConfig{Host: "203.0.113.10", ConfigRepositoryPath: "/tmp/aegisnode-config"},
+		nil,
+		"stacks",
+		"Preparing configuration repository: /tmp/aegisnode-config\n",
+		runErr,
+		true,
+	)
+	if model.Init() != nil {
+		t.Fatal("completed failure model should not start background commands")
+	}
+	view := model.View()
+	for _, expected := range []string{
+		"Failed",
+		"Sync stacks",
+		"Preparing configuration repository: /tmp/aegisnode-config",
+		runErr.Error(),
+		"stopped before remote execution",
+	} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("failure view missing %q:\n%s", expected, view)
+		}
+	}
+
+	if !strings.Contains(view, "esc returns to setup") {
+		t.Fatalf("failure view did not advertise escape return:\n%s", view)
+	}
+
+	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	result := updated.(profileRunModel)
+	if command == nil || !result.done || result.err == nil || !result.returnToSetup {
+		t.Fatalf("escape did not request returning to setup: %+v", result)
+	}
+	_, command = result.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if command == nil {
+		t.Fatal("q should explicitly exit the completed run view")
+	}
+
+	presented := tuiPresentedError{err: runErr}
+	if !errors.Is(presented, runErr) {
+		t.Fatal("presented TUI error does not preserve the underlying failure")
+	}
+}
+
+func TestProfileRunCompletedEscapeReturnsWhenParentSetupExists(t *testing.T) {
+	model := newProfileRunModel(
+		Profile{Name: "production", IP: "203.0.113.10"},
+		setupConfig{Host: "203.0.113.10"},
+		"run-1",
+		nil,
+		"stacks",
+		make(chan tea.Msg),
+		func() {},
+	)
+	model.done = true
+	model.allowReturn = true
+
+	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	result := updated.(profileRunModel)
+	if command == nil || !result.returnToSetup {
+		t.Fatalf("escape did not request return from completed result: %+v", result)
 	}
 }
 
