@@ -85,6 +85,10 @@ func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Pr
 	config.ConfigRepositoryCompose = revision.Compose
 	config.ConfigRepositorySHA256 = revision.ComposeSHA
 	config.GitHubToken = os.Getenv("AEGISNODE_GITHUB_TOKEN")
+	secrets, err := store.LoadSecrets(profile.ID)
+	if err != nil {
+		return profile, config, err
+	}
 	for _, stack := range revision.Stacks {
 		services, err := inspectComposeServices([]byte(stack.Compose))
 		if err != nil {
@@ -102,6 +106,7 @@ func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Pr
 			ComposeSHA256: stack.ComposeSHA256,
 			Resources:     stack.Metadata.PublicResources,
 			Files:         stack.Files,
+			Environment:   secrets.StackEnvironments[stack.Name],
 		})
 	}
 	if err := validateConfiguredStackSet(config.Stacks); err != nil {
@@ -280,6 +285,13 @@ func loadCommittedStacks(ctx context.Context, repositoryPath string) ([]reposito
 		}
 		var metadata stackMetadata
 		if err := yaml.Unmarshal([]byte(metadataContent), &metadata); err != nil {
+			return nil, fmt.Errorf("stack %s metadata: %w", name, err)
+		}
+		services, err := inspectComposeServices([]byte(compose))
+		if err != nil {
+			return nil, fmt.Errorf("stack %s: %w", name, err)
+		}
+		if err := validateStackMetadata(name, metadata, services); err != nil {
 			return nil, fmt.Errorf("stack %s metadata: %w", name, err)
 		}
 		sum := sha256.Sum256([]byte(compose))

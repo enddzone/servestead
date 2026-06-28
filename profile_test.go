@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -176,7 +177,7 @@ func TestEnsureComposeWiringSecretsIsStable(t *testing.T) {
 	if err := secrets.EnsureComposeWiringSecrets(); err != nil {
 		t.Fatal(err)
 	}
-	if secrets != first {
+	if !reflect.DeepEqual(secrets, first) {
 		t.Fatal("existing compose wiring secrets changed")
 	}
 	if len(secrets.PangolinAdminPassword) != 32 || len(secrets.NewtID) != 15 ||

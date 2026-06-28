@@ -26,7 +26,9 @@ Direct commands:
   aegisnode proxy --host <ipv4> --private-key <path> --domain <domain> --email <email> --server-secret <secret>
   aegisnode pangolin-token (--profile <id> | --ip <ipv4>)
   aegisnode pangolin-credentials --profile <id>
-  aegisnode stack add --profile <id> --compose <path>
+  aegisnode stack add --profile <id> --compose <path> [--publish <service:port:subdomain[:id]> ...] [--env-file <path>]
+  aegisnode stack env set --profile <id> --stack <name> --file <path>
+  aegisnode stack env remove --profile <id> --stack <name>
   aegisnode doctor
 
 Run "aegisnode <command> -help" for command-specific options.

@@ -154,16 +154,28 @@ Saved-profile dashboards show stacks detected in the profile configuration repos
 ```sh
 bin/aegisnode stack add \
   --profile <profile-id> \
-  --compose /path/to/docker-compose.yml
+  --compose /path/to/docker-compose.yml \
+  --publish web:3000:app \
+  --publish api:8080:api \
+  --env-file /path/to/.env
 ```
 
-The terminal UI shows detected services and container ports, then asks for the service, port, public subdomain, display name, health-check path, and SSO setting. AegisNode copies the original file to `stacks/<name>/compose.yaml` and writes the reviewed public-resource contract to `stacks/<name>/aegisnode.yaml`. It does not inject labels into the consumer-owned Compose file.
+`--publish` is repeatable and uses `service:port:subdomain[:id]`. The optional ID is required when one service has more than one public route. Omitting every `--publish` creates a private stack.
+
+The terminal UI shows detected services and container ports, then opens a resource list. Add, edit, or remove any number of public resources; each resource controls its service, port, public subdomain, stable ID, display name, protocol, health check, and SSO setting. Press `n` to import or replace the stack's runtime `.env` file. AegisNode copies the original Compose file to `stacks/<name>/compose.yaml` and writes the reviewed public-resource contract to `stacks/<name>/aegisnode.yaml`. It does not inject labels into the consumer-owned Compose file.
+
+Runtime environment values are stored in the profile's owner-only `secrets.json`, outside the configuration repository. Commit a `.env.example` when the required keys need documentation, not the populated file. Deployment writes populated values to `/etc/aegisnode/stacks/<name>.env` with mode `0600` and passes that file explicitly to every Compose command. Only variable names are shown in the TUI and CLI. The Compose file must explicitly consume values through `environment`, `env_file`, or `secrets`; AegisNode does not inject every value into every service. Update or remove an environment without editing the stack:
+
+```sh
+bin/aegisnode stack env set --profile <profile-id> --stack <name> --file /path/to/.env
+bin/aegisnode stack env remove --profile <profile-id> --stack <name>
+```
 
 During deployment, AegisNode generates an override that:
 
-- Connects the selected service to the external `aegis-public` network.
+- Connects every published service to the external `aegis-public` network.
 - Adds stable Pangolin resource, target, SSO, and health-check labels.
-- Removes direct host port publishing from the selected service so Pangolin remains the public entry point.
+- Removes direct host port publishing from published services so Pangolin remains the public entry point.
 - Validates the merged Compose model before stopping or replacing containers.
 - Restarts Newt and verifies that Pangolin created exactly one expected public resource.
 

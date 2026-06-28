@@ -509,14 +509,99 @@ func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
 		t.Fatalf("Compose intake did not open stack editor: %+v", result)
 	}
 	result.stackInputs[0].SetValue("site")
-	result.focus = len(result.stackInputs) - 1
-	updated, _ = result.updateStackEditor(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = result.updateStackEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
 	result = updated.(profileSetupModel)
 	if result.screen != profileSetupScreenStacks || len(result.stacks) != 1 || result.stacks[0].Name != "site" {
 		t.Fatalf("stack editor did not save in-session: %+v", result)
 	}
 	if result.err != "" {
 		t.Fatalf("stack editor left an error: %s", result.err)
+	}
+}
+
+func TestStackEditorManagesMultipleResourcesAndRuntimeEnvironment(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init")
+	compose := []byte(`services:
+  web:
+    image: nginx
+    expose: [80]
+  api:
+    image: example/api
+    expose: [3000]
+`)
+	options := stackAddOptions{
+		Name: "suite",
+		Resources: []stackPublicResource{
+			{ID: "web", Service: "web", Name: "Web", Subdomain: "web", Port: 80, Protocol: "http"},
+			{ID: "api", Service: "api", Name: "API", Subdomain: "api", Port: 3000, Protocol: "http"},
+		},
+	}
+	if err := writeEditableStack(repository, "", options, compose); err != nil {
+		t.Fatal(err)
+	}
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{IP: "203.0.113.10", ConfigRepositoryPath: repository})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{Runs: map[string]SetupRun{}}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	stacks, err := loadEditableStacks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel([]profileChoice{{Profile: profile, State: state}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.openStackEditor(stacks[0])
+	if model.screen != profileSetupScreenStackEditor || len(model.stackResources) != 2 || model.err != "" {
+		t.Fatalf("multi-resource stack did not open: %+v", model.stackResources)
+	}
+
+	updated, _ := model.updateStackEditor(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	model = updated.(profileSetupModel)
+	if model.screen != profileSetupScreenStackResourceEditor {
+		t.Fatalf("resource editor did not open: %v", model.screen)
+	}
+	model.stackResourceInputs[3].SetValue("app")
+	updated, _ = model.updateStackResourceEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
+	model = updated.(profileSetupModel)
+	if model.stackResources[0].Subdomain != "app" {
+		t.Fatalf("resource edit was not retained: %+v", model.stackResources)
+	}
+
+	environmentPath := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(environmentPath, []byte("API_KEY=secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	updated, _ = model.updateStackEditor(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	model = updated.(profileSetupModel)
+	model.stackEnvironmentInput.SetValue(environmentPath)
+	updated, _ = model.updateStackEnvironment(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(profileSetupModel)
+	updated, _ = model.updateStackEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
+	model = updated.(profileSetupModel)
+	if model.screen != profileSetupScreenStacks || model.err != "" {
+		t.Fatalf("stack editor did not save: %v %s", model.screen, model.err)
+	}
+	secrets, err := store.LoadSecrets(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secrets.StackEnvironments["suite"] != "API_KEY=secret\n" {
+		t.Fatal("runtime environment was not saved in profile secrets")
+	}
+	reloaded, err := loadEditableStacks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded[0].Metadata.PublicResources) != 2 ||
+		reloaded[0].Metadata.PublicResources[0].Subdomain != "app" {
+		t.Fatalf("multi-resource metadata was not saved: %+v", reloaded[0].Metadata)
 	}
 }
 
@@ -533,7 +618,8 @@ func TestProfileDashboardDetectsRepositoryStacks(t *testing.T) {
 	}
 	metadata := `version: 1
 public_resources:
-  - service: web
+  - id: web
+    service: web
     name: Arrs
     subdomain: arrs
     port: 80

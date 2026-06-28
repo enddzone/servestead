@@ -15,14 +15,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
 	"gopkg.in/yaml.v3"
 )
 
 const stackMetadataFilename = "aegisnode.yaml"
 
 var stackSlugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+var environmentKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type stackMetadata struct {
 	Version         int                   `yaml:"version"`
@@ -37,9 +36,11 @@ type configuredStack struct {
 	ComposeSHA256 string
 	Resources     []stackPublicResource
 	Files         map[string]string
+	Environment   string
 }
 
 type stackPublicResource struct {
+	ID          string                   `yaml:"id"`
 	Service     string                   `yaml:"service"`
 	Name        string                   `yaml:"name"`
 	Subdomain   string                   `yaml:"subdomain"`
@@ -61,16 +62,11 @@ type composeServiceSummary struct {
 }
 
 type stackAddOptions struct {
-	ProfileID   string
-	Compose     string
-	Name        string
-	Service     string
-	Port        int
-	Subdomain   string
-	DisplayName string
-	HealthPath  string
-	SSO         bool
-	Yes         bool
+	ProfileID       string
+	Compose         string
+	Name            string
+	Resources       []stackPublicResource
+	EnvironmentFile string
 }
 
 type editableStack struct {
@@ -114,6 +110,9 @@ func loadEditableStacks(repositoryPath string) ([]editableStack, error) {
 		if err := yaml.Unmarshal(metadataData, &metadata); err != nil {
 			return nil, fmt.Errorf("stack %s metadata: %w", entry.Name(), err)
 		}
+		if err := validateStackMetadata(entry.Name(), metadata, services); err != nil {
+			return nil, fmt.Errorf("stack %s metadata: %w", entry.Name(), err)
+		}
 		stacks = append(stacks, editableStack{
 			Name: entry.Name(), Compose: string(compose), Metadata: metadata, Services: services,
 		})
@@ -127,7 +126,8 @@ func writeEditableStack(repositoryPath, originalName string, options stackAddOpt
 	if err != nil {
 		return err
 	}
-	if err := validateStackAddOptions(options, services); err != nil {
+	metadata := stackMetadata{Version: 1, PublicResources: options.Resources}
+	if err := validateStackMetadata(options.Name, metadata, services); err != nil {
 		return err
 	}
 	stacksDirectory := filepath.Join(expandUserPath(repositoryPath), "stacks")
@@ -156,14 +156,6 @@ func writeEditableStack(repositoryPath, originalName string, options stackAddOpt
 	}
 	if err := os.MkdirAll(destination, 0700); err != nil {
 		return err
-	}
-	metadata := stackMetadata{
-		Version: 1,
-		PublicResources: []stackPublicResource{{
-			Service: options.Service, Name: options.DisplayName, Subdomain: options.Subdomain,
-			Port: options.Port, Protocol: "http", SSO: options.SSO,
-			Healthcheck: stackResourceHealthcheck{Enabled: options.HealthPath != "", Path: options.HealthPath},
-		}},
 	}
 	metadataData, err := yaml.Marshal(metadata)
 	if err != nil {
@@ -344,23 +336,39 @@ func pushStackRepository(ctx context.Context, repositoryPath string) error {
 }
 
 func runStack(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 || args[0] != "add" {
-		return errors.New(`usage: aegisnode stack add --profile <id> --compose <path>`)
+	if len(args) == 0 {
+		return errors.New(`usage: aegisnode stack <add|env>`)
 	}
+	switch args[0] {
+	case "add":
+		return runStackAdd(ctx, args[1:], stdout, stderr)
+	case "env":
+		return runStackEnvironment(args[1:], stdout, stderr)
+	default:
+		return fmt.Errorf("unknown stack command %q", args[0])
+	}
+}
+
+type stackPublishFlags []string
+
+func (values *stackPublishFlags) String() string { return strings.Join(*values, ",") }
+
+func (values *stackPublishFlags) Set(value string) error {
+	*values = append(*values, value)
+	return nil
+}
+
+func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("stack add", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	options := stackAddOptions{SSO: true, HealthPath: "/"}
+	options := stackAddOptions{}
+	var publications stackPublishFlags
 	flags.StringVar(&options.ProfileID, "profile", "", "saved AegisNode profile ID")
 	flags.StringVar(&options.Compose, "compose", "", "Docker Compose file to add")
 	flags.StringVar(&options.Name, "name", "", "stack name used in the repository")
-	flags.StringVar(&options.Service, "service", "", "Compose service to publish")
-	flags.IntVar(&options.Port, "port", 0, "service container port")
-	flags.StringVar(&options.Subdomain, "subdomain", "", "public subdomain")
-	flags.StringVar(&options.DisplayName, "display-name", "", "Pangolin resource display name")
-	flags.StringVar(&options.HealthPath, "health-path", "/", "HTTP health-check path")
-	flags.BoolVar(&options.SSO, "sso", true, "require Pangolin SSO")
-	flags.BoolVar(&options.Yes, "yes", false, "run non-interactively")
-	if err := flags.Parse(args[1:]); err != nil {
+	flags.Var(&publications, "publish", "public route service:port:subdomain[:id] (repeatable)")
+	flags.StringVar(&options.EnvironmentFile, "env-file", "", "runtime environment file stored outside Git")
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
@@ -379,13 +387,11 @@ func runStack(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return err
 	}
 	options = withStackAddDefaults(options, services)
-	if !options.Yes && isInteractiveWriter(stderr) {
-		options, err = collectStackAddOptions(options, services, stderr)
-		if err != nil {
-			return err
-		}
+	options.Resources, err = parseStackPublications(publications)
+	if err != nil {
+		return err
 	}
-	if err := validateStackAddOptions(options, services); err != nil {
+	if err := validateStackMetadata(options.Name, stackMetadata{Version: 1, PublicResources: options.Resources}, services); err != nil {
 		return err
 	}
 
@@ -397,8 +403,21 @@ func runStack(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
 	}
-	if profile.BaseDomain == "" {
+	if profile.BaseDomain == "" && len(options.Resources) > 0 {
 		return errors.New("profile base domain is required before adding a public stack")
+	}
+	metadata := stackMetadata{Version: 1, PublicResources: options.Resources}
+	override, err := generateStackPangolinOverride(options.Name, metadata, services, profile)
+	if err != nil {
+		return err
+	}
+	var environment string
+	var environmentKeys []string
+	if options.EnvironmentFile != "" {
+		environment, environmentKeys, err = readStackEnvironmentFile(options.EnvironmentFile)
+		if err != nil {
+			return err
+		}
 	}
 	repositoryPath := profile.ConfigRepositoryPath
 	if repositoryPath == "" {
@@ -457,21 +476,6 @@ func runStack(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 			return err
 		}
 	}
-	metadata := stackMetadata{
-		Version: 1,
-		PublicResources: []stackPublicResource{{
-			Service:   options.Service,
-			Name:      options.DisplayName,
-			Subdomain: options.Subdomain,
-			Port:      options.Port,
-			Protocol:  "http",
-			SSO:       options.SSO,
-			Healthcheck: stackResourceHealthcheck{
-				Enabled: options.HealthPath != "",
-				Path:    options.HealthPath,
-			},
-		}},
-	}
 	metadataData, err := yaml.Marshal(metadata)
 	if err != nil {
 		return err
@@ -479,19 +483,28 @@ func runStack(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if err := os.WriteFile(filepath.Join(directory, stackMetadataFilename), metadataData, 0600); err != nil {
 		return err
 	}
-	override, err := generateStackPangolinOverride(options.Name, metadata, services, profile)
-	if err != nil {
-		return err
+	if options.EnvironmentFile != "" {
+		if err := saveStackEnvironment(store, profile.ID, options.Name, environment); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Runtime environment saved outside Git (%d keys).\n", len(environmentKeys))
 	}
 
 	fmt.Fprintf(stdout, "Stack scaffold created: %s\n", directory)
 	if sourcePath != destinationPath {
 		fmt.Fprintln(stdout, "Only the Compose file was imported. Copy any relative bind-mount, env, or configuration files into the stack directory before committing.")
 	}
-	fmt.Fprintf(stdout, "Public resource: https://%s.%s -> %s:%d\n", options.Subdomain, profile.BaseDomain, options.Service, options.Port)
+	if len(metadata.PublicResources) == 0 {
+		fmt.Fprintln(stdout, "Public resources: none; this stack will remain private.")
+	}
+	for _, resource := range metadata.PublicResources {
+		fmt.Fprintf(stdout, "Public resource: https://%s.%s -> %s:%d\n", resource.Subdomain, profile.BaseDomain, resource.Service, resource.Port)
+	}
 	fmt.Fprintln(stdout, "Review the imported Compose file for literal secrets; AegisNode does not move application-specific secrets out of Git.")
-	if servicePublishesPorts(services, options.Service) {
-		fmt.Fprintln(stdout, "AegisNode will suppress the selected service's direct host port bindings in its generated deployment override.")
+	for _, resource := range metadata.PublicResources {
+		if servicePublishesPorts(services, resource.Service) {
+			fmt.Fprintf(stdout, "AegisNode will suppress %s's direct host port bindings in its generated deployment override.\n", resource.Service)
+		}
 	}
 	fmt.Fprintln(stdout, "AegisNode will generate and validate these deployment labels:")
 	for _, label := range pangolinLabelsFromOverride(override) {
@@ -502,6 +515,145 @@ func runStack(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	fmt.Fprintf(stdout, "  git -C %s commit -m %s\n", shellQuote(revision.Path), shellQuote("Add "+options.Name+" stack"))
 	fmt.Fprintln(stdout, "Then open the profile dashboard, press s, select this stack, and press r to deploy it independently.")
 	return nil
+}
+
+func runStackEnvironment(args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 || (args[0] != "set" && args[0] != "remove") {
+		return errors.New(`usage: aegisnode stack env <set|remove> --profile <id> --stack <name> [--file <path>]`)
+	}
+	action := args[0]
+	flags := flag.NewFlagSet("stack env "+action, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	var profileID, stackName, path string
+	flags.StringVar(&profileID, "profile", "", "saved AegisNode profile ID")
+	flags.StringVar(&stackName, "stack", "", "stack name")
+	flags.StringVar(&path, "file", "", "environment file")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if profileID == "" || !stackSlugPattern.MatchString(stackName) {
+		return errors.New("--profile and a valid --stack are required")
+	}
+	store, err := newDefaultProfileStore()
+	if err != nil {
+		return err
+	}
+	profile, _, err := store.Load(profileID)
+	if err != nil {
+		return fmt.Errorf("load profile: %w", err)
+	}
+	if profile.ConfigRepositoryPath == "" {
+		return errors.New("profile configuration repository is not ready")
+	}
+	metadataPath := filepath.Join(expandUserPath(profile.ConfigRepositoryPath), "stacks", stackName, stackMetadataFilename)
+	if _, err := os.Stat(metadataPath); err != nil {
+		return fmt.Errorf("stack %q is not configured: %w", stackName, err)
+	}
+	if action == "remove" {
+		if path != "" {
+			return errors.New("--file cannot be used with env remove")
+		}
+		if err := saveStackEnvironment(store, profileID, stackName, ""); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Removed the runtime environment for %s. Deploy or synchronize the stack to apply it.\n", stackName)
+		return nil
+	}
+	if path == "" {
+		return errors.New("--file is required with env set")
+	}
+	environment, keys, err := readStackEnvironmentFile(path)
+	if err != nil {
+		return err
+	}
+	if err := saveStackEnvironment(store, profileID, stackName, environment); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Saved %d runtime environment keys for %s outside Git: %s\n", len(keys), stackName, strings.Join(keys, ", "))
+	fmt.Fprintln(stdout, "Deploy or synchronize the stack to apply the environment.")
+	return nil
+}
+
+func parseStackPublications(values []string) ([]stackPublicResource, error) {
+	resources := make([]stackPublicResource, 0, len(values))
+	for _, value := range values {
+		parts := strings.Split(value, ":")
+		if len(parts) != 3 && len(parts) != 4 {
+			return nil, fmt.Errorf("publication %q must use service:port:subdomain[:id]", value)
+		}
+		port, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return nil, fmt.Errorf("publication %q has an invalid port", value)
+		}
+		id := parts[0]
+		if len(parts) == 4 {
+			id = parts[3]
+		}
+		resources = append(resources, stackPublicResource{
+			ID: id, Service: parts[0], Port: port, Subdomain: parts[2],
+			Name: titleFromSlug(parts[2]), Protocol: "http", SSO: true,
+			Healthcheck: stackResourceHealthcheck{Enabled: true, Path: "/"},
+		})
+	}
+	return resources, nil
+}
+
+func readStackEnvironmentFile(path string) (string, []string, error) {
+	data, err := os.ReadFile(expandUserPath(path))
+	if err != nil {
+		return "", nil, fmt.Errorf("read environment file: %w", err)
+	}
+	return readStackEnvironmentContent(string(data))
+}
+
+func readStackEnvironmentContent(content string) (string, []string, error) {
+	if strings.IndexByte(content, 0) >= 0 {
+		return "", nil, errors.New("environment file contains a NUL byte")
+	}
+	keys := []string{}
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		key, _, found := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
+		if !found || !environmentKeyPattern.MatchString(key) {
+			continue
+		}
+		if !containsString(keys, key) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	environment := content
+	if environment != "" && !strings.HasSuffix(environment, "\n") {
+		environment += "\n"
+	}
+	return environment, keys, nil
+}
+
+func saveStackEnvironment(store ProfileStore, profileID, stackName, environment string) error {
+	if !stackSlugPattern.MatchString(stackName) {
+		return errors.New("stack name must be a lowercase DNS label")
+	}
+	secrets, err := store.LoadSecrets(profileID)
+	if err != nil {
+		return err
+	}
+	if secrets.StackEnvironments == nil {
+		secrets.StackEnvironments = map[string]string{}
+	}
+	if environment == "" {
+		delete(secrets.StackEnvironments, stackName)
+	} else {
+		secrets.StackEnvironments[stackName] = environment
+	}
+	return store.SaveSecrets(profileID, secrets)
 }
 
 func inspectComposeServices(data []byte) ([]composeServiceSummary, error) {
@@ -568,115 +720,137 @@ func withStackAddDefaults(options stackAddOptions, services []composeServiceSumm
 		}
 		options.Name = slugifyStackValue(base)
 	}
-	if options.Service == "" && len(services) == 1 {
-		options.Service = services[0].Name
-	}
-	if options.Port == 0 {
-		for _, service := range services {
-			if service.Name == options.Service && len(service.ContainerPorts) == 1 {
-				options.Port = service.ContainerPorts[0]
-			}
-		}
-	}
-	if options.Subdomain == "" {
-		options.Subdomain = options.Name
-	}
-	if options.DisplayName == "" {
-		options.DisplayName = titleFromSlug(options.Name)
-	}
 	return options
 }
 
-func validateStackAddOptions(options stackAddOptions, services []composeServiceSummary) error {
-	if !stackSlugPattern.MatchString(options.Name) {
-		return errors.New("stack name must be a lowercase DNS label")
+func suggestedStackResource(stackName string, services []composeServiceSummary) (stackPublicResource, bool) {
+	if len(services) != 1 || len(services[0].ContainerPorts) != 1 {
+		return stackPublicResource{}, false
 	}
-	if !stackSlugPattern.MatchString(options.Subdomain) {
+	service := services[0]
+	return stackPublicResource{
+		ID: service.Name, Service: service.Name, Name: titleFromSlug(stackName),
+		Subdomain: stackName, Port: service.ContainerPorts[0], Protocol: "http", SSO: true,
+		Healthcheck: stackResourceHealthcheck{Enabled: true, Path: "/"},
+	}, true
+}
+
+func validateStackResource(resource stackPublicResource, services []composeServiceSummary) error {
+	if !stackSlugPattern.MatchString(resource.Subdomain) {
 		return errors.New("subdomain must be a lowercase DNS label")
 	}
-	if options.DisplayName == "" {
+	if resource.Name == "" {
 		return errors.New("display name is required")
 	}
-	if strings.ContainsAny(options.DisplayName, "\r\n") || strings.ContainsAny(options.HealthPath, "\r\n") {
+	if strings.ContainsAny(resource.Name, "\r\n") || strings.ContainsAny(resource.Healthcheck.Path, "\r\n") {
 		return errors.New("display name and health-check path must be single-line values")
 	}
-	if options.Port < 1 || options.Port > 65535 {
+	if resource.Port < 1 || resource.Port > 65535 {
 		return errors.New("service port must be between 1 and 65535")
 	}
 	found := false
 	for _, service := range services {
-		if service.Name == options.Service {
+		if service.Name == resource.Service {
 			found = true
 			break
 		}
 	}
 	if !found {
-		return fmt.Errorf("service %q does not exist in the Compose file", options.Service)
+		return fmt.Errorf("service %q does not exist in the Compose file", resource.Service)
 	}
-	if options.HealthPath != "" && !strings.HasPrefix(options.HealthPath, "/") {
+	if resource.Healthcheck.Path != "" && !strings.HasPrefix(resource.Healthcheck.Path, "/") {
 		return errors.New("health-check path must start with /")
 	}
 	return nil
 }
 
-func generateStackPangolinOverride(stackName string, metadata stackMetadata, services []composeServiceSummary, profile Profile) (string, error) {
+func validateStackMetadata(stackName string, metadata stackMetadata, services []composeServiceSummary) error {
 	if metadata.Version != 1 {
-		return "", fmt.Errorf("unsupported stack metadata version %d", metadata.Version)
+		return fmt.Errorf("unsupported stack metadata version %d", metadata.Version)
+	}
+	if !stackSlugPattern.MatchString(stackName) {
+		return errors.New("stack name must be a lowercase DNS label")
+	}
+	ids := map[string]bool{}
+	subdomains := map[string]bool{}
+	for _, resource := range metadata.PublicResources {
+		if !stackSlugPattern.MatchString(resource.ID) {
+			return fmt.Errorf("resource ID %q must be a lowercase DNS label", resource.ID)
+		}
+		if ids[resource.ID] {
+			return fmt.Errorf("resource ID %q is duplicated", resource.ID)
+		}
+		ids[resource.ID] = true
+		if subdomains[resource.Subdomain] {
+			return fmt.Errorf("resource subdomain %q is duplicated", resource.Subdomain)
+		}
+		subdomains[resource.Subdomain] = true
+		if resource.Protocol != "http" && resource.Protocol != "https" {
+			return fmt.Errorf("resource %q protocol must be http or https", resource.ID)
+		}
+		if resource.Healthcheck.Enabled && resource.Healthcheck.Path == "" {
+			return fmt.Errorf("resource %q enables health checks but has no path", resource.ID)
+		}
+		if err := validateStackResource(resource, services); err != nil {
+			return fmt.Errorf("resource %q: %w", resource.ID, err)
+		}
+	}
+	return nil
+}
+
+func generateStackPangolinOverride(stackName string, metadata stackMetadata, services []composeServiceSummary, profile Profile) (string, error) {
+	if err := validateStackMetadata(stackName, metadata, services); err != nil {
+		return "", err
 	}
 	if len(metadata.PublicResources) == 0 {
-		return "", errors.New("stack metadata must define at least one public resource")
+		return "services: {}\n", nil
 	}
 	var builder strings.Builder
 	builder.WriteString("services:\n")
-	seenServices := map[string]bool{}
+	resourcesByService := map[string][]stackPublicResource{}
+	serviceOrder := []string{}
 	for _, resource := range metadata.PublicResources {
-		if seenServices[resource.Service] {
-			return "", fmt.Errorf("service %q has more than one public resource; use one resource per service", resource.Service)
+		if len(resourcesByService[resource.Service]) == 0 {
+			serviceOrder = append(serviceOrder, resource.Service)
 		}
-		seenServices[resource.Service] = true
-		if resource.Protocol != "" && resource.Protocol != "http" && resource.Protocol != "https" {
-			return "", fmt.Errorf("resource %q protocol must be http or https", resource.Name)
-		}
-		if resource.SSO && firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail) == "" {
-			return "", fmt.Errorf("resource %q enables SSO but the profile has no Pangolin administrator email", resource.Name)
-		}
-		if err := validateStackAddOptions(stackAddOptions{
-			Name: stackName, Service: resource.Service, Port: resource.Port,
-			Subdomain: resource.Subdomain, DisplayName: resource.Name, HealthPath: resource.Healthcheck.Path,
-		}, services); err != nil {
-			return "", err
-		}
-		resourceID := "aegisnode-" + stackName + "-" + slugifyStackValue(resource.Service)
-		prefix := "pangolin.public-resources." + resourceID
-		builder.WriteString("  " + resource.Service + ":\n")
-		if servicePublishesPorts(services, resource.Service) {
+		resourcesByService[resource.Service] = append(resourcesByService[resource.Service], resource)
+	}
+	for _, service := range serviceOrder {
+		builder.WriteString("  " + service + ":\n")
+		if servicePublishesPorts(services, service) {
 			builder.WriteString("    ports: !reset []\n")
 		}
 		builder.WriteString("    networks:\n      - " + aegisPublicNetwork + "\n")
 		builder.WriteString("    labels:\n")
-		labels := []string{
-			prefix + ".name=" + resource.Name,
-			prefix + ".protocol=" + firstNonEmpty(resource.Protocol, "http"),
-			prefix + ".full-domain=" + resource.Subdomain + "." + profile.BaseDomain,
-			prefix + ".auth.sso-enabled=" + strconv.FormatBool(resource.SSO),
-			prefix + ".targets[0].hostname=" + resource.Service,
-			prefix + ".targets[0].port=" + strconv.Itoa(resource.Port),
-			prefix + ".targets[0].method=" + firstNonEmpty(resource.Protocol, "http"),
-		}
-		if resource.SSO {
-			labels = append(labels, prefix+".auth.sso-users[0]="+firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail))
-		}
-		if resource.Healthcheck.Enabled {
-			labels = append(labels,
-				prefix+".targets[0].healthcheck.enabled=true",
-				prefix+".targets[0].healthcheck.hostname="+resource.Service,
-				prefix+".targets[0].healthcheck.port="+strconv.Itoa(resource.Port),
-				prefix+".targets[0].healthcheck.scheme="+firstNonEmpty(resource.Protocol, "http"),
-				prefix+".targets[0].healthcheck.path="+firstNonEmpty(resource.Healthcheck.Path, "/"),
-			)
-		}
-		for _, label := range labels {
-			builder.WriteString("      - " + yamlDoubleQuote(label) + "\n")
+		for _, resource := range resourcesByService[service] {
+			if resource.SSO && firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail) == "" {
+				return "", fmt.Errorf("resource %q enables SSO but the profile has no Pangolin administrator email", resource.ID)
+			}
+			prefix := "pangolin.public-resources.aegisnode-" + stackName + "-" + resource.ID
+			labels := []string{
+				prefix + ".name=" + resource.Name,
+				prefix + ".protocol=" + resource.Protocol,
+				prefix + ".full-domain=" + resource.Subdomain + "." + profile.BaseDomain,
+				prefix + ".auth.sso-enabled=" + strconv.FormatBool(resource.SSO),
+				prefix + ".targets[0].hostname=" + resource.Service,
+				prefix + ".targets[0].port=" + strconv.Itoa(resource.Port),
+				prefix + ".targets[0].method=" + resource.Protocol,
+			}
+			if resource.SSO {
+				labels = append(labels, prefix+".auth.sso-users[0]="+firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail))
+			}
+			if resource.Healthcheck.Enabled {
+				labels = append(labels,
+					prefix+".targets[0].healthcheck.enabled=true",
+					prefix+".targets[0].healthcheck.hostname="+resource.Service,
+					prefix+".targets[0].healthcheck.port="+strconv.Itoa(resource.Port),
+					prefix+".targets[0].healthcheck.scheme="+resource.Protocol,
+					prefix+".targets[0].healthcheck.path="+resource.Healthcheck.Path,
+				)
+			}
+			for _, label := range labels {
+				builder.WriteString("      - " + yamlDoubleQuote(label) + "\n")
+			}
 		}
 	}
 	builder.WriteString("networks:\n  " + aegisPublicNetwork + ":\n    external: true\n")
@@ -705,7 +879,7 @@ func validateConfiguredStackSet(stacks []configuredStack) error {
 				return fmt.Errorf("stack %s subdomain %q conflicts with %s", stack.Name, resource.Subdomain, owner)
 			}
 			domains[resource.Subdomain] = stack.Name
-			resourceID := "aegisnode-" + stack.Name + "-" + slugifyStackValue(resource.Service)
+			resourceID := "aegisnode-" + stack.Name + "-" + resource.ID
 			if owner, exists := resourceIDs[resourceID]; exists {
 				return fmt.Errorf("stack %s resource ID %q conflicts with stack %s", stack.Name, resourceID, owner)
 			}
@@ -767,130 +941,4 @@ func copyFile(source, destination string, mode os.FileMode) error {
 		return err
 	}
 	return os.WriteFile(destination, data, mode)
-}
-
-type stackAddModel struct {
-	options   stackAddOptions
-	services  []composeServiceSummary
-	inputs    []textinput.Model
-	focus     int
-	err       string
-	done      bool
-	cancelled bool
-}
-
-func collectStackAddOptions(options stackAddOptions, services []composeServiceSummary, output io.Writer) (stackAddOptions, error) {
-	model := newStackAddModel(options, services)
-	final, err := tea.NewProgram(model, tea.WithOutput(output), tea.WithAltScreen()).Run()
-	if err != nil {
-		return options, err
-	}
-	result := final.(stackAddModel)
-	if result.cancelled {
-		return options, errors.New("stack add cancelled")
-	}
-	return result.optionsFromInputs()
-}
-
-func newStackAddModel(options stackAddOptions, services []composeServiceSummary) stackAddModel {
-	inputs := newSetupInputs([]setupInputField{
-		{label: "Stack name", value: options.Name},
-		{label: "Service to publish", value: options.Service},
-		{label: "Container port", value: func() string {
-			if options.Port == 0 {
-				return ""
-			}
-			return strconv.Itoa(options.Port)
-		}()},
-		{label: "Public subdomain", value: options.Subdomain},
-		{label: "Pangolin display name", value: options.DisplayName},
-		{label: "Health-check path", value: options.HealthPath},
-	})
-	inputs[0].Focus()
-	return stackAddModel{options: options, services: services, inputs: inputs}
-}
-
-func (model stackAddModel) Init() tea.Cmd { return textinput.Blink }
-
-func (model stackAddModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
-	key, ok := message.(tea.KeyMsg)
-	if !ok {
-		return model, nil
-	}
-	switch key.String() {
-	case "ctrl+c", "esc":
-		model.cancelled = true
-		return model, tea.Quit
-	case "tab", "down":
-		model.inputs[model.focus].Blur()
-		model.focus = (model.focus + 1) % len(model.inputs)
-		model.inputs[model.focus].Focus()
-		return model, nil
-	case "shift+tab", "up":
-		model.inputs[model.focus].Blur()
-		model.focus--
-		if model.focus < 0 {
-			model.focus = len(model.inputs) - 1
-		}
-		model.inputs[model.focus].Focus()
-		return model, nil
-	case "enter":
-		if model.focus < len(model.inputs)-1 {
-			model.inputs[model.focus].Blur()
-			model.focus++
-			model.inputs[model.focus].Focus()
-			return model, nil
-		}
-		options, err := model.optionsFromInputs()
-		if err != nil {
-			model.err = err.Error()
-			return model, nil
-		}
-		model.options = options
-		model.done = true
-		return model, tea.Quit
-	}
-	var command tea.Cmd
-	model.inputs[model.focus], command = model.inputs[model.focus].Update(key)
-	return model, command
-}
-
-func (model stackAddModel) View() string {
-	var builder strings.Builder
-	builder.WriteString(setupTitleStyle.Render("Add Compose stack"))
-	builder.WriteString("\n")
-	builder.WriteString("Detected services:\n")
-	for _, service := range model.services {
-		ports := "no declared ports"
-		if len(service.ContainerPorts) > 0 {
-			values := make([]string, len(service.ContainerPorts))
-			for index, port := range service.ContainerPorts {
-				values[index] = strconv.Itoa(port)
-			}
-			ports = strings.Join(values, ", ")
-		}
-		builder.WriteString(fmt.Sprintf("  %s: %s\n", service.Name, ports))
-	}
-	builder.WriteString("\nAegisNode will preserve the Compose file and generate a deployment override for Pangolin.\n\n")
-	builder.WriteString("Review application-specific secrets before committing; AegisNode cannot infer their storage requirements.\n\n")
-	for _, input := range model.inputs {
-		builder.WriteString(input.View())
-		builder.WriteByte('\n')
-	}
-	if model.err != "" {
-		builder.WriteString("\n" + setupErrorStyle.Render(model.err))
-	}
-	builder.WriteString("\nenter next • tab field • esc cancel\n")
-	return builder.String()
-}
-
-func (model stackAddModel) optionsFromInputs() (stackAddOptions, error) {
-	options := model.options
-	options.Name = strings.TrimSpace(model.inputs[0].Value())
-	options.Service = strings.TrimSpace(model.inputs[1].Value())
-	options.Port, _ = strconv.Atoi(strings.TrimSpace(model.inputs[2].Value()))
-	options.Subdomain = strings.TrimSpace(model.inputs[3].Value())
-	options.DisplayName = strings.TrimSpace(model.inputs[4].Value())
-	options.HealthPath = strings.TrimSpace(model.inputs[5].Value())
-	return options, validateStackAddOptions(options, model.services)
 }

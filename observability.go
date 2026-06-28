@@ -14,6 +14,7 @@ import (
 const observabilityStackDirectory = "/opt/aegisnode/stacks/observability"
 const observabilityRepositoryDirectory = "/opt/aegisnode/repository"
 const observabilityEnvironmentPath = "/etc/aegisnode/observability.env"
+const stackEnvironmentDirectory = "/etc/aegisnode/stacks"
 
 const (
 	beszelImage      = "docker.io/henrygd/beszel:0.18.7"
@@ -118,7 +119,9 @@ func configuredStackTasks(config observabilityConfig, stack configuredStack, gro
 	composePath := observabilityRepositoryDirectory + "/stacks/" + stack.Name + "/compose.yaml"
 	overridePath := "/opt/aegisnode/generated/" + stack.Name + ".pangolin.yaml"
 	deploymentPath := observabilityRepositoryDirectory + ".stack-" + stack.Name + ".deployment"
-	composeCommand := "docker compose -p " + shellQuote("aegisnode-"+stack.Name) +
+	environmentPath := stackEnvironmentDirectory + "/" + stack.Name + ".env"
+	composeCommand := "docker compose --env-file " + shellQuote(environmentPath) +
+		" -p " + shellQuote("aegisnode-"+stack.Name) +
 		" -f " + shellQuote(composePath) + " -f " + shellQuote(overridePath)
 
 	tasks := []Task{}
@@ -150,37 +153,63 @@ func configuredStackTasks(config observabilityConfig, stack configuredStack, gro
 		tasks = append(tasks, Task{Name: "Deploy committed " + stack.Name + " stack", Apply: commandScript(deployCommands...)})
 	}
 	tasks = append(tasks,
-		Task{Name: "Generate " + stack.Name + " Pangolin override", Apply: commandScript(
+		stackEnvironmentTask(stack, environmentPath),
+		Task{Name: "Generate " + stack.Name + " deployment override", Apply: commandScript(
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" /opt/aegisnode/generated",
 			remoteWriteFileCommand(overridePath, stack.Override, "root", group, 0640),
 		)},
-		Task{Name: "Validate " + stack.Name + " Compose and Pangolin labels", Apply: commandScript(
-			composeCommand+" config --quiet",
-			composeCommand+" config --format json | python3 -c "+shellQuote(`import json,sys
+	)
+	validationCommands := []string{composeCommand + " config --quiet"}
+	validationName := "Validate " + stack.Name + " Compose"
+	if len(stack.Resources) > 0 {
+		validationName += " and Pangolin labels"
+		validationCommands = append(validationCommands, composeCommand+" config --format json | python3 -c "+shellQuote(`import json,sys
 data=json.load(sys.stdin)
 labels={}
 for service in data["services"].values():
  labels.update(service.get("labels",{}))
 required=[".full-domain",".targets[0].hostname",".targets[0].port"]
 ok=all(any(key.endswith(suffix) for key in labels) for suffix in required)
-sys.exit(0 if ok else 1)`),
-		)},
-		Task{Name: "Start " + stack.Name + " stack and reconcile Pangolin", Apply: commandScript(
+sys.exit(0 if ok else 1)`))
+	}
+	tasks = append(tasks, Task{Name: validationName, Apply: commandScript(validationCommands...)})
+	if len(stack.Resources) > 0 {
+		tasks = append(tasks, Task{Name: "Start " + stack.Name + " stack and reconcile Pangolin", Apply: commandScript(
 			"docker stop aegis-newt >/dev/null",
 			"start_result=0",
 			composeCommand+" pull && "+composeCommand+" up -d --remove-orphans || start_result=$?",
 			"docker start aegis-newt >/dev/null",
 			"exit \"$start_result\"",
-		)},
-		Task{Name: "Verify " + stack.Name + " Pangolin public resources", Apply: stackResourceVerifyCommand(config, stack)},
-		Task{Name: "Verify " + stack.Name + " stack", Apply: commandScript(
-			"expected=\"$("+composeCommand+" config --services)\"",
-			"running=\"$("+composeCommand+" ps --services --status running)\"",
-			"for service in $expected; do printf '%s\\n' \"$running\" | grep -Fx \"$service\" >/dev/null; done",
-			composeCommand+" ps",
-		)},
-	)
+		)})
+		tasks = append(tasks, Task{Name: "Verify " + stack.Name + " Pangolin public resources", Apply: stackResourceVerifyCommand(config, stack)})
+	} else {
+		tasks = append(tasks, Task{Name: "Start " + stack.Name + " stack", Apply: commandScript(
+			composeCommand+" pull",
+			composeCommand+" up -d --remove-orphans",
+		)})
+	}
+	tasks = append(tasks, Task{Name: "Verify " + stack.Name + " stack", Apply: commandScript(
+		"expected=\"$("+composeCommand+" config --services)\"",
+		"running=\"$("+composeCommand+" ps --services --status running)\"",
+		"for service in $expected; do printf '%s\\n' \"$running\" | grep -Fx \"$service\" >/dev/null; done",
+		composeCommand+" ps",
+	)})
 	return tasks
+}
+
+func stackEnvironmentTask(stack configuredStack, path string) Task {
+	script := commandScript(
+		"install -d -m 0700 -o root -g root "+shellQuote(stackEnvironmentDirectory),
+		"temporary="+shellQuote(path+".aegisnode.tmp"),
+		"cat > \"$temporary\"",
+		"chown root:root \"$temporary\"",
+		"chmod 0600 \"$temporary\"",
+		"mv \"$temporary\" "+shellQuote(path),
+	)
+	if stack.Environment == "" {
+		return Task{Name: "Write " + stack.Name + " environment", Apply: remoteWriteFileCommand(path, "", "root", "root", 0600)}
+	}
+	return Task{Name: "Write " + stack.Name + " environment", Apply: script, Stdin: stack.Environment}
 }
 
 func stackRepositoryReconcileTasks(config observabilityConfig, group string) []Task {
@@ -238,6 +267,7 @@ for resource in resources:
 		"  [ -z \"$networks\" ] || docker network rm $networks",
 		"  rm -rf -- "+shellQuote(observabilityRepositoryDirectory)+"/stacks/\"$name\"",
 		"  rm -f -- /opt/aegisnode/generated/\"$name\".pangolin.yaml "+shellQuote(observabilityRepositoryDirectory)+".stack-\"$name\".deployment",
+		"  rm -f -- "+shellQuote(stackEnvironmentDirectory)+"/\"$name\".env",
 		"done",
 		`api='http://127.0.0.1:3000/api/v1'`,
 		`curl -fsS -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data `+shellQuote(loginPayload)+` >/dev/null`,
@@ -258,7 +288,7 @@ func stackResourceVerifyCommand(config observabilityConfig, stack configuredStac
 	for _, resource := range stack.Resources {
 		specs = append(specs, fmt.Sprintf(
 			`{"nice_id":%s,"domain":%s}`,
-			jsonString("aegisnode-"+stack.Name+"-"+slugifyStackValue(resource.Service)),
+			jsonString("aegisnode-"+stack.Name+"-"+resource.ID),
 			jsonString(resource.Subdomain+"."+config.BaseDomain),
 		))
 	}

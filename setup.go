@@ -210,6 +210,7 @@ func collectSetupRequest(store ProfileStore, output io.Writer) (setupRequest, er
 			return setupRequest{}, err
 		}
 		model := newProfileSetupModel(profiles)
+		model.profileStore = store
 		program := tea.NewProgram(model, tea.WithOutput(output), tea.WithAltScreen())
 		finalModel, err := program.Run()
 		if err != nil {
@@ -318,6 +319,8 @@ const (
 	profileSetupScreenStacks
 	profileSetupScreenStackCompose
 	profileSetupScreenStackEditor
+	profileSetupScreenStackResourceEditor
+	profileSetupScreenStackEnvironment
 	profileSetupScreenStackDeleteConfirm
 	profileSetupScreenStackDiff
 	profileSetupScreenStackCommit
@@ -356,46 +359,55 @@ func (item profileListItem) Description() string { return item.description }
 func (item profileListItem) FilterValue() string { return item.title + " " + item.description }
 
 type profileSetupModel struct {
-	screen            profileSetupScreen
-	profiles          []profileChoice
-	profileList       list.Model
-	repositoryList    list.Model
-	stageTable        table.Model
-	progress          progress.Model
-	planViewport      viewport.Model
-	help              help.Model
-	selectedIndex     int
-	deleteProfileID   string
-	singleStage       string
-	pangolinStatus    pangolinRegistrationStatus
-	pangolinError     string
-	showSetupToken    bool
-	fresh             bool
-	inputs            []textinput.Model
-	advanced          []textinput.Model
-	repositoryInputs  []textinput.Model
-	stackComposeInput textinput.Model
-	stackTable        table.Model
-	stacks            []editableStack
-	stackInputs       []textinput.Model
-	stackServices     []composeServiceSummary
-	stackCompose      string
-	stackOriginalName string
-	stackNotice       string
-	stackGitStatus    string
-	stackHead         string
-	stackNeedsPush    bool
-	stackSyncStatus   string
-	stackDiffViewport viewport.Model
-	stackCommitInput  textinput.Model
-	repositoryMode    string
-	focus             int
-	err               string
-	width             int
-	height            int
-	done              bool
-	legacy            bool
-	cancelled         bool
+	screen                profileSetupScreen
+	profiles              []profileChoice
+	profileList           list.Model
+	repositoryList        list.Model
+	stageTable            table.Model
+	progress              progress.Model
+	planViewport          viewport.Model
+	help                  help.Model
+	selectedIndex         int
+	deleteProfileID       string
+	singleStage           string
+	pangolinStatus        pangolinRegistrationStatus
+	pangolinError         string
+	showSetupToken        bool
+	fresh                 bool
+	inputs                []textinput.Model
+	advanced              []textinput.Model
+	repositoryInputs      []textinput.Model
+	stackComposeInput     textinput.Model
+	stackTable            table.Model
+	stacks                []editableStack
+	stackInputs           []textinput.Model
+	stackServices         []composeServiceSummary
+	stackCompose          string
+	stackOriginalName     string
+	stackResources        []stackPublicResource
+	stackResourceTable    table.Model
+	stackResourceInputs   []textinput.Model
+	stackResourceIndex    int
+	stackEnvironmentInput textinput.Model
+	stackEnvironment      string
+	stackEnvironmentKeys  []string
+	stackEnvironmentDirty bool
+	profileStore          ProfileStore
+	stackNotice           string
+	stackGitStatus        string
+	stackHead             string
+	stackNeedsPush        bool
+	stackSyncStatus       string
+	stackDiffViewport     viewport.Model
+	stackCommitInput      textinput.Model
+	repositoryMode        string
+	focus                 int
+	err                   string
+	width                 int
+	height                int
+	done                  bool
+	legacy                bool
+	cancelled             bool
 }
 
 func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
@@ -468,6 +480,9 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 	model.repositoryMode = "create"
 	model.stackComposeInput = newSetupInputs([]setupInputField{{
 		label: "Docker Compose file", placeholder: "/path/to/docker-compose.yml",
+	}})[0]
+	model.stackEnvironmentInput = newSetupInputs([]setupInputField{{
+		label: "Runtime .env file", placeholder: "/path/to/.env",
 	}})[0]
 	model.stackCommitInput = newSetupInputs([]setupInputField{{
 		label: "Commit message", placeholder: "Update application stacks",
@@ -579,13 +594,15 @@ func newStackTable(stacks []editableStack, baseDomain string, state *ProfileStat
 	rows := make([]table.Row, 0, len(stacks))
 	for _, stack := range stacks {
 		resource := "(private)"
-		if len(stack.Metadata.PublicResources) > 0 {
+		if len(stack.Metadata.PublicResources) == 1 {
 			public := stack.Metadata.PublicResources[0]
 			host := public.Subdomain
 			if baseDomain != "" {
 				host += "." + baseDomain
 			}
 			resource = fmt.Sprintf("%s → %s:%d", host, public.Service, public.Port)
+		} else if len(stack.Metadata.PublicResources) > 1 {
+			resource = fmt.Sprintf("%d public resources", len(stack.Metadata.PublicResources))
 		}
 		rows = append(rows, table.Row{stack.Name, standaloneStackStatus(stack.Name, state), resource})
 	}
@@ -727,6 +744,10 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return model.updateStackCompose(msg)
 		case profileSetupScreenStackEditor:
 			return model.updateStackEditor(msg)
+		case profileSetupScreenStackResourceEditor:
+			return model.updateStackResourceEditor(msg)
+		case profileSetupScreenStackEnvironment:
+			return model.updateStackEnvironment(msg)
 		case profileSetupScreenStackDeleteConfirm:
 			return model.updateStackDeleteConfirm(msg)
 		case profileSetupScreenStackDiff:
@@ -748,7 +769,8 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func profileSetupScreenAcceptsText(screen profileSetupScreen) bool {
 	switch screen {
 	case profileSetupScreenIntake, profileSetupScreenAdvanced, profileSetupScreenRepositoryDetails,
-		profileSetupScreenStackCompose, profileSetupScreenStackEditor, profileSetupScreenStackCommit:
+		profileSetupScreenStackCompose, profileSetupScreenStackEditor, profileSetupScreenStackResourceEditor,
+		profileSetupScreenStackEnvironment, profileSetupScreenStackCommit:
 		return true
 	default:
 		return false
@@ -1048,12 +1070,19 @@ func (model profileSetupModel) updateStackCompose(key tea.KeyMsg) (tea.Model, te
 			model.err = fmt.Sprintf("read Compose file: %v", err)
 			return model, nil
 		}
-		options := withStackAddDefaults(stackAddOptions{
-			Compose: path, SSO: true, HealthPath: "/",
-		}, services)
+		options := withStackAddDefaults(stackAddOptions{Compose: path}, services)
+		resources := []stackPublicResource{}
+		if resource, ok := suggestedStackResource(options.Name, services); ok {
+			resources = append(resources, resource)
+		}
 		model.stackCompose = string(compose)
 		model.stackServices = services
 		model.stackOriginalName = ""
+		model.stackResources = resources
+		model.stackResourceTable = newStackResourceTable(resources)
+		model.stackEnvironment = ""
+		model.stackEnvironmentKeys = nil
+		model.stackEnvironmentDirty = false
 		model.stackInputs = stackEditorInputs(options)
 		model.stackComposeInput.Blur()
 		model.focus = 0
@@ -1162,42 +1191,65 @@ func (model profileSetupModel) updateStacks(key tea.KeyMsg) (tea.Model, tea.Cmd)
 }
 
 func (model profileSetupModel) updateStackEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if model.focus == 0 {
+		switch key.String() {
+		case "ctrl+s":
+			return model.saveStackEditor()
+		case "tab", "down":
+			model.stackInputs[0].Blur()
+			model.focus = 1
+			model.stackResourceTable.Focus()
+			return model, nil
+		}
+		var command tea.Cmd
+		model.stackInputs[0], command = model.stackInputs[0].Update(key)
+		return model, command
+	}
 	switch key.String() {
 	case "ctrl+s":
 		return model.saveStackEditor()
-	case "tab", "down":
-		model.stackInputs[model.focus].Blur()
-		model.focus = (model.focus + 1) % len(model.stackInputs)
-		model.stackInputs[model.focus].Focus()
+	case "tab":
+		model.stackResourceTable.Blur()
+		model.focus = 0
+		model.stackInputs[0].Focus()
 		return model, nil
-	case "shift+tab", "up":
-		model.stackInputs[model.focus].Blur()
-		model.focus--
-		if model.focus < 0 {
-			model.focus = len(model.stackInputs) - 1
-		}
-		model.stackInputs[model.focus].Focus()
+	case "a", "A":
+		model.openStackResourceEditor(-1)
 		return model, nil
-	case "enter":
-		if model.focus < len(model.stackInputs)-1 {
-			model.stackInputs[model.focus].Blur()
-			model.focus++
-			model.stackInputs[model.focus].Focus()
-			return model, nil
+	case "e", "E", "enter":
+		if len(model.stackResources) == 0 {
+			model.openStackResourceEditor(-1)
+		} else {
+			model.openStackResourceEditor(model.stackResourceTable.Cursor())
 		}
-		return model.saveStackEditor()
+		return model, nil
+	case "d", "D":
+		index := model.stackResourceTable.Cursor()
+		if index >= 0 && index < len(model.stackResources) {
+			model.stackResources = append(model.stackResources[:index], model.stackResources[index+1:]...)
+			model.stackResourceTable = newStackResourceTable(model.stackResources)
+		}
+		return model, nil
+	case "n", "N":
+		model.stackEnvironmentInput.SetValue("")
+		model.stackEnvironmentInput.Focus()
+		model.err = ""
+		model.screen = profileSetupScreenStackEnvironment
+		return model, nil
 	}
 	var command tea.Cmd
-	model.stackInputs[model.focus], command = model.stackInputs[model.focus].Update(key)
+	model.stackResourceTable, command = model.stackResourceTable.Update(key)
 	return model, command
 }
 
 func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
-	options, err := stackOptionsFromInputs(model.stackInputs, model.stackServices)
-	if err != nil {
+	name := strings.TrimSpace(model.stackInputs[0].Value())
+	metadata := stackMetadata{Version: 1, PublicResources: model.stackResources}
+	if err := validateStackMetadata(name, metadata, model.stackServices); err != nil {
 		model.err = err.Error()
 		return model, nil
 	}
+	options := stackAddOptions{Name: name, Resources: model.stackResources}
 	repositoryPath, err := model.selectedRepositoryPath()
 	if err != nil {
 		model.err = err.Error()
@@ -1207,6 +1259,28 @@ func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
 		model.err = err.Error()
 		return model, nil
 	}
+	environmentChanged := model.stackEnvironmentDirty ||
+		(model.stackOriginalName != "" && model.stackOriginalName != options.Name)
+	if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
+		choice := &model.profiles[model.selectedIndex]
+		if choice.Secrets.StackEnvironments == nil {
+			choice.Secrets.StackEnvironments = map[string]string{}
+		}
+		if model.stackOriginalName != "" && model.stackOriginalName != options.Name {
+			delete(choice.Secrets.StackEnvironments, model.stackOriginalName)
+		}
+		if model.stackEnvironment == "" {
+			delete(choice.Secrets.StackEnvironments, options.Name)
+		} else {
+			choice.Secrets.StackEnvironments[options.Name] = model.stackEnvironment
+		}
+		if environmentChanged && model.profileStore != nil {
+			if err := model.profileStore.SaveSecrets(choice.Profile.ID, choice.Secrets); err != nil {
+				model.err = err.Error()
+				return model, nil
+			}
+		}
+	}
 	action := "updated"
 	if model.stackOriginalName == "" {
 		action = "added"
@@ -1215,8 +1289,99 @@ func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
 	model.err = ""
 	model.screen = profileSetupScreenStacks
 	model.refreshStacks()
+	if environmentChanged && model.stackGitStatus == "clean" {
+		model.stackNotice = "Runtime environment updated outside Git. Press r to deploy this stack."
+	}
 	model.stackTable.Focus()
 	return model, nil
+}
+
+func (model profileSetupModel) updateStackResourceEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "ctrl+s":
+		return model.saveStackResourceEditor()
+	case "tab", "down":
+		model.stackResourceInputs[model.focus].Blur()
+		model.focus = (model.focus + 1) % len(model.stackResourceInputs)
+		model.stackResourceInputs[model.focus].Focus()
+		return model, nil
+	case "shift+tab", "up":
+		model.stackResourceInputs[model.focus].Blur()
+		model.focus--
+		if model.focus < 0 {
+			model.focus = len(model.stackResourceInputs) - 1
+		}
+		model.stackResourceInputs[model.focus].Focus()
+		return model, nil
+	case "enter":
+		if model.focus < len(model.stackResourceInputs)-1 {
+			model.stackResourceInputs[model.focus].Blur()
+			model.focus++
+			model.stackResourceInputs[model.focus].Focus()
+			return model, nil
+		}
+		return model.saveStackResourceEditor()
+	}
+	var command tea.Cmd
+	model.stackResourceInputs[model.focus], command = model.stackResourceInputs[model.focus].Update(key)
+	return model, command
+}
+
+func (model profileSetupModel) saveStackResourceEditor() (tea.Model, tea.Cmd) {
+	resource, err := stackResourceFromInputs(model.stackResourceInputs)
+	if err != nil {
+		model.err = err.Error()
+		return model, nil
+	}
+	resources := append([]stackPublicResource(nil), model.stackResources...)
+	if model.stackResourceIndex < 0 {
+		resources = append(resources, resource)
+	} else if model.stackResourceIndex < len(resources) {
+		resources[model.stackResourceIndex] = resource
+	} else {
+		model.err = "selected public resource no longer exists"
+		return model, nil
+	}
+	name := strings.TrimSpace(model.stackInputs[0].Value())
+	if err := validateStackMetadata(name, stackMetadata{Version: 1, PublicResources: resources}, model.stackServices); err != nil {
+		model.err = err.Error()
+		return model, nil
+	}
+	model.stackResources = resources
+	model.stackResourceTable = newStackResourceTable(resources)
+	model.stackResourceTable.Focus()
+	model.focus = 1
+	model.err = ""
+	model.screen = profileSetupScreenStackEditor
+	return model, nil
+}
+
+func (model profileSetupModel) updateStackEnvironment(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.String() == "enter" {
+		path := strings.TrimSpace(model.stackEnvironmentInput.Value())
+		if path == "" {
+			model.stackEnvironment = ""
+			model.stackEnvironmentKeys = nil
+		} else {
+			environment, keys, err := readStackEnvironmentFile(path)
+			if err != nil {
+				model.err = err.Error()
+				return model, nil
+			}
+			model.stackEnvironment = environment
+			model.stackEnvironmentKeys = keys
+		}
+		model.stackEnvironmentDirty = true
+		model.stackEnvironmentInput.Blur()
+		model.focus = 1
+		model.stackResourceTable.Focus()
+		model.err = ""
+		model.screen = profileSetupScreenStackEditor
+		return model, nil
+	}
+	var command tea.Cmd
+	model.stackEnvironmentInput, command = model.stackEnvironmentInput.Update(key)
+	return model, command
 }
 
 func (model profileSetupModel) updateStackDeleteConfirm(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1238,6 +1403,17 @@ func (model profileSetupModel) updateStackDeleteConfirm(key tea.KeyMsg) (tea.Mod
 			model.err = err.Error()
 			model.screen = profileSetupScreenStacks
 			return model, nil
+		}
+		if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
+			choice := &model.profiles[model.selectedIndex]
+			delete(choice.Secrets.StackEnvironments, stack.Name)
+			if model.profileStore != nil {
+				if err := model.profileStore.SaveSecrets(choice.Profile.ID, choice.Secrets); err != nil {
+					model.err = err.Error()
+					model.screen = profileSetupScreenStacks
+					return model, nil
+				}
+			}
 		}
 		model.stackNotice = fmt.Sprintf("Stack %s removed. Review and commit the deletion before deployment.", stack.Name)
 		model.err = ""
@@ -1281,63 +1457,112 @@ func (model profileSetupModel) updateStackCommit(key tea.KeyMsg) (tea.Model, tea
 }
 
 func stackEditorInputs(options stackAddOptions) []textinput.Model {
+	return newSetupInputs([]setupInputField{{label: "Stack name", value: options.Name}})
+}
+
+func stackResourceInputs(resource stackPublicResource) []textinput.Model {
 	sso := "no"
-	if options.SSO {
+	if resource.SSO {
 		sso = "yes"
 	}
 	return newSetupInputs([]setupInputField{
-		{label: "Stack name", value: options.Name},
-		{label: "Service to publish", value: options.Service},
+		{label: "Resource ID", value: resource.ID},
+		{label: "Service to publish", value: resource.Service},
 		{label: "Container port", value: func() string {
-			if options.Port == 0 {
+			if resource.Port == 0 {
 				return ""
 			}
-			return strconv.Itoa(options.Port)
+			return strconv.Itoa(resource.Port)
 		}()},
-		{label: "Public subdomain", value: options.Subdomain},
-		{label: "Pangolin display name", value: options.DisplayName},
-		{label: "Health-check path", value: options.HealthPath},
+		{label: "Public subdomain", value: resource.Subdomain},
+		{label: "Pangolin display name", value: resource.Name},
+		{label: "Protocol (http/https)", value: firstNonEmpty(resource.Protocol, "http")},
+		{label: "Health-check path (blank disables)", value: resource.Healthcheck.Path},
 		{label: "Require Pangolin SSO (yes/no)", value: sso},
 	})
 }
 
-func stackOptionsFromInputs(inputs []textinput.Model, services []composeServiceSummary) (stackAddOptions, error) {
-	ssoValue := strings.ToLower(strings.TrimSpace(inputs[6].Value()))
+func stackResourceFromInputs(inputs []textinput.Model) (stackPublicResource, error) {
+	ssoValue := strings.ToLower(strings.TrimSpace(inputs[7].Value()))
 	if ssoValue != "yes" && ssoValue != "no" {
-		return stackAddOptions{}, errors.New("Require Pangolin SSO must be yes or no")
+		return stackPublicResource{}, errors.New("Require Pangolin SSO must be yes or no")
 	}
-	options := stackAddOptions{
-		Name: strings.TrimSpace(inputs[0].Value()), Service: strings.TrimSpace(inputs[1].Value()),
-		Subdomain: strings.TrimSpace(inputs[3].Value()), DisplayName: strings.TrimSpace(inputs[4].Value()),
-		HealthPath: strings.TrimSpace(inputs[5].Value()), SSO: ssoValue == "yes",
+	path := strings.TrimSpace(inputs[6].Value())
+	resource := stackPublicResource{
+		ID: strings.TrimSpace(inputs[0].Value()), Service: strings.TrimSpace(inputs[1].Value()),
+		Subdomain: strings.TrimSpace(inputs[3].Value()), Name: strings.TrimSpace(inputs[4].Value()),
+		Protocol: strings.ToLower(strings.TrimSpace(inputs[5].Value())), SSO: ssoValue == "yes",
+		Healthcheck: stackResourceHealthcheck{Enabled: path != "", Path: path},
 	}
-	options.Port, _ = strconv.Atoi(strings.TrimSpace(inputs[2].Value()))
-	return options, validateStackAddOptions(options, services)
+	resource.Port, _ = strconv.Atoi(strings.TrimSpace(inputs[2].Value()))
+	return resource, nil
 }
 
 func (model *profileSetupModel) openStackEditor(stack editableStack) {
-	if len(stack.Metadata.PublicResources) != 1 {
-		model.err = "TUI editing requires exactly one public resource; edit aegisnode.yaml directly for multi-resource stacks"
-		return
-	}
-	options := stackAddOptions{Name: stack.Name, SSO: true, HealthPath: "/"}
-	if len(stack.Metadata.PublicResources) > 0 {
-		resource := stack.Metadata.PublicResources[0]
-		options.Service = resource.Service
-		options.Port = resource.Port
-		options.Subdomain = resource.Subdomain
-		options.DisplayName = resource.Name
-		options.HealthPath = resource.Healthcheck.Path
-		options.SSO = resource.SSO
-	}
+	options := stackAddOptions{Name: stack.Name}
 	model.stackOriginalName = stack.Name
 	model.stackCompose = stack.Compose
 	model.stackServices = stack.Services
+	model.stackResources = append([]stackPublicResource(nil), stack.Metadata.PublicResources...)
+	model.stackResourceTable = newStackResourceTable(model.stackResources)
 	model.stackInputs = stackEditorInputs(options)
-	model.focus = 0
-	model.stackInputs[0].Focus()
+	model.stackEnvironment = ""
+	model.stackEnvironmentKeys = nil
+	model.stackEnvironmentDirty = false
+	if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
+		model.stackEnvironment = model.profiles[model.selectedIndex].Secrets.StackEnvironments[stack.Name]
+		_, keys, _ := readStackEnvironmentContent(model.stackEnvironment)
+		model.stackEnvironmentKeys = keys
+	}
+	model.focus = 1
+	model.stackInputs[0].Blur()
+	model.stackResourceTable.Focus()
 	model.err = ""
 	model.screen = profileSetupScreenStackEditor
+}
+
+func (model *profileSetupModel) openStackResourceEditor(index int) {
+	resource := stackPublicResource{Protocol: "http", SSO: true, Healthcheck: stackResourceHealthcheck{Enabled: true, Path: "/"}}
+	if index >= 0 && index < len(model.stackResources) {
+		resource = model.stackResources[index]
+	} else if len(model.stackServices) > 0 {
+		service := model.stackServices[0]
+		resource.ID = slugifyStackValue(service.Name)
+		resource.Service = service.Name
+		resource.Subdomain = slugifyStackValue(service.Name)
+		resource.Name = titleFromSlug(service.Name)
+		if len(service.ContainerPorts) > 0 {
+			resource.Port = service.ContainerPorts[0]
+		}
+	}
+	model.stackResourceIndex = index
+	model.stackResourceInputs = stackResourceInputs(resource)
+	model.focus = 0
+	model.stackResourceInputs[0].Focus()
+	model.err = ""
+	model.screen = profileSetupScreenStackResourceEditor
+}
+
+func newStackResourceTable(resources []stackPublicResource) table.Model {
+	rows := make([]table.Row, 0, len(resources))
+	for _, resource := range resources {
+		rows = append(rows, table.Row{
+			resource.ID,
+			resource.Subdomain,
+			fmt.Sprintf("%s:%d", resource.Service, resource.Port),
+		})
+	}
+	return table.New(
+		table.WithColumns([]table.Column{
+			{Title: "ID", Width: 18},
+			{Title: "Subdomain", Width: 22},
+			{Title: "Target", Width: 24},
+		}),
+		table.WithRows(rows),
+		table.WithHeight(clampInt(len(rows)+1, 2, 10)),
+		table.WithWidth(70),
+		table.WithFocused(true),
+	)
 }
 
 func (model profileSetupModel) selectedStack() (editableStack, bool) {
@@ -1503,6 +1728,8 @@ func (model *profileSetupModel) goBack() {
 		model.screen = profileSetupScreenStacks
 	case profileSetupScreenStackEditor:
 		model.screen = profileSetupScreenStacks
+	case profileSetupScreenStackResourceEditor, profileSetupScreenStackEnvironment:
+		model.screen = profileSetupScreenStackEditor
 	case profileSetupScreenStackDeleteConfirm:
 		model.screen = profileSetupScreenStacks
 	case profileSetupScreenStackDiff:
@@ -1784,6 +2011,13 @@ func (model profileSetupModel) View() string {
 		builder.WriteString(model.stackComposeInput.View())
 	case profileSetupScreenStackEditor:
 		builder.WriteString(model.stackEditorView())
+	case profileSetupScreenStackResourceEditor:
+		builder.WriteString(model.stackResourceEditorView())
+	case profileSetupScreenStackEnvironment:
+		builder.WriteString("Import runtime environment\n")
+		builder.WriteString(setupHelpStyle.Render("The file is saved in the profile secret store and is never copied into Git. Leave the path blank to remove it."))
+		builder.WriteString("\n\n")
+		builder.WriteString(model.stackEnvironmentInput.View())
 	case profileSetupScreenStackDeleteConfirm:
 		builder.WriteString(model.stackDeleteConfirmView())
 	case profileSetupScreenStackDiff:
@@ -1894,7 +2128,7 @@ func (model profileSetupModel) stackEditorView() string {
 		title = "Add stack"
 	}
 	builder.WriteString(title + "\n")
-	builder.WriteString(setupHelpStyle.Render("The Compose file is preserved; these fields control its Pangolin public resource."))
+	builder.WriteString(setupHelpStyle.Render("The Compose file is preserved. Add zero or more Pangolin public resources; zero keeps the stack private."))
 	builder.WriteString("\n\nDetected services:\n")
 	for _, service := range model.stackServices {
 		ports := "no declared ports"
@@ -1908,7 +2142,35 @@ func (model profileSetupModel) stackEditorView() string {
 		builder.WriteString(fmt.Sprintf("  %s: %s\n", service.Name, ports))
 	}
 	builder.WriteString("\n")
-	for _, input := range model.stackInputs {
+	builder.WriteString("\n")
+	builder.WriteString(model.stackInputs[0].View())
+	builder.WriteString("\n\nPublic resources\n")
+	if len(model.stackResources) == 0 {
+		builder.WriteString(setupHelpStyle.Render("None. The stack is private."))
+		builder.WriteString("\n")
+	} else {
+		builder.WriteString(model.stackResourceTable.View())
+	}
+	builder.WriteString("\nRuntime environment: ")
+	if len(model.stackEnvironmentKeys) == 0 {
+		builder.WriteString("none")
+	} else {
+		builder.WriteString(fmt.Sprintf("%d key(s): %s", len(model.stackEnvironmentKeys), strings.Join(model.stackEnvironmentKeys, ", ")))
+	}
+	builder.WriteString("\n")
+	return builder.String()
+}
+
+func (model profileSetupModel) stackResourceEditorView() string {
+	title := "Add public resource"
+	if model.stackResourceIndex >= 0 {
+		title = "Edit public resource"
+	}
+	var builder strings.Builder
+	builder.WriteString(title + "\n")
+	builder.WriteString(setupHelpStyle.Render("Resource IDs are stable Pangolin identifiers. The health-check path can be blank."))
+	builder.WriteString("\n\n")
+	for _, input := range model.stackResourceInputs {
 		builder.WriteString(input.View())
 		builder.WriteByte('\n')
 	}
@@ -2149,8 +2411,23 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 	case profileSetupScreenStackEditor:
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "save")),
+			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add route")),
+			key.NewBinding(key.WithKeys("e", "enter"), key.WithHelp("e", "edit route")),
+			key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "remove route")),
+			key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "runtime env")),
+			key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "name/routes")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	case profileSetupScreenStackResourceEditor:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "save route")),
 			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "next/save")),
 			key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "field")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	case profileSetupScreenStackEnvironment:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "import/remove")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		}
 	case profileSetupScreenStackDeleteConfirm:
