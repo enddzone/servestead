@@ -207,8 +207,8 @@ func TestSetupPlanSummaryIncludesProxyGuidance(t *testing.T) {
 		ServerSecret:     "secret",
 	})
 	for _, expected := range []string{
-		"Deploy Traefik, Pangolin, Gerbil, Newt, Beszel, and Dozzle",
-		"Required DNS: A pangolin.example.com -> 203.0.113.10, A beszel.example.com -> 203.0.113.10, A dozzle.example.com -> 203.0.113.10",
+		"Deploy Traefik, Pangolin, Gerbil, Newt, Beszel, Dozzle, and Dockhand",
+		"Required DNS: A pangolin.example.com -> 203.0.113.10, A beszel.example.com -> 203.0.113.10, A dozzle.example.com -> 203.0.113.10, A dockhand.example.com -> 203.0.113.10",
 	} {
 		if !strings.Contains(summary, expected) {
 			t.Fatalf("summary missing %q:\n%s", expected, summary)

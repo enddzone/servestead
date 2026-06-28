@@ -20,13 +20,19 @@ func TestObservabilityComposeUsesPinnedReadOnlyServicesAndPangolinLabels(t *test
 		"image: docker.io/henrygd/beszel:0.18.7",
 		"image: docker.io/henrygd/beszel-agent:0.18.7",
 		"image: docker.io/amir20/dozzle:v10.6.6",
+		"image: docker.io/fnsys/dockhand:latest",
+		"image: docker.io/tecnativa/docker-socket-proxy:v0.4.2",
 		"TRUSTED_AUTH_HEADER: \"Remote-Email\"",
 		"DOCKER_HOST: \"tcp://socket-proxy:2375\"",
+		"DOCKER_HOST: \"tcp://dockhand-socket-proxy:2375\"",
+		"HOST_DATA_DIR: \"/opt/aegisnode/stacks/observability/dockhand_data\"",
+		"\"127.0.0.1:3003:3000\"",
 		"DOZZLE_AUTH_PROVIDER: \"forward-proxy\"",
 		"DOZZLE_ENABLE_ACTIONS: \"false\"",
 		"DOZZLE_ENABLE_SHELL: \"false\"",
 		"pangolin.public-resources.aegisnode-beszel.full-domain=beszel.example.com",
 		"pangolin.public-resources.aegisnode-dozzle.full-domain=dozzle.example.com",
+		"pangolin.public-resources.aegisnode-dockhand.full-domain=dockhand.example.com",
 		"pangolin.public-resources.aegisnode-beszel.auth.sso-users[0]=admin@example.com",
 		"pangolin.public-resources.aegisnode-beszel.targets[0].hostname=beszel",
 		"pangolin.public-resources.aegisnode-beszel.targets[0].healthcheck.enabled=true",
@@ -39,13 +45,18 @@ func TestObservabilityComposeUsesPinnedReadOnlyServicesAndPangolinLabels(t *test
 		"pangolin.public-resources.aegisnode-dozzle.targets[0].healthcheck.port=8080",
 		"pangolin.public-resources.aegisnode-dozzle.targets[0].healthcheck.scheme=http",
 		"pangolin.public-resources.aegisnode-dozzle.targets[0].healthcheck.path=/healthcheck",
+		"pangolin.public-resources.aegisnode-dockhand.targets[0].healthcheck.path=/api/auth/session",
+		"POST: \"1\"",
+		"EXEC: \"1\"",
+		"dockhand.hidden=true",
+		"internal: true",
 		"external: true",
 	} {
 		if !strings.Contains(compose, expected) {
 			t.Fatalf("compose file missing %q:\n%s", expected, compose)
 		}
 	}
-	for _, unexpected := range []string{"8080:8080", "/var/run/docker.sock"} {
+	for _, unexpected := range []string{"8080:8080"} {
 		if strings.Contains(compose, unexpected) {
 			t.Fatalf("compose file unexpectedly contains %q:\n%s", unexpected, compose)
 		}
@@ -113,6 +124,7 @@ func TestBeszelConfigPreconfiguresLocalSystem(t *testing.T) {
 
 func TestObservabilityTasksValidateAndVerifyStack(t *testing.T) {
 	joined := strings.Join(taskScripts(observabilityTasks(observabilityConfig{
+		Host:             "203.0.113.10",
 		SSHUser:          "aegisadmin",
 		AdminEmail:       "admin@example.com",
 		PangolinPassword: "pangolin-password",
@@ -125,15 +137,39 @@ func TestObservabilityTasksValidateAndVerifyStack(t *testing.T) {
 		"docker stop aegis-newt",
 		"down --remove-orphans",
 		`nice_id`,
+		`aegisnode-dockhand`,
 		`DELETE "$api/resource/$resource_id"`,
 		"docker start aegis-newt",
 		`targets[0].get("hcEnabled") is True`,
 		`"$api/resource/$resource_id/targets"`,
-		"did not converge to exactly one managed Beszel and Dozzle resource with health checks enabled",
-		"for service in beszel beszel-agent dozzle; do",
+		"did not converge to exactly one managed Beszel, Dozzle, and Dockhand resource with health checks enabled",
+		"for service in beszel beszel-agent dozzle dockhand dockhand-socket-proxy; do",
+		`"name":"local-vps"`,
+		`"connectionType":"direct"`,
+		`"host":"dockhand-socket-proxy"`,
+		`"port":2375`,
+		`"publicIp":"203.0.113.10"`,
+		`"$dockhand_api/environments/$dockhand_environment_id/test"`,
+		`"$dockhand_api/containers?env=$dockhand_environment_id"`,
+		"Dockhand local Docker environment $dockhand_environment_id is connected and lists containers.",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("observability tasks missing %q:\n%s", expected, joined)
+		}
+	}
+	for _, task := range observabilityTasks(observabilityConfig{
+		Host:             "203.0.113.10",
+		SSHUser:          "aegisadmin",
+		AdminEmail:       "admin@example.com",
+		PangolinPassword: "pangolin-password",
+		BaseDomain:       "example.com",
+	}) {
+		if strings.Contains(task.Name, "Dockhand") {
+			command := exec.Command("sh", "-n")
+			command.Stdin = strings.NewReader(task.Apply)
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("%s is not valid shell: %v\n%s\n%s", task.Name, err, output, task.Apply)
+			}
 		}
 	}
 }

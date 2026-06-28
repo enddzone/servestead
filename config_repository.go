@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -23,6 +24,7 @@ var errRepositoryReviewRequired = errors.New("configuration repository scaffold 
 type configRepositoryRevision struct {
 	Path       string
 	Commit     string
+	Branch     string
 	Compose    string
 	ComposeSHA string
 	Origin     string
@@ -81,6 +83,7 @@ func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Pr
 	profile.ConfigRepositoryPath = revision.Path
 	config.ConfigRepositoryPath = revision.Path
 	config.ConfigRepositoryCommit = revision.Commit
+	config.ConfigRepositoryBranch = revision.Branch
 	config.ConfigRepositoryOrigin = revision.Origin
 	config.ConfigRepositoryCompose = revision.Compose
 	config.ConfigRepositorySHA256 = revision.ComposeSHA
@@ -164,13 +167,13 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 	}
 
 	composePath := filepath.Join(path, filepath.FromSlash(observabilityComposeRepositoryPath))
-	scaffoldCreated, err := ensureConfigRepositoryScaffold(path, scaffold)
+	scaffoldChanged, err := ensureConfigRepositoryScaffold(ctx, path, scaffold)
 	if err != nil {
 		return configRepositoryRevision{}, err
 	}
-	if scaffoldCreated {
+	if scaffoldChanged {
 		if existed {
-			return configRepositoryRevision{}, fmt.Errorf("%w: created %s; commit it and rerun AegisNode", errRepositoryReviewRequired, composePath)
+			return configRepositoryRevision{}, fmt.Errorf("%w: updated %s; review, commit, and rerun AegisNode", errRepositoryReviewRequired, composePath)
 		}
 		env := []string{
 			"GIT_AUTHOR_NAME=AegisNode",
@@ -213,6 +216,7 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 	}
 
 	origin := ""
+	branch := ""
 	if output, err := runGit(ctx, path, nil, "remote", "get-url", "origin"); err == nil {
 		origin = strings.TrimSpace(output)
 		if err := validateGitHubRepositoryURL(origin); err != nil {
@@ -228,6 +232,10 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 		if !strings.Contains(contains, "origin/") {
 			return configRepositoryRevision{}, errors.New("configuration commit has not been pushed to origin")
 		}
+		branch, err = resolveConfigRepositoryBranch(ctx, path, contains)
+		if err != nil {
+			return configRepositoryRevision{}, err
+		}
 	}
 	if githubURL != "" && origin == "" {
 		return configRepositoryRevision{}, errors.New("--github-repo requires the configuration checkout to have a GitHub origin")
@@ -241,6 +249,7 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 	return configRepositoryRevision{
 		Path:       path,
 		Commit:     strings.TrimSpace(commit),
+		Branch:     branch,
 		Compose:    compose,
 		ComposeSHA: hex.EncodeToString(sum[:]),
 		Origin:     origin,
@@ -248,7 +257,39 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 	}, nil
 }
 
-func ensureConfigRepositoryScaffold(path, scaffold string) (bool, error) {
+func resolveConfigRepositoryBranch(ctx context.Context, path, containsOutput string) (string, error) {
+	current, err := runGit(ctx, path, nil, "branch", "--show-current")
+	if err != nil {
+		return "", err
+	}
+	current = strings.TrimSpace(current)
+	remoteBranches := []string{}
+	for _, line := range strings.Split(containsOutput, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "*"))
+		if !strings.HasPrefix(line, "origin/") || line == "origin/HEAD" {
+			continue
+		}
+		name := strings.TrimPrefix(line, "origin/")
+		remoteBranches = append(remoteBranches, name)
+	}
+	sort.Strings(remoteBranches)
+	if current != "" {
+		for _, branch := range remoteBranches {
+			if branch == current {
+				return current, nil
+			}
+		}
+	}
+	if len(remoteBranches) == 1 {
+		return remoteBranches[0], nil
+	}
+	if current == "" {
+		return "", errors.New("configuration checkout is detached and the commit is on multiple origin branches; check out the intended branch before deploying Dockhand Git stacks")
+	}
+	return "", fmt.Errorf("configuration branch %q does not contain the pushed commit on origin", current)
+}
+
+func ensureConfigRepositoryScaffold(ctx context.Context, path, scaffold string) (bool, error) {
 	path, err := filepath.Abs(expandUserPath(path))
 	if err != nil {
 		return false, fmt.Errorf("resolve configuration repository path: %w", err)
@@ -261,7 +302,27 @@ func ensureConfigRepositoryScaffold(path, scaffold string) (bool, error) {
 	}
 	composePath := filepath.Join(path, filepath.FromSlash(observabilityComposeRepositoryPath))
 	if _, err := os.Stat(composePath); err == nil {
-		return false, nil
+		existing, err := os.ReadFile(composePath)
+		if err != nil {
+			return false, err
+		}
+		if string(existing) == scaffold {
+			return false, nil
+		}
+		status, err := runGit(ctx, path, nil, "status", "--porcelain", "--", observabilityComposeRepositoryPath)
+		if err != nil {
+			return false, err
+		}
+		if strings.TrimSpace(status) != "" {
+			return false, fmt.Errorf("uncommitted changes in %s block managed scaffold refresh", observabilityComposeRepositoryPath)
+		}
+		if !isManagedObservabilityCompose(existing) {
+			return false, nil
+		}
+		if err := os.WriteFile(composePath, []byte(scaffold), 0600); err != nil {
+			return false, err
+		}
+		return true, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return false, err
 	}
@@ -272,6 +333,40 @@ func ensureConfigRepositoryScaffold(path, scaffold string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func isManagedObservabilityCompose(data []byte) bool {
+	var document struct {
+		Services map[string]struct {
+			Labels []string `yaml:"labels"`
+		} `yaml:"services"`
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(false)
+	if err := decoder.Decode(&document); err != nil {
+		return false
+	}
+	for _, serviceName := range []string{"beszel", "beszel-agent", "dozzle"} {
+		if _, ok := document.Services[serviceName]; !ok {
+			return false
+		}
+	}
+	for serviceName, prefix := range map[string]string{
+		"beszel": "pangolin.public-resources.aegisnode-beszel.",
+		"dozzle": "pangolin.public-resources.aegisnode-dozzle.",
+	} {
+		managed := false
+		for _, label := range document.Services[serviceName].Labels {
+			if strings.HasPrefix(label, prefix) {
+				managed = true
+				break
+			}
+		}
+		if !managed {
+			return false
+		}
+	}
+	return true
 }
 
 type repositoryStack struct {
@@ -429,7 +524,7 @@ func validateObservabilityCompose(data []byte) error {
 	if err := decoder.Decode(&document); err != nil {
 		return fmt.Errorf("parse %s: %w", observabilityComposeRepositoryPath, err)
 	}
-	for _, serviceName := range []string{"beszel", "beszel-agent", "dozzle"} {
+	for _, serviceName := range []string{"beszel", "beszel-agent", "dozzle", "dockhand", "dockhand-socket-proxy"} {
 		service, ok := document.Services[serviceName]
 		if !ok {
 			return fmt.Errorf("%s is incompatible: required service %q is missing; migrate the file and rerun", observabilityComposeRepositoryPath, serviceName)
@@ -437,7 +532,7 @@ func validateObservabilityCompose(data []byte) error {
 		if (serviceName == "beszel" || serviceName == "dozzle") && len(service.Ports) != 0 {
 			return fmt.Errorf("%s is incompatible: service %q must not publish host ports", observabilityComposeRepositoryPath, serviceName)
 		}
-		if !containsString(service.Networks, aegisPublicNetwork) {
+		if serviceName != "dockhand-socket-proxy" && !containsString(service.Networks, aegisPublicNetwork) {
 			return fmt.Errorf("%s is incompatible: service %q must use the %s network", observabilityComposeRepositoryPath, serviceName, aegisPublicNetwork)
 		}
 	}
@@ -460,6 +555,14 @@ func validateObservabilityCompose(data []byte) error {
 			"pangolin.public-resources.aegisnode-dozzle.targets[0].hostname=dozzle",
 			"pangolin.public-resources.aegisnode-dozzle.targets[0].port=8080",
 			"pangolin.public-resources.aegisnode-dozzle.targets[0].method=http",
+		},
+		"dockhand": {
+			"pangolin.public-resources.aegisnode-dockhand.name=Dockhand",
+			"pangolin.public-resources.aegisnode-dockhand.protocol=http",
+			"pangolin.public-resources.aegisnode-dockhand.auth.sso-enabled=true",
+			"pangolin.public-resources.aegisnode-dockhand.targets[0].hostname=dockhand",
+			"pangolin.public-resources.aegisnode-dockhand.targets[0].port=3000",
+			"pangolin.public-resources.aegisnode-dockhand.targets[0].method=http",
 		},
 	}
 	for serviceName, required := range requiredLabels {

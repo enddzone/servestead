@@ -66,6 +66,7 @@ type setupConfig struct {
 	ConfigRepositoryPath    string
 	GitHubRepositoryURL     string
 	ConfigRepositoryCommit  string
+	ConfigRepositoryBranch  string
 	ConfigRepositoryOrigin  string
 	ConfigRepositoryCompose string
 	ConfigRepositorySHA256  string
@@ -1472,7 +1473,7 @@ func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
 		return model, nil
 	}
 	profile := model.profiles[model.selectedIndex].Profile
-	scaffoldCreated, err := ensureConfigRepositoryScaffold(repositoryPath, observabilityComposeFile(observabilityConfig{
+	scaffoldCreated, err := ensureConfigRepositoryScaffold(context.Background(), repositoryPath, observabilityComposeFile(observabilityConfig{
 		BaseDomain: profile.BaseDomain,
 		AdminEmail: firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail),
 	}))
@@ -3695,7 +3696,7 @@ func runProfileSetupPlan(ctx context.Context, store ProfileStore, profile Profil
 	}
 	printSSHLoginGuidance(stdout, config)
 	fmt.Fprintf(stdout, "\nProxy URL: https://pangolin.%s\n", config.BaseDomain)
-	fmt.Fprintf(stdout, "Beszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\n", config.BaseDomain, config.BaseDomain)
+	fmt.Fprintf(stdout, "Beszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\nDockhand URL: https://dockhand.%s\n", config.BaseDomain, config.BaseDomain, config.BaseDomain)
 	fmt.Fprintln(stdout, requiredDNSGuidance(config.BaseDomain, config.Host))
 	fmt.Fprintf(stdout, "Retrieve Pangolin login with: aegisnode pangolin-credentials --profile %s\n", config.ProfileID)
 	return nil
@@ -3764,7 +3765,7 @@ func runProfileSetupPlanWithRunView(ctx context.Context, store ProfileStore, pro
 	}
 	printSSHLoginGuidance(stdout, config)
 	fmt.Fprintf(stdout, "\nProxy URL: https://pangolin.%s\n", config.BaseDomain)
-	fmt.Fprintf(stdout, "Beszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\n", config.BaseDomain, config.BaseDomain)
+	fmt.Fprintf(stdout, "Beszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\nDockhand URL: https://dockhand.%s\n", config.BaseDomain, config.BaseDomain, config.BaseDomain)
 	fmt.Fprintln(stdout, requiredDNSGuidance(config.BaseDomain, config.Host))
 	fmt.Fprintf(stdout, "Retrieve Pangolin login with: aegisnode pangolin-credentials --profile %s\n", config.ProfileID)
 	return nil
@@ -4030,7 +4031,7 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 			BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
 			AdminPassword: config.BeszelAdminPassword, PangolinPassword: config.PangolinAdminPassword, SystemToken: config.BeszelSystemToken,
 			HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
-			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
+			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryBranch: config.ConfigRepositoryBranch, RepositoryOrigin: config.ConfigRepositoryOrigin,
 			RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256, GitHubToken: config.GitHubToken,
 		}
 		observabilityClient, err := newObservabilityRemoteClient(ctx, observabilityConfig, stageStdout, stageStderr)
@@ -4066,7 +4067,7 @@ func runSetupStage(ctx context.Context, profile Profile, config setupConfig, run
 			Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
 			BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
 			PangolinPassword: config.PangolinAdminPassword,
-			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
+			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryBranch: config.ConfigRepositoryBranch, RepositoryOrigin: config.ConfigRepositoryOrigin,
 			RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256,
 			GitHubToken: config.GitHubToken, Stacks: config.Stacks,
 		}
@@ -4172,7 +4173,7 @@ func runSetupStage(ctx context.Context, profile Profile, config setupConfig, run
 			BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
 			AdminPassword: config.BeszelAdminPassword, PangolinPassword: config.PangolinAdminPassword, SystemToken: config.BeszelSystemToken,
 			HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
-			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
+			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryBranch: config.ConfigRepositoryBranch, RepositoryOrigin: config.ConfigRepositoryOrigin,
 			RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256, GitHubToken: config.GitHubToken,
 			Stacks: config.Stacks,
 		}
@@ -4208,6 +4209,7 @@ func runConfiguredStackStage(ctx context.Context, profile Profile, config setupC
 		Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
 		BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
 		PangolinPassword: config.PangolinAdminPassword, RepositoryCommit: config.ConfigRepositoryCommit,
+		RepositoryBranch: config.ConfigRepositoryBranch, RepositoryOrigin: config.ConfigRepositoryOrigin,
 	}
 	fmt.Fprintf(stageStdout, "One-time action: deploy standalone %s stack.\n", stack.Name)
 	client, err := newObservabilityRemoteClient(ctx, observabilityConfig, stageStdout, stageStderr)
@@ -4231,10 +4233,10 @@ func printStageCompletionGuidance(stdout io.Writer, config setupConfig, stage st
 		fmt.Fprintln(stdout, requiredDNSGuidance(config.BaseDomain, config.Host))
 		fmt.Fprintf(stdout, "Retrieve Pangolin login with: aegisnode pangolin-credentials --profile %s\n", config.ProfileID)
 	case "observability":
-		fmt.Fprintf(stdout, "\nBeszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\n", config.BaseDomain, config.BaseDomain)
+		fmt.Fprintf(stdout, "\nBeszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\nDockhand URL: https://dockhand.%s\n", config.BaseDomain, config.BaseDomain, config.BaseDomain)
 	case "platform":
 		fmt.Fprintf(stdout, "\nProxy URL: https://pangolin.%s\n", config.BaseDomain)
-		fmt.Fprintf(stdout, "Beszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\n", config.BaseDomain, config.BaseDomain)
+		fmt.Fprintf(stdout, "Beszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\nDockhand URL: https://dockhand.%s\n", config.BaseDomain, config.BaseDomain, config.BaseDomain)
 		fmt.Fprintln(stdout, requiredDNSGuidance(config.BaseDomain, config.Host))
 	case "stacks":
 		fmt.Fprintf(stdout, "\nStack repository synchronized at %s.\n", config.ConfigRepositoryCommit)
@@ -4393,7 +4395,7 @@ func newProfileRunModel(profile Profile, config setupConfig, runID string, compl
 		syncConfig := observabilityConfig{
 			BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
 			PangolinPassword: config.PangolinAdminPassword,
-			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
+			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryBranch: config.ConfigRepositoryBranch, RepositoryOrigin: config.ConfigRepositoryOrigin,
 			RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256,
 			GitHubToken: config.GitHubToken, Stacks: config.Stacks,
 		}
@@ -4405,6 +4407,8 @@ func newProfileRunModel(profile Profile, config setupConfig, runID string, compl
 			if stack.Name == name {
 				stageTotals[stageFilter] = len(configuredStackTasks(observabilityConfig{
 					RepositoryCommit: config.ConfigRepositoryCommit,
+					RepositoryBranch: config.ConfigRepositoryBranch,
+					RepositoryOrigin: config.ConfigRepositoryOrigin,
 					BaseDomain:       config.BaseDomain,
 					AdminEmail:       config.PangolinAdminEmail,
 					PangolinPassword: config.PangolinAdminPassword,
@@ -4418,6 +4422,8 @@ func newProfileRunModel(profile Profile, config setupConfig, runID string, compl
 			runStages = append(runStages, stage)
 			stageTotals[stage] = len(configuredStackTasks(observabilityConfig{
 				RepositoryCommit: config.ConfigRepositoryCommit,
+				RepositoryBranch: config.ConfigRepositoryBranch,
+				RepositoryOrigin: config.ConfigRepositoryOrigin,
 				BaseDomain:       config.BaseDomain,
 				AdminEmail:       config.PangolinAdminEmail,
 				PangolinPassword: config.PangolinAdminPassword,
@@ -4503,7 +4509,7 @@ func setupRunStageTaskTotals(config setupConfig) map[string]int {
 			BaseDomain: config.BaseDomain, AdminEmail: firstNonEmpty(config.PangolinAdminEmail, config.LetsEncryptEmail),
 			AdminPassword: config.BeszelAdminPassword, PangolinPassword: config.PangolinAdminPassword, SystemToken: config.BeszelSystemToken,
 			HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
-			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
+			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryBranch: config.ConfigRepositoryBranch, RepositoryOrigin: config.ConfigRepositoryOrigin,
 			RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256,
 			GitHubToken: config.GitHubToken,
 		})),
@@ -5525,7 +5531,7 @@ func setupPlanSummary(config setupConfig) string {
 		)
 	case setupModeProxy:
 		return fmt.Sprintf(
-			"- Connect to %s as %s with %s.\n- Deploy Traefik, Pangolin, Gerbil, Newt, Beszel, and Dozzle for %s.\n- %s.\n",
+			"- Connect to %s as %s with %s.\n- Deploy Traefik, Pangolin, Gerbil, Newt, Beszel, Dozzle, and Dockhand for %s.\n- %s.\n",
 			config.Host,
 			config.AdminUser,
 			config.PrivateKeyPath,
@@ -5534,7 +5540,7 @@ func setupPlanSummary(config setupConfig) string {
 		)
 	case setupModeFullRun:
 		return fmt.Sprintf(
-			"- Use profile %s for %s.\n- Connect first as %s, create or update %s, then harden the server.\n- Configure Docker networking and UFW as %s.\n- Deploy Traefik, Pangolin, Gerbil, Newt, Beszel, and Dozzle for %s.\n- Deploy committed observability configuration from %s.\n- Pangolin and observability secrets are generated, saved, and reused without printing them.\n- %s.\n",
+			"- Use profile %s for %s.\n- Connect first as %s, create or update %s, then harden the server.\n- Configure Docker networking and UFW as %s.\n- Deploy Traefik, Pangolin, Gerbil, Newt, Beszel, Dozzle, and Dockhand for %s.\n- Deploy committed observability configuration from %s.\n- Pangolin and observability secrets are generated, saved, and reused without printing them.\n- %s.\n",
 			firstNonEmpty(config.ProfileID, "(unsaved)"),
 			config.Host,
 			config.InitialSSHUser,

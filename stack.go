@@ -444,7 +444,7 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	} else if err != nil {
 		return err
 	}
-	scaffoldCreated, err := ensureConfigRepositoryScaffold(revision.Path, repositoryScaffold)
+	scaffoldCreated, err := ensureConfigRepositoryScaffold(ctx, revision.Path, repositoryScaffold)
 	if err != nil {
 		return err
 	}
@@ -497,7 +497,7 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 
 	fmt.Fprintf(stdout, "Stack scaffold created: %s\n", directory)
 	if scaffoldCreated {
-		fmt.Fprintln(stdout, "The configuration repository scaffold was created in the same change set.")
+		fmt.Fprintln(stdout, "The managed observability scaffold was prepared in the same change set.")
 	}
 	if sourcePath != destinationPath {
 		fmt.Fprintln(stdout, "Only the Compose file was imported. Copy any relative bind-mount, env, or configuration files into the stack directory before committing.")
@@ -810,9 +810,6 @@ func generateStackPangolinOverride(stackName string, metadata stackMetadata, ser
 	if err := validateStackMetadata(stackName, metadata, services); err != nil {
 		return "", err
 	}
-	if len(metadata.PublicResources) == 0 {
-		return "services: {}\n", nil
-	}
 	var builder strings.Builder
 	builder.WriteString("services:\n")
 	resourcesByService := map[string][]stackPublicResource{}
@@ -823,14 +820,20 @@ func generateStackPangolinOverride(stackName string, metadata stackMetadata, ser
 		}
 		resourcesByService[resource.Service] = append(resourcesByService[resource.Service], resource)
 	}
-	for _, service := range serviceOrder {
+	for _, serviceSummary := range services {
+		service := serviceSummary.Name
 		builder.WriteString("  " + service + ":\n")
-		if servicePublishesPorts(services, service) {
+		resources := resourcesByService[service]
+		if len(resources) > 0 && servicePublishesPorts(services, service) {
 			builder.WriteString("    ports: !reset []\n")
 		}
-		builder.WriteString("    networks:\n      - " + aegisPublicNetwork + "\n")
+		if len(resources) > 0 {
+			builder.WriteString("    networks:\n      - " + aegisPublicNetwork + "\n")
+		}
 		builder.WriteString("    labels:\n")
-		for _, resource := range resourcesByService[service] {
+		builder.WriteString("      - " + yamlDoubleQuote("dockhand.update=false") + "\n")
+		builder.WriteString("      - " + yamlDoubleQuote("dockhand.notify=false") + "\n")
+		for _, resource := range resources {
 			if resource.SSO && firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail) == "" {
 				return "", fmt.Errorf("resource %q enables SSO but the profile has no Pangolin administrator email", resource.ID)
 			}
@@ -861,7 +864,9 @@ func generateStackPangolinOverride(stackName string, metadata stackMetadata, ser
 			}
 		}
 	}
-	builder.WriteString("networks:\n  " + aegisPublicNetwork + ":\n    external: true\n")
+	if len(serviceOrder) > 0 {
+		builder.WriteString("networks:\n  " + aegisPublicNetwork + ":\n    external: true\n")
+	}
 	return builder.String(), nil
 }
 

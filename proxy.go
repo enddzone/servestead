@@ -378,8 +378,8 @@ func printPangolinSetupGuidance(output io.Writer, baseDomain, setupToken string)
 
 func requiredDNSGuidance(baseDomain, host string) string {
 	return fmt.Sprintf(
-		"Required DNS: A pangolin.%s -> %s, A beszel.%s -> %s, A dozzle.%s -> %s",
-		baseDomain, host, baseDomain, host, baseDomain, host,
+		"Required DNS: A pangolin.%s -> %s, A beszel.%s -> %s, A dozzle.%s -> %s, A dockhand.%s -> %s",
+		baseDomain, host, baseDomain, host, baseDomain, host, baseDomain, host,
 	)
 }
 

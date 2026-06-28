@@ -57,6 +57,8 @@ func TestGenerateStackPangolinOverrideOwnsLabelsWithoutRewritingCompose(t *testi
 	for _, expected := range []string{
 		"ports: !reset []",
 		"- aegis-public",
+		"dockhand.update=false",
+		"dockhand.notify=false",
 		"pangolin.public-resources.aegisnode-my-app-web.name=My App",
 		"pangolin.public-resources.aegisnode-my-app-web.full-domain=app.example.com",
 		"pangolin.public-resources.aegisnode-my-app-web.auth.sso-users[0]=admin@example.com",
@@ -119,7 +121,7 @@ func TestGenerateStackPangolinOverrideGroupsMultipleResourcesByService(t *testin
 	}
 }
 
-func TestPrivateStackGeneratesEmptyOverride(t *testing.T) {
+func TestPrivateStackGeneratesDockhandOnlyOverride(t *testing.T) {
 	services, err := inspectComposeServices([]byte(testApplicationCompose))
 	if err != nil {
 		t.Fatal(err)
@@ -130,8 +132,19 @@ func TestPrivateStackGeneratesEmptyOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if override != "services: {}\n" {
-		t.Fatalf("unexpected private stack override: %q", override)
+	for _, expected := range []string{
+		"  web:",
+		"  api:",
+		"  worker:",
+		"dockhand.update=false",
+		"dockhand.notify=false",
+	} {
+		if !strings.Contains(override, expected) {
+			t.Fatalf("private stack override missing %q:\n%s", expected, override)
+		}
+	}
+	if strings.Contains(override, "pangolin.public-resources") || strings.Contains(override, aegisPublicNetwork) {
+		t.Fatalf("private stack override should not publish Pangolin resources:\n%s", override)
 	}
 	tasks := configuredStackTasks(observabilityConfig{}, configuredStack{
 		Name: "private", Override: override,
@@ -661,6 +674,59 @@ func TestRunStackRepositorySyncIncludesCleanupAndCurrentStacks(t *testing.T) {
 	}
 	if !foundDeploy {
 		t.Fatalf("sync did not deploy the current stack: %+v", tasks)
+	}
+}
+
+func TestDockhandGitStackReconciliationUsesCommittedGitOrigin(t *testing.T) {
+	stack := configuredStack{Name: "site", Override: "services: {}\n"}
+	config := observabilityConfig{
+		RepositoryOrigin: "https://github.com/example/config.git",
+		RepositoryBranch: "main",
+		RepositoryCommit: "abcdef1234567890",
+		Stacks:           []configuredStack{stack},
+	}
+	tasks := stackRepositoryReconcileTasks(config, "aegisadmin")
+	names := strings.Join(taskNames(tasks), "\n")
+	joined := strings.Join(taskScripts(tasks), "\n")
+	for _, expected := range []string{
+		"Remove Dockhand Git stacks deleted from committed configuration",
+		"Reconcile site Dockhand Git stack",
+	} {
+		if !strings.Contains(names, expected) {
+			t.Fatalf("Dockhand task flow missing %q:\n%s", expected, names)
+		}
+	}
+	for _, expected := range []string{
+		"http://127.0.0.1:3003/api",
+		`dockhand_environment_id="$(dockhand_ensure_environment)"`,
+		`"$dockhand_api/git/stacks?env=$dockhand_environment_id"`,
+		`"$dockhand_api/git/stacks/$stack_id/sync"`,
+		`"name":"local-vps"`,
+		`"connectionType":"direct"`,
+		`"host":"dockhand-socket-proxy"`,
+		`"stackName":"aegisnode-site"`,
+		`"repoName":"aegisnode-site"`,
+		`"environmentId":0`,
+		`"url":"https://github.com/example/config.git"`,
+		`"branch":"main"`,
+		`"composePath":"stacks/site/compose.yaml"`,
+		`"contextDir":"stacks/site"`,
+		`"deployNow":false`,
+		`"autoUpdate":false`,
+		"abcdef1",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("Dockhand reconciliation missing %q:\n%s", expected, joined)
+		}
+	}
+	for _, task := range tasks {
+		if strings.Contains(task.Name, "Dockhand") {
+			command := exec.Command("sh", "-n")
+			command.Stdin = strings.NewReader(task.Apply)
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("%s is not valid shell: %v\n%s\n%s", task.Name, err, output, task.Apply)
+			}
+		}
 	}
 }
 

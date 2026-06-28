@@ -20,7 +20,13 @@ const (
 	beszelImage      = "docker.io/henrygd/beszel:0.18.7"
 	beszelAgentImage = "docker.io/henrygd/beszel-agent:0.18.7"
 	dozzleImage      = "docker.io/amir20/dozzle:v10.6.6"
+	dockhandImage    = "docker.io/fnsys/dockhand:latest"
 )
+
+const dockhandLocalAPI = "http://127.0.0.1:3003/api"
+const dockhandEnvironmentName = "local-vps"
+const dockhandEnvironmentHost = "dockhand-socket-proxy"
+const dockhandEnvironmentPort = 2375
 
 type observabilityConfig struct {
 	Host              string
@@ -34,6 +40,7 @@ type observabilityConfig struct {
 	HubPrivateKey     string
 	HubPublicKey      string
 	RepositoryCommit  string
+	RepositoryBranch  string
 	RepositoryOrigin  string
 	RepositoryCompose string
 	RepositorySHA256  string
@@ -66,6 +73,7 @@ func observabilityTasks(config observabilityConfig) []Task {
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory),
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory+"/beszel_data"),
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory+"/agent_keys"),
+			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory+"/dockhand_data"),
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" /etc/aegisnode",
 		)},
 		{Name: "Write Beszel system configuration", Apply: remoteWriteFileCommand(observabilityStackDirectory+"/beszel_data/config.yml", beszelConfigFile(config), "root", group, 0600)},
@@ -98,11 +106,12 @@ func observabilityTasks(config observabilityConfig) []Task {
 		Task{Name: "Verify Pangolin observability resources", Apply: observabilityResourceVerifyCommand(config)},
 		Task{Name: "Verify observability stack", Apply: commandScript(
 			"running=\"$("+composeCommand+" ps --services --status running)\"",
-			"for service in beszel beszel-agent dozzle; do",
+			"for service in beszel beszel-agent dozzle dockhand dockhand-socket-proxy; do",
 			"  printf '%s\\n' \"$running\" | grep -Fx \"$service\" >/dev/null",
 			"done",
 			composeCommand+" ps",
 		)},
+		dockhandEnvironmentReconcileTask(config),
 	)
 	for _, stack := range config.Stacks {
 		tasks = append(tasks, configuredStackTasks(config, stack, group)...)
@@ -194,6 +203,9 @@ sys.exit(0 if ok else 1)`))
 		"for service in $expected; do printf '%s\\n' \"$running\" | grep -Fx \"$service\" >/dev/null; done",
 		composeCommand+" ps",
 	)})
+	if shouldReconcileDockhandGitStacks(config) {
+		tasks = append(tasks, dockhandGitStackReconcileTask(config, stack))
+	}
 	return tasks
 }
 
@@ -218,10 +230,17 @@ func stackRepositoryReconcileTasks(config observabilityConfig, group string) []T
 		tasks = append(tasks, observabilityRepositoryTask(config, group))
 	}
 	tasks = append(tasks, removedStackCleanupTask(config))
+	if shouldReconcileDockhandGitStacks(config) {
+		tasks = append(tasks, removedDockhandGitStackCleanupTask(config))
+	}
 	for _, stack := range config.Stacks {
 		tasks = append(tasks, configuredStackTasks(config, stack, group)...)
 	}
 	return tasks
+}
+
+func shouldReconcileDockhandGitStacks(config observabilityConfig) bool {
+	return config.RepositoryOrigin != "" && config.RepositoryBranch != ""
 }
 
 func removedStackCleanupTask(config observabilityConfig) Task {
@@ -284,6 +303,258 @@ for resource in resources:
 	)
 	script := commandScript(commands...)
 	return Task{Name: "Remove stacks deleted from committed configuration", Apply: script}
+}
+
+func removedDockhandGitStackCleanupTask(config observabilityConfig) Task {
+	names := make([]string, 0, len(config.Stacks))
+	for _, stack := range config.Stacks {
+		names = append(names, dockhandGitStackName(stack.Name))
+	}
+	sort.Strings(names)
+	desired := `[]`
+	if len(names) > 0 {
+		desired = `["` + strings.Join(names, `","`) + `"]`
+	}
+	selectDeletes := `import json,sys
+desired=set(json.loads(sys.argv[1]))
+for stack in json.load(sys.stdin):
+ name=stack.get("stackName","")
+ if name.startswith("aegisnode-") and name not in desired:
+  print(stack["id"])`
+	commands := dockhandEnvironmentCommandPrelude("")
+	commands = append(commands,
+		`if ! dockhand_available; then echo 'Dockhand API is unavailable; skipping stale Dockhand Git stack cleanup.'; exit 0; fi`,
+		`dockhand_environment_id="$(dockhand_ensure_environment)" || { echo 'Dockhand environment could not be prepared; skipping stale Dockhand Git stack cleanup.' >&2; exit 0; }`,
+		`stacks="$(dockhand_request GET "$dockhand_api/git/stacks?env=$dockhand_environment_id")" || { echo 'Dockhand Git stack listing failed; skipping cleanup.' >&2; exit 0; }`,
+		`delete_ids="$(printf '%s' "$stacks" | python3 -c `+shellQuote(selectDeletes)+` `+shellQuote(desired)+`)"`,
+		`for stack_id in $delete_ids; do`,
+		`  dockhand_request DELETE "$dockhand_api/git/stacks/$stack_id" >/dev/null || echo "Dockhand Git stack $stack_id could not be deleted; continuing." >&2`,
+		`done`,
+	)
+	return Task{Name: "Remove Dockhand Git stacks deleted from committed configuration", Apply: commandScript(commands...)}
+}
+
+func dockhandGitStackReconcileTask(config observabilityConfig, stack configuredStack) Task {
+	return Task{Name: "Reconcile " + stack.Name + " Dockhand Git stack", Apply: dockhandGitStackReconcileCommand(config, stack)}
+}
+
+func dockhandGitStackReconcileCommand(config observabilityConfig, stack configuredStack) string {
+	stackName := dockhandGitStackName(stack.Name)
+	composePath := "stacks/" + stack.Name + "/compose.yaml"
+	contextDir := "stacks/" + stack.Name
+	commitPrefix := config.RepositoryCommit
+	if len(commitPrefix) > 7 {
+		commitPrefix = commitPrefix[:7]
+	}
+	payloadTemplate := fmt.Sprintf(
+		`{"stackName":%s,"repoName":%s,"environmentId":0,"url":%s,"branch":%s,"composePath":%s,"contextDir":%s,"envFilePath":null,"autoUpdate":false,"webhookEnabled":false,"deployNow":false,"buildOnDeploy":false,"noBuildCache":false,"repullImages":false,"forceRedeploy":false}`,
+		jsonString(stackName),
+		jsonString(stackName),
+		jsonString(config.RepositoryOrigin),
+		jsonString(config.RepositoryBranch),
+		jsonString(composePath),
+		jsonString(contextDir),
+	)
+	setEnvironmentID := `import json,sys
+payload=json.load(sys.stdin)
+payload["environmentId"]=int(sys.argv[1])
+print(json.dumps(payload,separators=(",",":")))`
+	selectExisting := `import json,sys
+name=sys.argv[1]
+for stack in json.load(sys.stdin):
+ if stack.get("stackName")==name:
+  print(json.dumps(stack))
+  break`
+	validateExisting := `import json,sys
+stack=json.load(sys.stdin)
+desired=json.loads(sys.argv[1])
+ok=(stack.get("environmentId")==desired["environmentId"] and
+    stack.get("repoUrl")==desired["url"] and
+    stack.get("repoBranch")==desired["branch"] and
+    stack.get("composePath")==desired["composePath"] and
+    (stack.get("contextDir") or None)==desired["contextDir"] and
+    not bool(stack.get("autoUpdate")) and
+    not bool(stack.get("webhookEnabled")))
+sys.exit(0 if ok else 1)`
+	extractID := `import json,sys
+print(json.load(sys.stdin)["id"])`
+	commitMatches := `import json,sys
+stack=json.load(sys.stdin)
+expected=sys.argv[1]
+actual=str(stack.get("lastCommit") or "")
+sys.exit(0 if actual[:7]==expected else 1)`
+	extractCommit := `import json,sys
+data=json.load(sys.stdin)
+print(str(data.get("commit") or ""))`
+	commands := dockhandEnvironmentCommandPrelude("")
+	commands = append(commands,
+		`if ! dockhand_available; then echo `+shellQuote("Dockhand API is unavailable; skipping Dockhand Git stack reconciliation for "+stack.Name+".")+`; exit 0; fi`,
+		`dockhand_environment_id="$(dockhand_ensure_environment)" || { echo `+shellQuote("Dockhand environment could not be prepared; skipping "+stack.Name+".")+` >&2; exit 0; }`,
+		`dockhand_stack_payload_template=`+shellQuote(payloadTemplate),
+		`desired_payload="$(printf '%s' "$dockhand_stack_payload_template" | python3 -c `+shellQuote(setEnvironmentID)+` "$dockhand_environment_id")"`,
+		`stacks="$(dockhand_request GET "$dockhand_api/git/stacks?env=$dockhand_environment_id")" || { echo `+shellQuote("Dockhand Git stack listing failed; skipping "+stack.Name+".")+` >&2; exit 0; }`,
+		`existing="$(printf '%s' "$stacks" | python3 -c `+shellQuote(selectExisting)+` `+shellQuote(stackName)+`)"`,
+		`if [ -n "$existing" ] && ! printf '%s' "$existing" | python3 -c `+shellQuote(validateExisting)+` "$desired_payload"; then`,
+		`  stack_id="$(printf '%s' "$existing" | python3 -c `+shellQuote(extractID)+`)"`,
+		`  dockhand_request DELETE "$dockhand_api/git/stacks/$stack_id" >/dev/null || { echo `+shellQuote("Dockhand Git stack "+stack.Name+" exists with incompatible settings and could not be recreated; continuing.")+` >&2; exit 0; }`,
+		`  existing=''`,
+		`fi`,
+		`if [ -z "$existing" ]; then`,
+		`  existing="$(dockhand_request POST "$dockhand_api/git/stacks" "$desired_payload")" || { echo `+shellQuote("Dockhand Git stack "+stack.Name+" could not be created; continuing.")+` >&2; exit 0; }`,
+		`fi`,
+		`if printf '%s' "$existing" | python3 -c `+shellQuote(commitMatches)+` `+shellQuote(commitPrefix)+`; then`,
+		`  echo `+shellQuote("Dockhand Git stack "+stack.Name+" already matches "+commitPrefix+".")+`; exit 0`,
+		`fi`,
+		`stack_id="$(printf '%s' "$existing" | python3 -c `+shellQuote(extractID)+`)"`,
+		`sync_result="$(dockhand_request POST "$dockhand_api/git/stacks/$stack_id/sync")" || { echo `+shellQuote("Dockhand Git stack "+stack.Name+" sync failed; continuing.")+` >&2; exit 0; }`,
+		`sync_commit="$(printf '%s' "$sync_result" | python3 -c `+shellQuote(extractCommit)+`)"`,
+		`case "$sync_commit" in`,
+		`  `+commitPrefix+`*) echo `+shellQuote("Dockhand Git stack "+stack.Name+" synced to "+commitPrefix+".")+` ;;`,
+		`  *) echo `+shellQuote("Dockhand Git stack "+stack.Name+" synced, but did not report the committed AegisNode revision "+commitPrefix+".")+` >&2 ;;`,
+		`esac`,
+	)
+	return commandScript(commands...)
+}
+
+func dockhandEnvironmentReconcileTask(config observabilityConfig) Task {
+	checkSuccess := `import json,sys
+data=json.load(sys.stdin)
+sys.exit(0 if data.get("success") is True else 1)`
+	checkContainers := `import json,sys
+containers=json.load(sys.stdin)
+sys.exit(0 if isinstance(containers,list) and len(containers)>0 else 1)`
+	commands := dockhandEnvironmentCommandPrelude(config.Host)
+	commands = append(commands,
+		`set +e; dockhand_wait_available; dockhand_status=$?; set -e`,
+		`case "$dockhand_status" in`,
+		`  0) ;;`,
+		`  2) echo 'Dockhand authentication is enabled and AegisNode has no Dockhand API session; skipping Dockhand environment setup.' >&2; exit 0 ;;`,
+		`  *) echo 'Dockhand API did not become available after deployment.' >&2; exit 1 ;;`,
+		`esac`,
+		`dockhand_environment_id="$(dockhand_ensure_environment)" || { echo 'Dockhand local Docker environment could not be created or updated.' >&2; exit 1; }`,
+		`test_result="$(dockhand_request POST "$dockhand_api/environments/$dockhand_environment_id/test")"`,
+		`if ! printf '%s' "$test_result" | python3 -c `+shellQuote(checkSuccess)+`; then`,
+		`  echo 'Dockhand local Docker environment did not pass its connection test.' >&2`,
+		`  printf '%s\n' "$test_result" >&2`,
+		`  exit 1`,
+		`fi`,
+		`containers="$(dockhand_request GET "$dockhand_api/containers?env=$dockhand_environment_id")"`,
+		`if ! printf '%s' "$containers" | python3 -c `+shellQuote(checkContainers)+`; then`,
+		`  echo 'Dockhand local Docker environment is connected but returned no visible containers.' >&2`,
+		`  exit 1`,
+		`fi`,
+		`echo "Dockhand local Docker environment $dockhand_environment_id is connected and lists containers."`,
+	)
+	return Task{Name: "Configure Dockhand local environment", Apply: commandScript(commands...)}
+}
+
+func dockhandEnvironmentCommandPrelude(publicIP string) []string {
+	selectEnvironment := `import json,sys
+name=sys.argv[1]
+for environment in json.load(sys.stdin):
+ if environment.get("name")==name:
+  print(json.dumps(environment))
+  break`
+	environmentMatches := `import json,sys
+environment=json.load(sys.stdin)
+desired=json.loads(sys.argv[1])
+ok=(environment.get("name")==desired["name"] and
+    environment.get("connectionType")==desired["connectionType"] and
+    (environment.get("host") or "")==desired["host"] and
+    int(environment.get("port") or 0)==desired["port"] and
+    (environment.get("protocol") or "")==desired["protocol"] and
+    bool(environment.get("collectActivity"))==desired["collectActivity"] and
+    bool(environment.get("collectMetrics"))==desired["collectMetrics"] and
+    bool(environment.get("highlightChanges"))==desired["highlightChanges"])
+sys.exit(0 if ok else 1)`
+	extractID := `import json,sys
+print(json.load(sys.stdin)["id"])`
+	commands := dockhandCommandPrelude()
+	commands = append(commands,
+		`dockhand_environment_payload=`+shellQuote(dockhandEnvironmentPayload(publicIP)),
+		`dockhand_ensure_environment() {`,
+		`  environments="$(dockhand_request GET "$dockhand_api/environments")" || return 1`,
+		`  existing="$(printf '%s' "$environments" | python3 -c `+shellQuote(selectEnvironment)+` `+shellQuote(dockhandEnvironmentName)+`)" || return 1`,
+		`  if [ -n "$existing" ]; then`,
+		`    environment_id="$(printf '%s' "$existing" | python3 -c `+shellQuote(extractID)+`)" || return 1`,
+		`    if ! printf '%s' "$existing" | python3 -c `+shellQuote(environmentMatches)+` "$dockhand_environment_payload"; then`,
+		`      existing="$(dockhand_request PUT "$dockhand_api/environments/$environment_id" "$dockhand_environment_payload")" || return 1`,
+		`    fi`,
+		`  else`,
+		`    existing="$(dockhand_request POST "$dockhand_api/environments" "$dockhand_environment_payload")" || return 1`,
+		`  fi`,
+		`  environment_id="$(printf '%s' "$existing" | python3 -c `+shellQuote(extractID)+`)" || return 1`,
+		`  printf '%s\n' "$environment_id"`,
+		`}`,
+	)
+	return commands
+}
+
+func dockhandEnvironmentPayload(publicIP string) string {
+	publicIPValue := "null"
+	if strings.TrimSpace(publicIP) != "" {
+		publicIPValue = jsonString(strings.TrimSpace(publicIP))
+	}
+	return fmt.Sprintf(
+		`{"name":%s,"connectionType":"direct","host":%s,"port":%d,"protocol":"http","tlsSkipVerify":false,"icon":"server","collectActivity":true,"collectMetrics":true,"highlightChanges":true,"labels":["aegisnode"],"publicIp":%s}`,
+		jsonString(dockhandEnvironmentName),
+		jsonString(dockhandEnvironmentHost),
+		dockhandEnvironmentPort,
+		publicIPValue,
+	)
+}
+
+func dockhandCommandPrelude() []string {
+	return []string{
+		`dockhand_api=` + shellQuote(dockhandLocalAPI),
+		`dockhand_request() {`,
+		`  method="$1"`,
+		`  url="$2"`,
+		`  response_file="$(mktemp)"`,
+		`  if [ "$#" -eq 3 ]; then`,
+		`    status="$(curl -sS -o "$response_file" -w '%{http_code}' -X "$method" "$url" -H 'Content-Type: application/json' --data "$3")"`,
+		`  else`,
+		`    status="$(curl -sS -o "$response_file" -w '%{http_code}' -X "$method" "$url")"`,
+		`  fi`,
+		`  result=$?`,
+		`  if [ "$result" -ne 0 ]; then`,
+		`    rm -f "$response_file"`,
+		`    return "$result"`,
+		`  fi`,
+		`  case "$status" in`,
+		`    2??) cat "$response_file" ;;`,
+		`    *)`,
+		`      echo "Dockhand API $method $url failed (HTTP $status):" >&2`,
+		`      cat "$response_file" >&2`,
+		`      echo >&2`,
+		`      rm -f "$response_file"`,
+		`      return 1`,
+		`      ;;`,
+		`  esac`,
+		`  rm -f "$response_file"`,
+		`}`,
+		`dockhand_available() {`,
+		`  session="$(curl -fsS "$dockhand_api/auth/session" 2>/dev/null)" || return 1`,
+		`  if printf '%s' "$session" | grep -Eq '"authEnabled"[[:space:]]*:[[:space:]]*true' && ! printf '%s' "$session" | grep -Eq '"authenticated"[[:space:]]*:[[:space:]]*true'; then`,
+		`    echo 'Dockhand authentication is enabled and AegisNode has no Dockhand API session; skipping Dockhand API reconciliation.' >&2`,
+		`    return 2`,
+		`  fi`,
+		`  return 0`,
+		`}`,
+		`dockhand_wait_available() {`,
+		`  for attempt in $(seq 1 30); do`,
+		`    status=0`,
+		`    dockhand_available || status=$?`,
+		`    if [ "$status" -eq 0 ] || [ "$status" -eq 2 ]; then return "$status"; fi`,
+		`    sleep 2`,
+		`  done`,
+		`  return 1`,
+		`}`,
+	}
+}
+
+func dockhandGitStackName(stackName string) string {
+	return "aegisnode-" + stackName
 }
 
 func stackResourceVerifyCommand(config observabilityConfig, stack configuredStack) string {
@@ -522,9 +793,65 @@ func observabilityComposeFile(config observabilityConfig) string {
 	lines = append(lines, labels("aegisnode-dozzle", "Dozzle", "dozzle", 8080, "/healthcheck")...)
 	lines = append(lines,
 		"",
+		"  dockhand:",
+		"    image: "+dockhandImage,
+		"    container_name: dockhand",
+		"    restart: unless-stopped",
+		"    depends_on:",
+		"      - dockhand-socket-proxy",
+		"    security_opt:",
+		"      - no-new-privileges:true",
+		"    environment:",
+		"      DOCKER_HOST: \"tcp://dockhand-socket-proxy:2375\"",
+		"      HOST_DATA_DIR: "+yamlDoubleQuote(observabilityStackDirectory+"/dockhand_data"),
+		"      COOKIE_SECURE: \"true\"",
+		"    expose:",
+		"      - \"3000\"",
+		"    ports:",
+		"      - \"127.0.0.1:3003:3000\"",
+		"    volumes:",
+		"      - "+observabilityStackDirectory+"/dockhand_data:/app/data",
+		"    networks:",
+		"      - "+aegisPublicNetwork,
+		"      - aegis-dockhand",
+		"    labels:",
+		"      - dockhand.update=false",
+		"      - dockhand.notify=false",
+	)
+	lines = append(lines, labels("aegisnode-dockhand", "Dockhand", "dockhand", 3000, "/api/auth/session")...)
+	lines = append(lines,
+		"",
+		"  dockhand-socket-proxy:",
+		"    image: "+socketProxyImage,
+		"    container_name: aegis-dockhand-socket-proxy",
+		"    restart: unless-stopped",
+		"    security_opt:",
+		"      - no-new-privileges:true",
+		"    environment:",
+		"      CONTAINERS: \"1\"",
+		"      EVENTS: \"1\"",
+		"      EXEC: \"1\"",
+		"      IMAGES: \"1\"",
+		"      INFO: \"1\"",
+		"      NETWORKS: \"1\"",
+		"      PING: \"1\"",
+		"      VERSION: \"1\"",
+		"      VOLUMES: \"1\"",
+		"      POST: \"1\"",
+		"    volumes:",
+		"      - /var/run/docker.sock:/var/run/docker.sock:ro",
+		"    networks:",
+		"      - aegis-dockhand",
+		"    labels:",
+		"      - dockhand.hidden=true",
+		"      - dockhand.update=false",
+		"      - dockhand.notify=false",
+		"",
 		"networks:",
 		"  "+aegisPublicNetwork+":",
 		"    external: true",
+		"  aegis-dockhand:",
+		"    internal: true",
 		"",
 	)
 	return strings.Join(lines, "\n")
@@ -608,7 +935,7 @@ sys.exit(0 if ok else 1)`
 		`  fi`,
 		`  sleep 2`,
 		`done`,
-		`echo 'Pangolin did not converge to exactly one managed Beszel and Dozzle resource with health checks enabled.' >&2`,
+		`echo 'Pangolin did not converge to exactly one managed Beszel, Dozzle, and Dockhand resource with health checks enabled.' >&2`,
 		`exit 1`,
 	)
 	return commandScript(commands...)
@@ -616,7 +943,7 @@ sys.exit(0 if ok else 1)`
 
 func observabilityResourceSpecs(baseDomain string) string {
 	return fmt.Sprintf(
-		`[{"name":"Beszel","domain":%s,"nice_id":"aegisnode-beszel"},{"name":"Dozzle","domain":%s,"nice_id":"aegisnode-dozzle"}]`,
-		jsonString("beszel."+baseDomain), jsonString("dozzle."+baseDomain),
+		`[{"name":"Beszel","domain":%s,"nice_id":"aegisnode-beszel"},{"name":"Dozzle","domain":%s,"nice_id":"aegisnode-dozzle"},{"name":"Dockhand","domain":%s,"nice_id":"aegisnode-dockhand"}]`,
+		jsonString("beszel."+baseDomain), jsonString("dozzle."+baseDomain), jsonString("dockhand."+baseDomain),
 	)
 }

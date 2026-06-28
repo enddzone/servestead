@@ -69,19 +69,82 @@ func TestPrepareSuppliedRepositoryScaffoldsThenRequiresReview(t *testing.T) {
 	}
 }
 
+func TestPrepareConfigRepositoryRefreshesManagedObservabilityScaffoldForReview(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init", "-b", "main")
+	composePath := filepath.Join(repository, filepath.FromSlash(observabilityComposeRepositoryPath))
+	if err := os.MkdirAll(filepath.Dir(composePath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(composePath, []byte(legacyManagedObservabilityCompose()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repository, "add", observabilityComposeRepositoryPath)
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Legacy observability")
+
+	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: "example.com", AdminEmail: "admin@example.com"})
+	_, err := prepareConfigRepository(context.Background(), repository, "", "", "profile-1", scaffold)
+	if !errors.Is(err, errRepositoryReviewRequired) {
+		t.Fatalf("expected review-required error, got %v", err)
+	}
+	data, err := os.ReadFile(composePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != scaffold {
+		t.Fatal("managed observability scaffold was not refreshed")
+	}
+	status := gitOutput(t, repository, "status", "--short", "--", observabilityComposeRepositoryPath)
+	if !strings.Contains(status, observabilityComposeRepositoryPath) {
+		t.Fatalf("refreshed scaffold was not left for review: %q", status)
+	}
+}
+
+func TestResolveConfigRepositoryBranchPrefersCurrentOriginBranch(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init", "-b", "main")
+
+	branch, err := resolveConfigRepositoryBranch(context.Background(), repository, "  origin/feature\n  origin/main\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if branch != "main" {
+		t.Fatalf("expected main, got %q", branch)
+	}
+}
+
+func TestResolveConfigRepositoryBranchRejectsAmbiguousDetachedCheckout(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repository, "add", "README.md")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Initial")
+	runGitCommand(t, repository, "checkout", "--detach", "HEAD")
+
+	_, err := resolveConfigRepositoryBranch(context.Background(), repository, "  origin/feature\n  origin/main\n")
+	if err == nil || !strings.Contains(err.Error(), "detached") {
+		t.Fatalf("expected detached checkout error, got %v", err)
+	}
+}
+
 func TestEnsureConfigRepositoryScaffoldIsIdempotent(t *testing.T) {
 	requireGit(t)
 	repository := t.TempDir()
 	runGitCommand(t, repository, "init", "-b", "main")
 	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: "example.com", AdminEmail: "admin@example.com"})
-	created, err := ensureConfigRepositoryScaffold(repository, scaffold)
+	created, err := ensureConfigRepositoryScaffold(context.Background(), repository, scaffold)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !created {
 		t.Fatal("missing repository scaffold was not created")
 	}
-	created, err = ensureConfigRepositoryScaffold(repository, scaffold)
+	created, err = ensureConfigRepositoryScaffold(context.Background(), repository, scaffold)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +158,33 @@ func TestEnsureConfigRepositoryScaffoldIsIdempotent(t *testing.T) {
 	if string(data) != scaffold {
 		t.Fatal("repository scaffold content changed")
 	}
+}
+
+func legacyManagedObservabilityCompose() string {
+	return `services:
+  beszel:
+    image: docker.io/henrygd/beszel:0.18.7
+    networks:
+      - aegis-public
+    labels:
+      - pangolin.public-resources.aegisnode-beszel.name=Beszel
+
+  beszel-agent:
+    image: docker.io/henrygd/beszel-agent:0.18.7
+    networks:
+      - aegis-public
+
+  dozzle:
+    image: docker.io/amir20/dozzle:v10.6.6
+    networks:
+      - aegis-public
+    labels:
+      - pangolin.public-resources.aegisnode-dozzle.name=Dozzle
+
+networks:
+  aegis-public:
+    external: true
+`
 }
 
 func TestValidateGitHubRepositoryURL(t *testing.T) {

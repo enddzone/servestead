@@ -58,6 +58,8 @@
       background: var(--code);
       border-radius: 4px;
       font-size: 0.92em;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     main {
@@ -475,8 +477,9 @@
             secrets, and mutations can be recreated deterministically.
           </p>
           <div class="badge-row">
-            <span class="badge good">Recommendation: hybrid pilot</span>
+            <span class="badge good">Selected direction: deploy-trigger investigation</span>
             <span class="badge">Source of truth: AegisNode config repo</span>
+            <span class="badge">First target: add Dockhand without replacing</span>
             <span class="badge warn">Open risk: socket permissions</span>
             <span class="badge warn">Open risk: Dockhand DB state</span>
           </div>
@@ -484,10 +487,11 @@
         <div class="panel decision">
           <h2>Short Answer</h2>
           <p>
-            The idea is not silly. It becomes risky only if Dockhand and AegisNode both
-            own stack lifecycle. Use Dockhand first for logs, container inspection, and
-            operational visibility while AegisNode keeps stack import, route review, secrets,
-            generated overrides, deployment, drift checks, and deletion cleanup.
+            The idea is not silly. Based on review feedback, the next investigation should
+            test Dockhand as a future deploy trigger while initially adding it without replacing
+            Beszel, Dozzle, or AegisNode stack management. AegisNode should still keep stack
+            import, route review, secrets, generated overrides, drift checks, and cleanup
+            authoritative until Dockhand state can be recreated from declarations.
           </p>
         </div>
       </div>
@@ -635,9 +639,9 @@ flowchart TD
             <strong>UX gain</strong><div class="meter good"><span style="width: 75%"></span></div>
             <strong>Rework</strong><div class="meter warn"><span style="width: 45%"></span></div>
           </div>
-          <p>Recommended pilot. Replace Dozzle first if logs are adequate.</p>
+          <p>Safest baseline. Still useful as the first installation mode.</p>
         </div>
-        <div class="panel caution">
+        <div class="panel decision">
           <h3>3. Dockhand Deploy Trigger</h3>
           <p class="muted">AegisNode writes stack definitions into Dockhand or calls Dockhand APIs.</p>
           <div class="score">
@@ -645,7 +649,7 @@ flowchart TD
             <strong>UX gain</strong><div class="meter good"><span style="width: 80%"></span></div>
             <strong>Rework</strong><div class="meter warn"><span style="width: 70%"></span></div>
           </div>
-          <p>Possible later, but requires deterministic Dockhand state reconstruction.</p>
+          <p>Selected investigation direction. Start by adding Dockhand without replacing existing tools.</p>
         </div>
         <div class="panel danger">
           <h3>4. Dockhand Owns Stacks</h3>
@@ -723,23 +727,23 @@ flowchart TD
       <div class="timeline">
         <div class="panel phase">
           <h3>Lab Install</h3>
-          <p>Deploy Dockhand beside the current observability stack on a disposable host. Use Pangolin SSO, no public host port, and a dedicated socket proxy.</p>
-          <p class="muted">Verify: Dockhand sees AegisNode projects and basic logs without needing full Docker mutation rights.</p>
+          <p>Deploy Dockhand beside the current observability stack on a disposable host. Use Pangolin SSO, no public host port, and a dedicated full-capability socket proxy.</p>
+          <p class="muted">Verify: Dockhand sees AegisNode projects, logs, metrics, and stack state without replacing existing tools.</p>
         </div>
         <div class="panel phase">
-          <h3>Read-Only Boundary</h3>
-          <p>Test a constrained socket proxy profile first. If Dockhand cannot function, document the minimum extra endpoints and the resulting risk.</p>
-          <p class="muted">Verify: no stop/delete/exec path works for ordinary access.</p>
+          <h3>Control Boundary</h3>
+          <p>Treat the full socket proxy as an admin-only experiment. Record every Dockhand action that mutates Docker state and whether AegisNode can detect or repair the change.</p>
+          <p class="muted">Verify: Pangolin SSO is the entry point and non-admin consumers are not given Dockhand access.</p>
         </div>
         <div class="panel phase">
-          <h3>Dozzle Swap</h3>
-          <p>Add Dockhand as an optional observability service and route <code>dockhand.&lt;domain&gt;</code>. Keep Dozzle until log parity is accepted.</p>
-          <p class="muted">Verify: common debugging workflows are better or at least equal.</p>
+          <h3>No-Replacement Trial</h3>
+          <p>Add Dockhand as an optional observability service and route <code>dockhand.&lt;domain&gt;</code>. Keep Beszel and Dozzle during the first trial.</p>
+          <p class="muted">Verify: Dockhand improves day-two workflows without changing consumer deployment expectations.</p>
         </div>
         <div class="panel phase">
-          <h3>Beszel Decision</h3>
-          <p>Measure Dockhand's host and container metric retention against Beszel on the same VPS. Remove Beszel only if the loss is acceptable.</p>
-          <p class="muted">Verify: no observability gap for small VPS operations.</p>
+          <h3>Deploy-Trigger Spike</h3>
+          <p>Prototype AegisNode calling Dockhand APIs on a test stack after AegisNode has generated the exact Compose, env, and override inputs.</p>
+          <p class="muted">Verify: an empty Dockhand DB can be rehydrated from AegisNode state before any stack manager replacement is considered.</p>
         </div>
       </div>
     </section>

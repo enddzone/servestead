@@ -231,7 +231,7 @@ func TestRunProxyUsesRemoteClientAndPrintsDNSGuidance(t *testing.T) {
 	}
 	for _, expected := range []string{
 		"proxy deployment complete: https://pangolin.example.com",
-		"Required DNS: A pangolin.example.com -> 203.0.113.10, A beszel.example.com -> 203.0.113.10, A dozzle.example.com -> 203.0.113.10",
+		"Required DNS: A pangolin.example.com -> 203.0.113.10, A beszel.example.com -> 203.0.113.10, A dozzle.example.com -> 203.0.113.10, A dockhand.example.com -> 203.0.113.10",
 		"Pangolin administrator: admin@example.com",
 		"Pangolin password:",
 	} {
