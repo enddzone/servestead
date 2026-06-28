@@ -1,0 +1,895 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dockhand Replacement Investigation</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --background: #f7f7f5;
+      --surface: #ffffff;
+      --surface-2: #f0f1f2;
+      --text: #202124;
+      --muted: #5f6368;
+      --border: #d9d9d4;
+      --accent: #185abc;
+      --accent-2: #146c43;
+      --warn: #9a5b00;
+      --danger: #b3261e;
+      --code: #eef0f3;
+      --shadow: 0 12px 32px rgba(32, 33, 36, 0.08);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --background: #161718;
+        --surface: #202124;
+        --surface-2: #2b2d30;
+        --text: #e8eaed;
+        --muted: #aeb4ba;
+        --border: #3c4043;
+        --accent: #8ab4f8;
+        --accent-2: #78d9a2;
+        --warn: #f7c566;
+        --danger: #ffb4ab;
+        --code: #2b2d30;
+        --shadow: 0 12px 32px rgba(0, 0, 0, 0.24);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--text);
+      font: 15px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    a {
+      color: var(--accent);
+    }
+
+    code {
+      padding: 0.12rem 0.35rem;
+      background: var(--code);
+      border-radius: 4px;
+      font-size: 0.92em;
+    }
+
+    main {
+      width: min(1180px, calc(100% - 2rem));
+      margin: 2rem auto 3rem;
+    }
+
+    header,
+    section,
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+
+    header {
+      padding: clamp(1.25rem, 3vw, 2rem);
+      margin-bottom: 1rem;
+    }
+
+    section {
+      padding: clamp(1rem, 2vw, 1.5rem);
+      margin: 1rem 0;
+    }
+
+    h1,
+    h2,
+    h3 {
+      line-height: 1.2;
+      margin: 0;
+    }
+
+    h1 {
+      font-size: clamp(2rem, 5vw, 3.25rem);
+      max-width: 13ch;
+    }
+
+    h2 {
+      font-size: clamp(1.35rem, 2vw, 1.75rem);
+      margin-bottom: 0.75rem;
+    }
+
+    h3 {
+      font-size: 1rem;
+      margin-bottom: 0.45rem;
+    }
+
+    p {
+      margin: 0.45rem 0;
+    }
+
+    ul,
+    ol {
+      margin: 0.5rem 0 0;
+      padding-left: 1.25rem;
+    }
+
+    li + li {
+      margin-top: 0.35rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th,
+    td {
+      padding: 0.8rem;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-size: 0.78rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .eyebrow {
+      margin: 0 0 0.35rem;
+      color: var(--muted);
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .lede {
+      max-width: 72ch;
+      color: var(--muted);
+      font-size: 1.05rem;
+    }
+
+    .hero-grid,
+    .grid-2,
+    .grid-3,
+    .option-grid,
+    .evidence-grid,
+    .risk-grid {
+      display: grid;
+      gap: 1rem;
+      min-width: 0;
+    }
+
+    .hero-grid {
+      grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.65fr);
+      align-items: end;
+    }
+
+    .grid-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .option-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .evidence-grid {
+      grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    }
+
+    .risk-grid {
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+    }
+
+    .panel {
+      padding: 1rem;
+      box-shadow: none;
+      min-width: 0;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 1rem;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      max-width: 100%;
+      padding: 0.28rem 0.55rem;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface-2);
+      color: var(--text);
+      font-size: 0.78rem;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .badge.good {
+      border-color: color-mix(in oklab, var(--accent-2), var(--border) 55%);
+      color: var(--accent-2);
+    }
+
+    .badge.warn {
+      border-color: color-mix(in oklab, var(--warn), var(--border) 45%);
+      color: var(--warn);
+    }
+
+    .badge.danger {
+      border-color: color-mix(in oklab, var(--danger), var(--border) 45%);
+      color: var(--danger);
+    }
+
+    .decision {
+      border-left: 4px solid var(--accent-2);
+    }
+
+    .caution {
+      border-left: 4px solid var(--warn);
+    }
+
+    .danger {
+      border-left: 4px solid var(--danger);
+    }
+
+    .score {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 0.35rem 0.5rem;
+      align-items: center;
+      margin-top: 0.65rem;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .score strong {
+      color: var(--text);
+    }
+
+    .meter {
+      height: 0.45rem;
+      border-radius: 999px;
+      background: var(--surface-2);
+      overflow: hidden;
+    }
+
+    .meter span {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--accent);
+    }
+
+    .meter.good span {
+      background: var(--accent-2);
+    }
+
+    .meter.warn span {
+      background: var(--warn);
+    }
+
+    .meter.danger span {
+      background: var(--danger);
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .mermaid-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface-2);
+      padding: 1rem;
+    }
+
+    .source-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.75rem;
+      padding-left: 0;
+      list-style: none;
+    }
+
+    .source-list li {
+      margin: 0;
+      padding: 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      min-width: 0;
+    }
+
+    form {
+      display: grid;
+      gap: 0.85rem;
+    }
+
+    fieldset {
+      margin: 0;
+      padding: 0.9rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+
+    legend {
+      padding: 0 0.3rem;
+      font-weight: 700;
+    }
+
+    label {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 0.55rem;
+      align-items: start;
+      margin-top: 0.5rem;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 6rem;
+      resize: vertical;
+      padding: 0.7rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      font: inherit;
+    }
+
+    button {
+      justify-self: start;
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      background: var(--accent);
+      color: white;
+      padding: 0.65rem 0.9rem;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      border-color: var(--border);
+      background: var(--surface-2);
+      color: var(--text);
+    }
+
+    .queued {
+      color: var(--accent-2);
+      font-weight: 700;
+      min-height: 1.4rem;
+    }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.75rem;
+      counter-reset: phase;
+    }
+
+    .phase {
+      position: relative;
+      padding-top: 2.2rem;
+    }
+
+    .phase::before {
+      counter-increment: phase;
+      content: counter(phase);
+      position: absolute;
+      top: 0.75rem;
+      left: 0.85rem;
+      width: 1.45rem;
+      height: 1.45rem;
+      display: grid;
+      place-items: center;
+      border-radius: 999px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 0.8rem;
+      font-weight: 800;
+    }
+
+    .nowrap {
+      white-space: nowrap;
+    }
+
+    @media (max-width: 980px) {
+      .hero-grid,
+      .grid-2,
+      .grid-3,
+      .option-grid,
+      .evidence-grid,
+      .risk-grid,
+      .timeline,
+      .source-list {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media print {
+      header,
+      section,
+      .panel {
+        box-shadow: none;
+      }
+
+      button,
+      form {
+        display: none;
+      }
+    }
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: "base",
+      securityLevel: "strict",
+      themeVariables: {
+        primaryColor: "#eef0f3",
+        primaryBorderColor: "#d9d9d4",
+        primaryTextColor: "#202124",
+        lineColor: "#5f6368",
+        tertiaryColor: "#ffffff"
+      }
+    });
+  </script>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="hero-grid">
+        <div>
+          <p class="eyebrow">Investigation plan</p>
+          <h1>Dockhand Without Losing Declarations</h1>
+          <p class="lede">
+            Dockhand looks valuable as an admin and observability plane. The safe path is to
+            keep AegisNode/Git as the owner of deployed state until Dockhand stack records,
+            secrets, and mutations can be recreated deterministically.
+          </p>
+          <div class="badge-row">
+            <span class="badge good">Recommendation: hybrid pilot</span>
+            <span class="badge">Source of truth: AegisNode config repo</span>
+            <span class="badge warn">Open risk: socket permissions</span>
+            <span class="badge warn">Open risk: Dockhand DB state</span>
+          </div>
+        </div>
+        <div class="panel decision">
+          <h2>Short Answer</h2>
+          <p>
+            The idea is not silly. It becomes risky only if Dockhand and AegisNode both
+            own stack lifecycle. Use Dockhand first for logs, container inspection, and
+            operational visibility while AegisNode keeps stack import, route review, secrets,
+            generated overrides, deployment, drift checks, and deletion cleanup.
+          </p>
+        </div>
+      </div>
+    </header>
+
+    <section>
+      <h2>Decision Frame</h2>
+      <div class="grid-3">
+        <div class="panel">
+          <h3>Success Criteria</h3>
+          <ul>
+            <li>Consumers still review and commit <code>stacks/*</code> before deploy.</li>
+            <li>Public exposure remains explicit through AegisNode metadata.</li>
+            <li>Dockhand cannot silently change AegisNode-owned stacks.</li>
+            <li>Logs replace Dozzle only if destructive actions stay blocked.</li>
+            <li>Beszel is removed only after host and container metric parity is proven.</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>Assumptions</h3>
+          <ul>
+            <li>AegisNode consumers value Git-backed reproducibility over one-click UI edits.</li>
+            <li>Current AegisNode route review is part of the product contract, not incidental UI.</li>
+            <li>Dockhand docs are accurate as of the manual version <code>2026-06-10</code>.</li>
+            <li>No live Dockhand deployment has been tested against an AegisNode host yet.</li>
+          </ul>
+        </div>
+        <div class="panel caution">
+          <h3>Not A Goal Yet</h3>
+          <ul>
+            <li>No immediate removal of AegisNode stack management.</li>
+            <li>No hidden migration of AegisNode secrets into Dockhand's database.</li>
+            <li>No default Dockhand auto-update for AegisNode-managed containers.</li>
+            <li>No public Dockhand exposure without upstream auth and socket limits.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Current Ownership Boundary</h2>
+      <div class="evidence-grid">
+        <div class="panel">
+          <h3>AegisNode Today</h3>
+          <ul>
+            <li>Observability Compose is consumer-owned and Git-backed at <code>stacks/observability/compose.yaml</code>.</li>
+            <li>Deployment uses committed <code>HEAD</code>; dirty <code>stacks/</code> content blocks deployment.</li>
+            <li>Application imports copy Compose into <code>stacks/&lt;name&gt;/compose.yaml</code> and write <code>aegisnode.yaml</code>.</li>
+            <li>Public services are separated from deployed services; AegisNode generates Pangolin labels in an override.</li>
+            <li>Runtime env values are profile secrets, written remotely as root-owned env files.</li>
+            <li>Existing socket proxy is read-oriented with <code>POST: "0"</code>.</li>
+          </ul>
+        </div>
+        <div class="mermaid-wrap">
+          <pre class="mermaid">
+flowchart TD
+  Git["Consumer Git repo<br/>stacks/*"] --> Aegis["AegisNode CLI/TUI"]
+  Aegis --> Repo["/opt/aegisnode/repository"]
+  Aegis --> Env["/etc/aegisnode/*.env<br/>secrets outside Git"]
+  Aegis --> Override["Generated Pangolin overrides"]
+  Repo --> Compose["docker compose projects"]
+  Env --> Compose
+  Override --> Compose
+  Compose --> Docker["Docker daemon"]
+  Docker --> Dockhand["Dockhand UI/API"]
+  Socket["Constrained socket proxy"] --> Dockhand
+  Dockhand --> Observe["Logs, stats, events, files"]
+  Pangolin["Pangolin SSO route"] --> Dockhand
+  Newt["Newt label reconciliation"] --> Pangolin
+          </pre>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Dockhand Findings</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Area</th>
+              <th>What The Docs Say</th>
+              <th>Impact On AegisNode</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Stack source</strong></td>
+              <td>Dockhand is a centralized control plane; Compose files live on the Dockhand node for managed stacks.</td>
+              <td>Conflicts with AegisNode's remote <code>/opt/aegisnode/repository</code> model unless Dockhand only observes or imports read-only.</td>
+            </tr>
+            <tr>
+              <td><strong>Stack types</strong></td>
+              <td>Internal and adopted stacks are fully manageable; Git stacks sync from repos; untracked stacks are discovered with limited management.</td>
+              <td>Untracked mode is the safest first state. Adoption or Git stack registration should be treated as a later migration.</td>
+            </tr>
+            <tr>
+              <td><strong>REST API</strong></td>
+              <td>APIs can create stacks, update Compose content, deploy, and sync Git stacks. The API currently has no versioning.</td>
+              <td>Automation is possible, but using it as AegisNode's backend adds dependency on Dockhand stack IDs and behavior.</td>
+            </tr>
+            <tr>
+              <td><strong>Secrets</strong></td>
+              <td>Regular vars live in env files; secrets are encrypted in Dockhand DB and injected into the Compose process.</td>
+              <td>Do not move AegisNode secrets into Dockhand DB unless backup, restore, restart, and rehydration semantics are designed.</td>
+            </tr>
+            <tr>
+              <td><strong>Socket access</strong></td>
+              <td>Docs recommend a socket proxy for production, but warn Dockhand access remains powerful even through a proxy.</td>
+              <td>Separate read-only observability from full operator mode. Free edition auth alone is not enough for multi-consumer admin isolation.</td>
+            </tr>
+            <tr>
+              <td><strong>Labels</strong></td>
+              <td><code>dockhand.hidden</code>, <code>dockhand.update=false</code>, <code>dockhand.notify=false</code>, URL, and ordering labels can steer Dockhand UI behavior.</td>
+              <td>Useful for hiding plumbing and preventing auto-update of proxy/control-plane containers without making Dockhand authoritative.</td>
+            </tr>
+            <tr>
+              <td><strong>Path mapping</strong></td>
+              <td>Dockhand recommends matching host/container data paths for stacks with relative bind mounts.</td>
+              <td>Another reason not to let Dockhand redeploy existing AegisNode stacks until path handling is tested.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <h2>Options</h2>
+      <div class="option-grid">
+        <div class="panel">
+          <h3>1. Keep Current Tools</h3>
+          <p class="muted">Beszel, Dozzle, and AegisNode stack manager stay as-is.</p>
+          <div class="score">
+            <strong>Safety</strong><div class="meter good"><span style="width: 90%"></span></div>
+            <strong>UX gain</strong><div class="meter"><span style="width: 25%"></span></div>
+            <strong>Rework</strong><div class="meter good"><span style="width: 15%"></span></div>
+          </div>
+          <p>Best when stability matters more than reducing tools.</p>
+        </div>
+        <div class="panel decision">
+          <h3>2. Hybrid Sidecar</h3>
+          <p class="muted">Dockhand observes and links; AegisNode owns declarations and deploys.</p>
+          <div class="score">
+            <strong>Safety</strong><div class="meter good"><span style="width: 75%"></span></div>
+            <strong>UX gain</strong><div class="meter good"><span style="width: 75%"></span></div>
+            <strong>Rework</strong><div class="meter warn"><span style="width: 45%"></span></div>
+          </div>
+          <p>Recommended pilot. Replace Dozzle first if logs are adequate.</p>
+        </div>
+        <div class="panel caution">
+          <h3>3. Dockhand Deploy Trigger</h3>
+          <p class="muted">AegisNode writes stack definitions into Dockhand or calls Dockhand APIs.</p>
+          <div class="score">
+            <strong>Safety</strong><div class="meter warn"><span style="width: 45%"></span></div>
+            <strong>UX gain</strong><div class="meter good"><span style="width: 80%"></span></div>
+            <strong>Rework</strong><div class="meter warn"><span style="width: 70%"></span></div>
+          </div>
+          <p>Possible later, but requires deterministic Dockhand state reconstruction.</p>
+        </div>
+        <div class="panel danger">
+          <h3>4. Dockhand Owns Stacks</h3>
+          <p class="muted">Consumers manage Compose and secrets mainly through Dockhand.</p>
+          <div class="score">
+            <strong>Safety</strong><div class="meter danger"><span style="width: 25%"></span></div>
+            <strong>UX gain</strong><div class="meter good"><span style="width: 85%"></span></div>
+            <strong>Rework</strong><div class="meter danger"><span style="width: 90%"></span></div>
+          </div>
+          <p>Not recommended unless AegisNode intentionally abandons its declarative product line.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Replacement Readiness</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Target</th>
+              <th>Likely Outcome</th>
+              <th>Gate Before Removal</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Dozzle</strong></td>
+              <td>Good first replacement candidate. Dockhand logs include streaming, stopped container logs, ANSI rendering, pause/resume, download, and font sizing.</td>
+              <td>Prove Dockhand can show logs through a constrained socket proxy without enabling terminal, delete, shell, or broad container mutation.</td>
+            </tr>
+            <tr>
+              <td><strong>Beszel</strong></td>
+              <td>Maybe. Dockhand has stats and host info, but Beszel is purpose-built for lightweight system monitoring.</td>
+              <td>Compare host CPU, memory, disk, container metrics, history retention, alerting, and multi-node story against Beszel on a real VPS.</td>
+            </tr>
+            <tr>
+              <td><strong>Stack manager</strong></td>
+              <td>Do not replace yet. Dockhand's value is UI and operations, but AegisNode's value is declarative review, route contracts, and drift safety.</td>
+              <td>Show that a fresh Dockhand DB can be recreated from the AegisNode config repo with no manual steps and no divergent secrets.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <h2>Consumer Confusion Risks</h2>
+      <div class="risk-grid">
+        <div class="panel caution">
+          <h3>Duplicate Sources</h3>
+          <p>Consumers may edit a Dockhand stack and expect Git to match. Mitigation: do not adopt AegisNode stacks during the pilot.</p>
+        </div>
+        <div class="panel caution">
+          <h3>Visible Plumbing</h3>
+          <p>Pangolin, Newt, socket proxy, and observability internals can clutter Dockhand. Mitigation: apply <code>dockhand.hidden=true</code> selectively.</p>
+        </div>
+        <div class="panel danger">
+          <h3>Destructive UI</h3>
+          <p>Free edition users are full admins. Mitigation: gate with Pangolin SSO and socket proxy permissions, or require Enterprise RBAC.</p>
+        </div>
+        <div class="panel caution">
+          <h3>Auto-Update Drift</h3>
+          <p>Dockhand can update containers outside Git. Mitigation: label AegisNode-managed containers with <code>dockhand.update=false</code>.</p>
+        </div>
+        <div class="panel caution">
+          <h3>Secret Split</h3>
+          <p>Dockhand DB secrets differ from AegisNode profile secrets. Mitigation: keep Dockhand out of app secret ownership at first.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Pilot Plan</h2>
+      <div class="timeline">
+        <div class="panel phase">
+          <h3>Lab Install</h3>
+          <p>Deploy Dockhand beside the current observability stack on a disposable host. Use Pangolin SSO, no public host port, and a dedicated socket proxy.</p>
+          <p class="muted">Verify: Dockhand sees AegisNode projects and basic logs without needing full Docker mutation rights.</p>
+        </div>
+        <div class="panel phase">
+          <h3>Read-Only Boundary</h3>
+          <p>Test a constrained socket proxy profile first. If Dockhand cannot function, document the minimum extra endpoints and the resulting risk.</p>
+          <p class="muted">Verify: no stop/delete/exec path works for ordinary access.</p>
+        </div>
+        <div class="panel phase">
+          <h3>Dozzle Swap</h3>
+          <p>Add Dockhand as an optional observability service and route <code>dockhand.&lt;domain&gt;</code>. Keep Dozzle until log parity is accepted.</p>
+          <p class="muted">Verify: common debugging workflows are better or at least equal.</p>
+        </div>
+        <div class="panel phase">
+          <h3>Beszel Decision</h3>
+          <p>Measure Dockhand's host and container metric retention against Beszel on the same VPS. Remove Beszel only if the loss is acceptable.</p>
+          <p class="muted">Verify: no observability gap for small VPS operations.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Implementation Shape If The Pilot Passes</h2>
+      <div class="grid-2">
+        <div class="panel">
+          <h3>AegisNode Changes</h3>
+          <ul>
+            <li>Add an optional Dockhand service to the generated observability Compose scaffold.</li>
+            <li>Expose <code>dockhand.&lt;domain&gt;</code> through Pangolin SSO and health checks.</li>
+            <li>Add generated labels for <code>dockhand.update=false</code>, <code>dockhand.notify=false</code>, and optional <code>dockhand.hidden=true</code> on infrastructure containers.</li>
+            <li>Keep <code>stack add</code>, <code>stack env</code>, generated Pangolin overrides, and Git drift checks unchanged.</li>
+            <li>Add tests proving Dockhand labels do not alter consumer-owned Compose files unless intentionally generated in overrides.</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>Boundaries To Preserve</h3>
+          <ul>
+            <li>AegisNode remains the only component that removes deleted Git stacks and Pangolin resources.</li>
+            <li>Dockhand cannot be required for provisioning, bootstrap, hardening, networking, proxy, or stack deploy.</li>
+            <li>AegisNode secrets stay in profile storage and root-owned remote env files, not Dockhand DB.</li>
+            <li>Dockhand API use is allowed only for read/query or explicitly documented optional integration.</li>
+            <li>Failure of Dockhand must not block AegisNode from deploying stacks.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Hard Gates Before Dockhand Owns Anything</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Gate</th>
+              <th>Required Proof</th>
+              <th>Failing Result</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Declarative reconstruction</td>
+              <td>Empty Dockhand DB can be recreated from AegisNode repo/profile state.</td>
+              <td>Dockhand remains observability only.</td>
+            </tr>
+            <tr>
+              <td>Secret ownership</td>
+              <td>No app secret is only present in Dockhand DB, or DB backup/restore is a documented first-class contract.</td>
+              <td>Dockhand cannot deploy AegisNode app stacks.</td>
+            </tr>
+            <tr>
+              <td>Socket scope</td>
+              <td>Minimum socket proxy endpoints are listed and tested with destructive flows blocked or intentionally accepted.</td>
+              <td>Keep Dozzle/Beszel or require Enterprise RBAC plus admin-only exposure.</td>
+            </tr>
+            <tr>
+              <td>Route model</td>
+              <td>AegisNode route review and Pangolin resource IDs remain authoritative.</td>
+              <td>Dockhand-created public exposure is out of scope.</td>
+            </tr>
+            <tr>
+              <td>Consumer UX</td>
+              <td>A user can tell which UI is diagnostic and which command changes declared state.</td>
+              <td>Do not surface Dockhand stack edit/deploy actions to consumers.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <h2>Review Decisions</h2>
+      <form data-lavish-question="dockhand_integration_choices" onsubmit="queueDecision(event)">
+        <fieldset>
+          <legend>Primary direction</legend>
+          <label><input type="radio" name="direction" value="Hybrid sidecar pilot" checked> <span><strong>Hybrid sidecar pilot</strong><br><span class="muted">Dockhand observes first; AegisNode keeps stack ownership.</span></span></label>
+          <label><input type="radio" name="direction" value="Dockhand deploy trigger"> <span><strong>Dockhand deploy trigger</strong><br><span class="muted">AegisNode eventually writes/calls Dockhand for deployment.</span></span></label>
+          <label><input type="radio" name="direction" value="Dockhand owns stacks"> <span><strong>Dockhand owns stacks</strong><br><span class="muted">Accept Dockhand as the stack source of truth.</span></span></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>First replacement target</legend>
+          <label><input type="radio" name="target" value="Replace Dozzle first" checked> <span>Replace Dozzle first</span></label>
+          <label><input type="radio" name="target" value="Evaluate Beszel and Dozzle together"> <span>Evaluate Beszel and Dozzle together</span></label>
+          <label><input type="radio" name="target" value="Add Dockhand without replacing anything"> <span>Add Dockhand without replacing anything</span></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Safety posture</legend>
+          <label><input type="radio" name="safety" value="Read-only socket proxy first" checked> <span>Read-only socket proxy first</span></label>
+          <label><input type="radio" name="safety" value="Full socket proxy behind Pangolin SSO"> <span>Full socket proxy behind Pangolin SSO</span></label>
+          <label><input type="radio" name="safety" value="Require Enterprise RBAC before multi-consumer use"> <span>Require Enterprise RBAC before multi-consumer use</span></label>
+        </fieldset>
+
+        <label for="notes"><span class="nowrap">Notes</span></label>
+        <textarea id="notes" name="notes" placeholder="Concerns, constraints, or a different direction to test..."></textarea>
+        <button type="submit">Queue these choices</button>
+        <p id="queue-status" class="queued" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <section>
+      <h2>Sources Used</h2>
+      <ul class="source-list">
+        <li><a href="https://dockhand.pro/manual/">Dockhand manual</a><br><span class="muted">Manual version marker <code>2026-06-10</code>; stack model, socket proxy, secrets, labels, logs, data paths.</span></li>
+        <li><a href="https://finsys-dockhand.mintlify.app/api/overview">Dockhand API overview</a><br><span class="muted">REST API scope, streaming, versioning, environment context.</span></li>
+        <li><a href="https://finsys-dockhand.mintlify.app/api/stacks/deploy">Dockhand Deploy Stack API</a><br><span class="muted">Create stack, env vars, secret handling, SSE deployment progress.</span></li>
+        <li><a href="https://finsys-dockhand.mintlify.app/api/stacks/update">Dockhand Update Stack API</a><br><span class="muted">Update compose content, restart, custom compose/env paths, managed-stack requirement.</span></li>
+        <li><a href="https://finsys-dockhand.mintlify.app/api/stacks/git-sync">Dockhand Git Stack Sync API</a><br><span class="muted">Git stack sync behavior, auto-sync, webhooks, env overrides.</span></li>
+        <li><code>README.md</code>, <code>observability.go</code>, <code>stack.go</code>, <code>config_repository.go</code><br><span class="muted">AegisNode declarative stack contract and current socket proxy posture.</span></li>
+      </ul>
+    </section>
+  </main>
+
+  <script>
+    function queueDecision(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const values = Object.fromEntries(new FormData(form).entries());
+      const lines = [
+        "Dockhand investigation choices:",
+        "- Direction: " + values.direction,
+        "- First replacement target: " + values.target,
+        "- Safety posture: " + values.safety
+      ];
+      if (values.notes && values.notes.trim()) {
+        lines.push("- Notes: " + values.notes.trim());
+      }
+      const prompt = lines.join("\n");
+      if (window.lavish && typeof window.lavish.queuePrompt === "function") {
+        window.lavish.queuePrompt(prompt, {
+          tag: "decision",
+          text: values.direction + " / " + values.target,
+          element: form,
+          data: {
+            question: "dockhand_integration_choices",
+            direction: values.direction,
+            target: values.target,
+            safety: values.safety,
+            notes: values.notes || ""
+          },
+          queueKey: "dockhand_integration_choices"
+        });
+        document.getElementById("queue-status").textContent = "Queued for the agent. Send it when you are ready.";
+      } else {
+        document.getElementById("queue-status").textContent = "Lavish queue is unavailable in this view.";
+      }
+    }
+  </script>
+</body>
+</html>

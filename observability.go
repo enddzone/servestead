@@ -240,13 +240,13 @@ for resource in resources:
  nice_id=resource.get("niceId","")
  if any(nice_id.startswith("aegisnode-"+name+"-") for name in names):
   print(resource["resourceId"])`
-	script := commandScript(
-		"desired="+shellQuote(desired),
+	commands := []string{
+		"desired=" + shellQuote(desired),
 		"removed=''",
-		"for candidate in "+shellQuote(observabilityRepositoryDirectory)+".stack-*.deployment /opt/aegisnode/generated/*.pangolin.yaml; do",
+		"for candidate in " + shellQuote(observabilityRepositoryDirectory) + ".stack-*.deployment /opt/aegisnode/generated/*.pangolin.yaml; do",
 		"  [ -e \"$candidate\" ] || continue",
 		"  case \"$candidate\" in",
-		"    "+shellQuote(observabilityRepositoryDirectory)+".stack-*.deployment) name=\"${candidate#"+observabilityRepositoryDirectory+".stack-}\"; name=\"${name%.deployment}\" ;;",
+		"    " + shellQuote(observabilityRepositoryDirectory) + ".stack-*.deployment) name=\"${candidate#" + observabilityRepositoryDirectory + ".stack-}\"; name=\"${name%.deployment}\" ;;",
 		"    /opt/aegisnode/generated/*.pangolin.yaml) name=\"${candidate#/opt/aegisnode/generated/}\"; name=\"${name%.pangolin.yaml}\" ;;",
 		"  esac",
 		"  case \"$name\" in ''|*[!a-z0-9-]*) continue ;; esac",
@@ -265,12 +265,14 @@ for resource in resources:
 		"  [ -z \"$containers\" ] || docker rm -f $containers",
 		"  networks=\"$(docker network ls -q --filter label=com.docker.compose.project=\"$project\")\"",
 		"  [ -z \"$networks\" ] || docker network rm $networks",
-		"  rm -rf -- "+shellQuote(observabilityRepositoryDirectory)+"/stacks/\"$name\"",
-		"  rm -f -- /opt/aegisnode/generated/\"$name\".pangolin.yaml "+shellQuote(observabilityRepositoryDirectory)+".stack-\"$name\".deployment",
-		"  rm -f -- "+shellQuote(stackEnvironmentDirectory)+"/\"$name\".env",
+		"  rm -rf -- " + shellQuote(observabilityRepositoryDirectory) + "/stacks/\"$name\"",
+		"  rm -f -- /opt/aegisnode/generated/\"$name\".pangolin.yaml " + shellQuote(observabilityRepositoryDirectory) + ".stack-\"$name\".deployment",
+		"  rm -f -- " + shellQuote(stackEnvironmentDirectory) + "/\"$name\".env",
 		"done",
 		`api='http://127.0.0.1:3000/api/v1'`,
-		`curl -fsS -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data `+shellQuote(loginPayload)+` >/dev/null`,
+	}
+	commands = append(commands, pangolinLoginCommand(loginPayload)...)
+	commands = append(commands,
 		`resources="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/resources?pageSize=100")"`,
 		`delete_ids="$(printf '%s' "$resources" | python3 -c `+shellQuote(selectResources)+` $removed)"`,
 		`for resource_id in $delete_ids; do`,
@@ -280,6 +282,7 @@ for resource in resources:
 		`rm -f "$cookie_file"`,
 		"trap - EXIT",
 	)
+	script := commandScript(commands...)
 	return Task{Name: "Remove stacks deleted from committed configuration", Apply: script}
 }
 
@@ -304,11 +307,13 @@ for spec in specs:
  if len(matches)!=1:
   ok=False
 sys.exit(0 if ok else 1)`
-	return commandScript(
+	commands := []string{
 		`api='http://127.0.0.1:3000/api/v1'`,
 		`cookie_file="$(mktemp)"`,
 		`trap 'rm -f "$cookie_file"' EXIT`,
-		`curl -fsS -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data `+shellQuote(loginPayload)+` >/dev/null`,
+	}
+	commands = append(commands, pangolinLoginCommand(loginPayload)...)
+	commands = append(commands,
 		`for attempt in $(seq 1 30); do`,
 		`  resources="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/resources?pageSize=100")"`,
 		`  if printf '%s' "$resources" | python3 -c `+shellQuote(verify)+` `+shellQuote(specification)+`; then exit 0; fi`,
@@ -317,6 +322,38 @@ sys.exit(0 if ok else 1)`
 		`echo `+shellQuote("Pangolin did not create the expected public resources for stack "+stack.Name)+` >&2`,
 		`exit 1`,
 	)
+	return commandScript(commands...)
+}
+
+func pangolinLoginCommand(loginPayload string) []string {
+	return []string{
+		`login_response="$(mktemp)"`,
+		`set +e`,
+		`login_status="$(curl -sS -o "$login_response" -w '%{http_code}' -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data ` + shellQuote(loginPayload) + `)"`,
+		`login_result=$?`,
+		`set -e`,
+		`if [ "$login_result" -ne 0 ]; then`,
+		`  echo 'Pangolin administrator login failed before receiving a response.' >&2`,
+		`  if [ -s "$login_response" ]; then cat "$login_response" >&2; echo >&2; fi`,
+		`  rm -f "$login_response"`,
+		`  exit "$login_result"`,
+		`fi`,
+		`case "$login_status" in`,
+		`  2??) rm -f "$login_response" ;;`,
+		`  401)`,
+		`    echo 'Pangolin rejected the saved administrator credentials. Run the same setup action once with PANGOLIN_ADMIN_PASSWORD set to the current Pangolin admin password, or enter it in Advanced setup.' >&2`,
+		`    if [ -s "$login_response" ]; then cat "$login_response" >&2; echo >&2; fi`,
+		`    rm -f "$login_response"`,
+		`    exit 1`,
+		`    ;;`,
+		`  *)`,
+		`    echo "Pangolin administrator login failed (HTTP $login_status)." >&2`,
+		`    if [ -s "$login_response" ]; then cat "$login_response" >&2; echo >&2; fi`,
+		`    rm -f "$login_response"`,
+		`    exit 1`,
+		`    ;;`,
+		`esac`,
+	}
 }
 
 func sha256Hex(value string) string {
@@ -507,9 +544,9 @@ for spec in specs:
  for resource in matches:
   if resource.get("resourceId") != keep:
    print(resource["resourceId"])`
-	return commandScript(
+	commands := []string{
 		"docker stop aegis-newt >/dev/null",
-		composeCommand+" down --remove-orphans >/dev/null 2>&1 || true",
+		composeCommand + " down --remove-orphans >/dev/null 2>&1 || true",
 		"sleep 2",
 		`api='http://127.0.0.1:3000/api/v1'`,
 		`cookie_file="$(mktemp)"`,
@@ -519,7 +556,9 @@ for spec in specs:
 		`  if [ "$reconciliation_complete" != "1" ]; then docker start aegis-newt >/dev/null 2>&1 || true; fi`,
 		`}`,
 		`trap cleanup_reconciliation EXIT`,
-		`curl -fsS -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data `+shellQuote(loginPayload)+` >/dev/null`,
+	}
+	commands = append(commands, pangolinLoginCommand(loginPayload)...)
+	commands = append(commands,
 		`resources="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/resources?pageSize=100")"`,
 		`delete_ids="$(printf '%s' "$resources" | python3 -c `+shellQuote(selectDeletes)+` `+shellQuote(specs)+`)"`,
 		`for resource_id in $delete_ids; do`,
@@ -527,6 +566,7 @@ for spec in specs:
 		`done`,
 		`reconciliation_complete=1`,
 	)
+	return commandScript(commands...)
 }
 
 func observabilityResourceVerifyCommand(config observabilityConfig) string {
@@ -549,11 +589,13 @@ sys.exit(0 if ok else 1)`
 targets=json.load(sys.stdin)["data"]["targets"]
 ok=len(targets)==1 and targets[0].get("hcEnabled") is True
 sys.exit(0 if ok else 1)`
-	return commandScript(
+	commands := []string{
 		`api='http://127.0.0.1:3000/api/v1'`,
 		`cookie_file="$(mktemp)"`,
 		`trap 'rm -f "$cookie_file"' EXIT`,
-		`curl -fsS -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data `+shellQuote(loginPayload)+` >/dev/null`,
+	}
+	commands = append(commands, pangolinLoginCommand(loginPayload)...)
+	commands = append(commands,
 		`for attempt in $(seq 1 30); do`,
 		`  resources="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/resources?pageSize=100")"`,
 		`  if resource_ids="$(printf '%s' "$resources" | python3 -c `+shellQuote(verifyResources)+` `+shellQuote(specs)+`)"; then`,
@@ -569,6 +611,7 @@ sys.exit(0 if ok else 1)`
 		`echo 'Pangolin did not converge to exactly one managed Beszel and Dozzle resource with health checks enabled.' >&2`,
 		`exit 1`,
 	)
+	return commandScript(commands...)
 }
 
 func observabilityResourceSpecs(baseDomain string) string {

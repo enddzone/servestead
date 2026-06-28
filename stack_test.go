@@ -448,6 +448,29 @@ func TestConfiguredStackTasksExplainValidationAndReconciliation(t *testing.T) {
 	}
 }
 
+func TestStackResourceVerifyExplainsRejectedPangolinCredentials(t *testing.T) {
+	command := stackResourceVerifyCommand(observabilityConfig{
+		BaseDomain: "example.com", AdminEmail: "admin@example.com", PangolinPassword: "password",
+	}, configuredStack{
+		Name:      "site",
+		Resources: []stackPublicResource{{ID: "web", Subdomain: "site"}},
+	})
+	for _, expected := range []string{
+		"Pangolin rejected the saved administrator credentials",
+		"PANGOLIN_ADMIN_PASSWORD",
+		"-w '%{http_code}'",
+	} {
+		if !strings.Contains(command, expected) {
+			t.Fatalf("verification command missing %q:\n%s", expected, command)
+		}
+	}
+	shell := exec.Command("sh", "-n")
+	shell.Stdin = strings.NewReader(command)
+	if output, err := shell.CombinedOutput(); err != nil {
+		t.Fatalf("verification command is not valid shell: %v\n%s\n%s", err, output, command)
+	}
+}
+
 func TestConfiguredStacksRejectReservedAndDuplicateSubdomains(t *testing.T) {
 	err := validateConfiguredStackSet([]configuredStack{{
 		Name: "site", Resources: []stackPublicResource{{ID: "web", Service: "web", Subdomain: "beszel"}},

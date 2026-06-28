@@ -398,6 +398,60 @@ func TestFailedProxyRetryCollectsPangolinCredentials(t *testing.T) {
 	}
 }
 
+func TestFailedStackSyncRetryCollectsPangolinCredentials(t *testing.T) {
+	state := ProfileState{
+		ActiveRunID: "failed-run",
+		Runs: map[string]SetupRun{"failed-run": {
+			Stages: map[string]SetupStageStatus{"stacks": {Status: stageStatusFailed}},
+		}},
+	}
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID: "profile-1", IP: "203.0.113.10", BaseDomain: "example.com",
+			LetsEncryptEmail: "admin@example.com", PangolinAdminEmail: "admin@example.com",
+		},
+		State:   state,
+		Secrets: ProfileSecrets{PangolinAdminPassword: "old-password"},
+	}})
+	model.selectedIndex = 0
+	model.setInputsFromChoice(false)
+	model.screen = profileSetupScreenStacks
+	model.stackGitStatus = "clean"
+	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	result := updated.(profileSetupModel)
+	if command != nil || result.done || result.screen != profileSetupScreenAdvanced || result.singleStage != "stacks" {
+		t.Fatalf("failed stack sync retry did not request credentials: screen=%d stage=%q done=%v", result.screen, result.singleStage, result.done)
+	}
+	if result.focus != 3 || !strings.Contains(result.err, "Pangolin admin email and password") {
+		t.Fatalf("stack sync credential prompt is not focused on Pangolin credentials: focus=%d err=%q", result.focus, result.err)
+	}
+}
+
+func TestFailedSingleStackRetryCollectsPangolinCredentials(t *testing.T) {
+	state := ProfileState{
+		ActiveRunID: "failed-run",
+		Runs: map[string]SetupRun{"failed-run": {
+			Stages: map[string]SetupStageStatus{"stack:site": {Status: stageStatusFailed}},
+		}},
+	}
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{ID: "profile-1", IP: "203.0.113.10", BaseDomain: "example.com"},
+		State:   state,
+		Secrets: ProfileSecrets{PangolinAdminPassword: "old-password"},
+	}})
+	model.selectedIndex = 0
+	model.setInputsFromChoice(false)
+	model.screen = profileSetupScreenStacks
+	model.stackGitStatus = "clean"
+	model.stacks = []editableStack{{Name: "site"}}
+	model.stackTable = newStackTable(model.stacks, "example.com", &state)
+	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	result := updated.(profileSetupModel)
+	if command != nil || result.done || result.screen != profileSetupScreenAdvanced || result.singleStage != "stack:site" {
+		t.Fatalf("failed single-stack retry did not request credentials: screen=%d stage=%q done=%v", result.screen, result.singleStage, result.done)
+	}
+}
+
 func TestProfileSetupModelResumesSelectedProfile(t *testing.T) {
 	choice := profileChoice{
 		Profile: Profile{

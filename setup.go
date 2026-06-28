@@ -956,11 +956,7 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 			}
 		}
 		if stage == "platform" && (model.pangolinStatus == pangolinRegistrationComplete || proxyRetry) {
-			model.err = ""
-			model.focus = 3
-			model.advanced[model.focus].Focus()
-			model.screen = profileSetupScreenAdvanced
-			return model, nil
+			return model.openPangolinCredentialRetry(stage, ""), nil
 		}
 		model.done = true
 		return model, tea.Quit
@@ -994,6 +990,31 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 		return model, cmd
 	}
 	return model, nil
+}
+
+func (model profileSetupModel) openPangolinCredentialRetry(stage, notice string) profileSetupModel {
+	model.singleStage = stage
+	model.err = notice
+	model.focus = 3
+	for index := range model.advanced {
+		model.advanced[index].Blur()
+	}
+	model.advanced[model.focus].Focus()
+	model.screen = profileSetupScreenAdvanced
+	return model
+}
+
+func (model profileSetupModel) selectedProfileStageFailed(stage string) bool {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		return false
+	}
+	choice := model.profiles[model.selectedIndex]
+	run, ok := choice.State.Runs[choice.State.ActiveRunID]
+	if !ok {
+		return false
+	}
+	status, ok := run.Stages[stage]
+	return ok && status.Status == stageStatusFailed
 }
 
 func (model profileSetupModel) updateProfileInput(key tea.KeyMsg, advanced bool) (tea.Model, tea.Cmd) {
@@ -1273,7 +1294,11 @@ func (model profileSetupModel) updateStacks(key tea.KeyMsg) (tea.Model, tea.Cmd)
 			model.err = "the stack commit has not been pushed to origin; press p to push it"
 			return model, nil
 		}
-		model.singleStage = "stack:" + stack.Name
+		stage := "stack:" + stack.Name
+		if model.selectedProfileStageFailed(stage) {
+			return model.openPangolinCredentialRetry(stage, "Retrying a failed stack deployment: confirm the Pangolin admin email and password."), nil
+		}
+		model.singleStage = stage
 		model.done = true
 		return model, tea.Quit
 	case "v", "V":
@@ -1315,7 +1340,11 @@ func (model profileSetupModel) updateStacks(key tea.KeyMsg) (tea.Model, tea.Cmd)
 		case model.stackNeedsPush:
 			model.err = "the stack commit has not been pushed to origin"
 		default:
-			model.singleStage = "stacks"
+			stage := "stacks"
+			if model.selectedProfileStageFailed(stage) {
+				return model.openPangolinCredentialRetry(stage, "Retrying a failed stack sync: confirm the Pangolin admin email and password."), nil
+			}
+			model.singleStage = stage
 			model.done = true
 			return model, tea.Quit
 		}
