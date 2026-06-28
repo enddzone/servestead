@@ -389,11 +389,11 @@ func TestFailedProxyRetryCollectsPangolinCredentials(t *testing.T) {
 	}})
 	model.selectedIndex = 0
 	model.setInputsFromChoice(false)
-	model.stageTable.SetCursor(3)
+	model.stageTable.SetCursor(2)
 	updated, _ := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	result := updated.(profileSetupModel)
-	if result.screen != profileSetupScreenAdvanced || result.singleStage != "proxy" {
-		t.Fatalf("failed Proxy retry did not request credentials: screen=%d stage=%q", result.screen, result.singleStage)
+	if result.screen != profileSetupScreenAdvanced || result.singleStage != "platform" {
+		t.Fatalf("failed Platform retry did not request credentials: screen=%d stage=%q", result.screen, result.singleStage)
 	}
 }
 
@@ -475,26 +475,126 @@ func TestProfileSetupModelRendersDashboardFromProfileState(t *testing.T) {
 }
 
 func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
-	composePath := filepath.Join(t.TempDir(), "compose.yaml")
+	requireGit(t)
+	directory := t.TempDir()
+	repository := filepath.Join(directory, "repository")
+	if err := os.MkdirAll(repository, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repository, "init")
+	composePath := filepath.Join(directory, "compose.yaml")
 	if err := os.WriteFile(composePath, []byte("services:\n  web:\n    image: nginx\n    expose:\n      - 80\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	model := newProfileSetupModel([]profileChoice{{
-		Profile: Profile{ID: "profile-1", IP: "203.0.113.10"},
+		Profile: Profile{ID: "profile-1", IP: "203.0.113.10", ConfigRepositoryPath: repository},
 		State:   ProfileState{Runs: map[string]SetupRun{}},
 	}})
 	model.selectedIndex = 0
 	model.screen = profileSetupScreenDashboard
 	updated, _ := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
 	result := updated.(profileSetupModel)
+	if result.screen != profileSetupScreenStacks {
+		t.Fatalf("stack shortcut did not open stack manager: %v (%s)", result.screen, result.err)
+	}
+	updated, _ = result.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	result = updated.(profileSetupModel)
 	if result.screen != profileSetupScreenStackCompose {
 		t.Fatalf("stack shortcut did not open Compose intake: %v", result.screen)
 	}
 	result.stackComposeInput.SetValue(composePath)
 	updated, _ = result.updateStackCompose(tea.KeyMsg{Type: tea.KeyEnter})
 	result = updated.(profileSetupModel)
-	if !result.done || result.addStackCompose != composePath {
-		t.Fatalf("Compose intake did not complete: %+v", result)
+	if result.screen != profileSetupScreenStackEditor {
+		t.Fatalf("Compose intake did not open stack editor: %+v", result)
+	}
+	result.stackInputs[0].SetValue("site")
+	result.focus = len(result.stackInputs) - 1
+	updated, _ = result.updateStackEditor(tea.KeyMsg{Type: tea.KeyEnter})
+	result = updated.(profileSetupModel)
+	if result.screen != profileSetupScreenStacks || len(result.stacks) != 1 || result.stacks[0].Name != "site" {
+		t.Fatalf("stack editor did not save in-session: %+v", result)
+	}
+	if result.err != "" {
+		t.Fatalf("stack editor left an error: %s", result.err)
+	}
+}
+
+func TestProfileDashboardDetectsRepositoryStacks(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init")
+	stackDirectory := filepath.Join(repository, "stacks", "arrs")
+	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, "compose.yaml"), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `version: 1
+public_resources:
+  - service: web
+    name: Arrs
+    subdomain: arrs
+    port: 80
+    protocol: http
+    sso: true
+    healthcheck:
+      enabled: true
+      path: /
+`
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackMetadataFilename), []byte(metadata), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID: "profile-1", IP: "203.0.113.10", BaseDomain: "example.com",
+			ConfigRepositoryPath: repository,
+		},
+		State: ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenDashboard
+	model.refreshDashboard()
+	if model.err != "" {
+		t.Fatal(model.err)
+	}
+	if len(model.stacks) != 1 || model.stacks[0].Name != "arrs" {
+		t.Fatalf("dashboard did not detect arrs stack: %+v", model.stacks)
+	}
+	view := model.View()
+	if !strings.Contains(view, "Standalone stacks (1)") || !strings.Contains(view, "arrs") {
+		t.Fatalf("dashboard does not show detected stack:\n%s", view)
+	}
+	model.screen = profileSetupScreenStacks
+	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	blocked := updated.(profileSetupModel)
+	if command != nil || blocked.done || !strings.Contains(blocked.err, "uncommitted") {
+		t.Fatalf("dirty repository sync was not blocked: %+v", blocked)
+	}
+
+	runGitCommand(t, repository, "add", "stacks")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Add arrs")
+	model.refreshStacks()
+	if model.stackSyncStatus != "sync required" {
+		t.Fatalf("committed repository drift not detected: %q", model.stackSyncStatus)
+	}
+	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	syncing := updated.(profileSetupModel)
+	if command == nil || !syncing.done || syncing.singleStage != "stacks" {
+		t.Fatalf("clean repository did not start synchronization: %+v", syncing)
+	}
+}
+
+func TestProfileSetupUsesAvailableTerminalHeight(t *testing.T) {
+	model := newProfileSetupModel(nil)
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 140, Height: 60})
+	result := updated.(profileSetupModel)
+	if result.profileList.Height() <= 18 {
+		t.Fatalf("profile list is still capped at the old height: %d", result.profileList.Height())
+	}
+	if result.profileList.Height() != 53 {
+		t.Fatalf("profile list did not use available height: %d", result.profileList.Height())
 	}
 }
 
@@ -983,6 +1083,129 @@ func TestProfileSetupModelSelectsSingleStageRun(t *testing.T) {
 	}
 	if options.ProfileID != "profile-1" || options.IP != "203.0.113.10" {
 		t.Fatalf("unexpected profile options: %+v", options)
+	}
+}
+
+func TestProfileDashboardCombinesPlatformStages(t *testing.T) {
+	state := ProfileState{Runs: map[string]SetupRun{
+		"run-1": {
+			Stages: map[string]SetupStageStatus{
+				"network":       {Status: stageStatusComplete},
+				"proxy":         {Status: stageStatusComplete},
+				"observability": {Status: stageStatusComplete},
+			},
+		},
+	}}
+	rows := profileStageRows(&state)
+	if len(rows) != 3 {
+		t.Fatalf("dashboard should expose three actions, got %#v", rows)
+	}
+	if rows[2][0] != "Platform" || rows[2][1] != stageStatusComplete {
+		t.Fatalf("network, proxy, and observability were not combined: %#v", rows)
+	}
+}
+
+func TestPlatformStageRunsNetworkProxyAndObservability(t *testing.T) {
+	originalNetwork := newNetworkRemoteClient
+	originalProxy := newProxyRemoteClient
+	originalObservability := newObservabilityRemoteClient
+	defer func() {
+		newNetworkRemoteClient = originalNetwork
+		newProxyRemoteClient = originalProxy
+		newObservabilityRemoteClient = originalObservability
+	}()
+
+	clients := []*recordingRemoteClient{{}, {}, {}}
+	newNetworkRemoteClient = func(_ context.Context, _ networkConfig, _, _ io.Writer) (remoteClient, error) {
+		return clients[0], nil
+	}
+	newProxyRemoteClient = func(_ context.Context, _ proxyConfig, _, _ io.Writer) (remoteClient, error) {
+		return clients[1], nil
+	}
+	newObservabilityRemoteClient = func(_ context.Context, config observabilityConfig, _, _ io.Writer) (remoteClient, error) {
+		if len(config.Stacks) != 0 {
+			t.Fatalf("Platform should not deploy application stacks: %+v", config.Stacks)
+		}
+		return clients[2], nil
+	}
+	config := setupConfig{
+		Host: "203.0.113.10", AdminUser: "aegisadmin", PrivateKeyPath: "/tmp/key",
+		BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com",
+		ServerSecret: "secret", PangolinSetupToken: "00000000000000000000000000000000",
+		PangolinAdminEmail: "admin@example.com",
+	}
+	if err := runSetupStage(context.Background(), Profile{IP: config.Host}, config, "run-1", "platform", nil, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	for index, client := range clients {
+		if len(client.commands) == 0 {
+			t.Fatalf("Platform component %d did not run", index)
+		}
+	}
+}
+
+func TestStackRepositoryStageRunsWhenAllStacksWereDeleted(t *testing.T) {
+	originalObservability := newObservabilityRemoteClient
+	defer func() { newObservabilityRemoteClient = originalObservability }()
+	client := &recordingRemoteClient{}
+	newObservabilityRemoteClient = func(_ context.Context, _ observabilityConfig, _, _ io.Writer) (remoteClient, error) {
+		return client, nil
+	}
+	config := setupConfig{
+		Host: "203.0.113.10", AdminUser: "aegisadmin", PrivateKeyPath: "/tmp/key",
+		BaseDomain: "example.com", PangolinAdminEmail: "admin@example.com",
+	}
+	if err := runSetupStage(context.Background(), Profile{IP: config.Host}, config, "run-1", "stacks", nil, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.commands) != 1 || !strings.Contains(client.commands[0], ".stack-*.deployment") {
+		t.Fatalf("empty repository sync did not reconcile deleted stacks: %#v", client.commands)
+	}
+}
+
+func TestSuccessfulStackRepositorySyncRecordsCommit(t *testing.T) {
+	requireGit(t)
+	originalObservability := newObservabilityRemoteClient
+	defer func() { newObservabilityRemoteClient = originalObservability }()
+	newObservabilityRemoteClient = func(_ context.Context, _ observabilityConfig, _, _ io.Writer) (remoteClient, error) {
+		return &recordingRemoteClient{}, nil
+	}
+
+	directory := t.TempDir()
+	privateKey := filepath.Join(directory, "id_ed25519")
+	if err := os.WriteFile(privateKey, []byte("private"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := newFileProfileStore(filepath.Join(directory, "profiles"))
+	profile, err := store.Create(Profile{
+		IP: "203.0.113.10", AdminUser: "aegisadmin", PrivateKeyPath: privateKey,
+		BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com",
+		PangolinAdminEmail:   "admin@example.com",
+		ConfigRepositoryPath: filepath.Join(directory, "repository"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, state, config, err := prepareProfileStageSetup(setupCLIOptions{ProfileID: profile.ID}, store, "stacks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runProfileSetupStagePlan(context.Background(), store, profile, state, config, "stacks", io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	_, state, err = store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.StackRepositoryCommit == "" {
+		t.Fatal("successful stack synchronization did not record the reconciled commit")
+	}
+	head, err := stackRepositoryHead(context.Background(), profile.ConfigRepositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.StackRepositoryCommit != head {
+		t.Fatalf("recorded commit %q does not match repository HEAD %q", state.StackRepositoryCommit, head)
 	}
 }
 

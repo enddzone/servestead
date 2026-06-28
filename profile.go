@@ -54,8 +54,9 @@ type ProfileSummary struct {
 }
 
 type ProfileState struct {
-	ActiveRunID string              `json:"active_run_id,omitempty"`
-	Runs        map[string]SetupRun `json:"runs"`
+	ActiveRunID           string              `json:"active_run_id,omitempty"`
+	StackRepositoryCommit string              `json:"stack_repository_commit,omitempty"`
+	Runs                  map[string]SetupRun `json:"runs"`
 }
 
 type SetupRun struct {

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -69,6 +71,276 @@ type stackAddOptions struct {
 	HealthPath  string
 	SSO         bool
 	Yes         bool
+}
+
+type editableStack struct {
+	Name     string
+	Compose  string
+	Metadata stackMetadata
+	Services []composeServiceSummary
+}
+
+func loadEditableStacks(repositoryPath string) ([]editableStack, error) {
+	stacksDirectory := filepath.Join(expandUserPath(repositoryPath), "stacks")
+	entries, err := os.ReadDir(stacksDirectory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	stacks := []editableStack{}
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == "observability" {
+			continue
+		}
+		if !stackSlugPattern.MatchString(entry.Name()) {
+			return nil, fmt.Errorf("stack directory %q must be a lowercase DNS label", entry.Name())
+		}
+		directory := filepath.Join(stacksDirectory, entry.Name())
+		compose, err := os.ReadFile(filepath.Join(directory, "compose.yaml"))
+		if err != nil {
+			return nil, fmt.Errorf("stack %s: read compose.yaml: %w", entry.Name(), err)
+		}
+		services, err := inspectComposeServices(compose)
+		if err != nil {
+			return nil, fmt.Errorf("stack %s: %w", entry.Name(), err)
+		}
+		metadataData, err := os.ReadFile(filepath.Join(directory, stackMetadataFilename))
+		if err != nil {
+			return nil, fmt.Errorf("stack %s: read %s: %w", entry.Name(), stackMetadataFilename, err)
+		}
+		var metadata stackMetadata
+		if err := yaml.Unmarshal(metadataData, &metadata); err != nil {
+			return nil, fmt.Errorf("stack %s metadata: %w", entry.Name(), err)
+		}
+		stacks = append(stacks, editableStack{
+			Name: entry.Name(), Compose: string(compose), Metadata: metadata, Services: services,
+		})
+	}
+	sort.Slice(stacks, func(i, j int) bool { return stacks[i].Name < stacks[j].Name })
+	return stacks, nil
+}
+
+func writeEditableStack(repositoryPath, originalName string, options stackAddOptions, compose []byte) error {
+	services, err := inspectComposeServices(compose)
+	if err != nil {
+		return err
+	}
+	if err := validateStackAddOptions(options, services); err != nil {
+		return err
+	}
+	stacksDirectory := filepath.Join(expandUserPath(repositoryPath), "stacks")
+	destination := filepath.Join(stacksDirectory, options.Name)
+	if originalName == "" {
+		if _, err := os.Stat(destination); err == nil {
+			return fmt.Errorf("stack %q already exists", options.Name)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	} else {
+		if !stackSlugPattern.MatchString(originalName) {
+			return errors.New("original stack name must be a lowercase DNS label")
+		}
+		source := filepath.Join(stacksDirectory, originalName)
+		if originalName != options.Name {
+			if _, err := os.Stat(destination); err == nil {
+				return fmt.Errorf("stack %q already exists", options.Name)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			if err := os.Rename(source, destination); err != nil {
+				return fmt.Errorf("rename stack: %w", err)
+			}
+		}
+	}
+	if err := os.MkdirAll(destination, 0700); err != nil {
+		return err
+	}
+	metadata := stackMetadata{
+		Version: 1,
+		PublicResources: []stackPublicResource{{
+			Service: options.Service, Name: options.DisplayName, Subdomain: options.Subdomain,
+			Port: options.Port, Protocol: "http", SSO: options.SSO,
+			Healthcheck: stackResourceHealthcheck{Enabled: options.HealthPath != "", Path: options.HealthPath},
+		}},
+	}
+	metadataData, err := yaml.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(destination, "compose.yaml"), compose, 0600); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(destination, stackMetadataFilename), metadataData, 0600)
+}
+
+func removeEditableStack(repositoryPath, name string) error {
+	if !stackSlugPattern.MatchString(name) || name == "observability" {
+		return errors.New("stack name must be a lowercase DNS label")
+	}
+	directory := filepath.Join(expandUserPath(repositoryPath), "stacks", name)
+	if _, err := os.Stat(filepath.Join(directory, stackMetadataFilename)); err != nil {
+		return fmt.Errorf("stack %q is not configured: %w", name, err)
+	}
+	return os.RemoveAll(directory)
+}
+
+func stackRepositoryStatus(ctx context.Context, repositoryPath string) (string, error) {
+	status, err := runGit(ctx, expandUserPath(repositoryPath), nil, "status", "--short", "--", "stacks")
+	if err != nil {
+		return "", err
+	}
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return "clean", nil
+	}
+	return status, nil
+}
+
+func stackRepositoryHead(ctx context.Context, repositoryPath string) (string, error) {
+	head, err := runGit(ctx, expandUserPath(repositoryPath), nil, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(head), nil
+}
+
+func stackRepositoryNeedsPush(ctx context.Context, repositoryPath, head string) (bool, error) {
+	remotes, err := runGit(ctx, expandUserPath(repositoryPath), nil, "remote")
+	if err != nil {
+		return false, err
+	}
+	hasOrigin := false
+	for _, remote := range strings.Fields(remotes) {
+		if remote == "origin" {
+			hasOrigin = true
+			break
+		}
+	}
+	if !hasOrigin {
+		return false, nil
+	}
+	contains, err := runGit(ctx, expandUserPath(repositoryPath), nil, "branch", "-r", "--contains", head)
+	if err != nil {
+		return false, err
+	}
+	return !strings.Contains(contains, "origin/"), nil
+}
+
+func stackRepositoryDiff(ctx context.Context, repositoryPath string) (string, error) {
+	repositoryPath = expandUserPath(repositoryPath)
+	unstaged, err := runGit(ctx, repositoryPath, nil, "diff", "--no-ext-diff", "--", "stacks")
+	if err != nil {
+		return "", err
+	}
+	staged, err := runGit(ctx, repositoryPath, nil, "diff", "--cached", "--no-ext-diff", "--", "stacks")
+	if err != nil {
+		return "", err
+	}
+	untracked, err := runGit(ctx, repositoryPath, nil, "ls-files", "-z", "--others", "--exclude-standard", "--", "stacks")
+	if err != nil {
+		return "", err
+	}
+	var builder strings.Builder
+	appendDiffSection := func(title, content string) {
+		if strings.TrimSpace(content) == "" {
+			return
+		}
+		if builder.Len() > 0 {
+			builder.WriteString("\n")
+		}
+		builder.WriteString(title + "\n\n" + strings.TrimSpace(content) + "\n")
+	}
+	appendDiffSection("Unstaged changes", unstaged)
+	appendDiffSection("Staged changes", staged)
+	for _, name := range strings.Split(strings.TrimSuffix(untracked, "\x00"), "\x00") {
+		if name == "" {
+			continue
+		}
+		diff, err := untrackedFileDiff(ctx, repositoryPath, name)
+		if err != nil {
+			return "", err
+		}
+		appendDiffSection("Untracked: "+name, diff)
+	}
+	if builder.Len() == 0 {
+		return "No stack changes.", nil
+	}
+	return builder.String(), nil
+}
+
+func untrackedFileDiff(ctx context.Context, repositoryPath, name string) (string, error) {
+	cleanName := filepath.Clean(filepath.FromSlash(name))
+	if cleanName == "." || cleanName == "stacks" || !strings.HasPrefix(cleanName, "stacks"+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid untracked stack path %q", name)
+	}
+	command := exec.CommandContext(ctx, "git", "-C", repositoryPath, "diff", "--no-index", "--no-ext-diff", "--", "/dev/null", cleanName)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
+	if err == nil {
+		return stdout.String(), nil
+	}
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) && exitError.ExitCode() == 1 {
+		return stdout.String(), nil
+	}
+	detail := strings.TrimSpace(stderr.String())
+	if detail == "" {
+		detail = err.Error()
+	}
+	return "", fmt.Errorf("git diff: %s", detail)
+}
+
+func stageStackChanges(ctx context.Context, repositoryPath string) error {
+	_, err := runGit(ctx, expandUserPath(repositoryPath), nil, "add", "-A", "--", "stacks")
+	return err
+}
+
+func commitStackChanges(ctx context.Context, repositoryPath, message string) error {
+	message = strings.TrimSpace(message)
+	if message == "" || strings.ContainsAny(message, "\r\n") {
+		return errors.New("commit message must be a non-empty single line")
+	}
+	staged, err := runGit(ctx, expandUserPath(repositoryPath), nil, "diff", "--cached", "--name-only", "--", "stacks")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(staged) == "" {
+		return errors.New("no staged stack changes; press g to stage them first")
+	}
+	_, err = runGit(ctx, expandUserPath(repositoryPath), nil, "commit", "-m", message, "--", "stacks")
+	return err
+}
+
+func pushStackRepository(ctx context.Context, repositoryPath string) error {
+	repositoryPath = expandUserPath(repositoryPath)
+	remotes, err := runGit(ctx, repositoryPath, nil, "remote")
+	if err != nil {
+		return err
+	}
+	hasOrigin := false
+	for _, remote := range strings.Fields(remotes) {
+		if remote == "origin" {
+			hasOrigin = true
+			break
+		}
+	}
+	if !hasOrigin {
+		return errors.New("configuration repository has no origin remote")
+	}
+	branch, err := runGit(ctx, repositoryPath, nil, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return err
+	}
+	branch = strings.TrimSpace(branch)
+	if branch == "" || branch == "HEAD" {
+		return errors.New("configuration repository is not on a local branch")
+	}
+	_, err = runGit(ctx, repositoryPath, nil, "push", "--set-upstream", "origin", branch)
+	return err
 }
 
 func runStack(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -228,7 +500,7 @@ func runStack(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	fmt.Fprintln(stdout, "\nReview the files, then commit them. AegisNode deploys committed configuration only:")
 	fmt.Fprintf(stdout, "  git -C %s add stacks/%s\n", shellQuote(revision.Path), options.Name)
 	fmt.Fprintf(stdout, "  git -C %s commit -m %s\n", shellQuote(revision.Path), shellQuote("Add "+options.Name+" stack"))
-	fmt.Fprintln(stdout, "Then open the profile dashboard, select Observability, and press r. That stage validates and deploys every configured stack.")
+	fmt.Fprintln(stdout, "Then open the profile dashboard, press s, select this stack, and press r to deploy it independently.")
 	return nil
 }
 
@@ -509,7 +781,7 @@ type stackAddModel struct {
 
 func collectStackAddOptions(options stackAddOptions, services []composeServiceSummary, output io.Writer) (stackAddOptions, error) {
 	model := newStackAddModel(options, services)
-	final, err := tea.NewProgram(model, tea.WithOutput(output)).Run()
+	final, err := tea.NewProgram(model, tea.WithOutput(output), tea.WithAltScreen()).Run()
 	if err != nil {
 		return options, err
 	}

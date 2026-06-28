@@ -79,7 +79,7 @@ bin/aegisnode setup \
   --yes
 ```
 
-Running `setup` without `--ip` opens the profile-first terminal UI. It lists saved profiles, shows the bootstrap, hardening, network, proxy, and observability stages, collects missing full-run values before any remote command runs, and presents explicit choices to create a local configuration repository, use an existing checkout, or clone GitHub. The review screen shows the selected repository action. After confirmation, AegisNode prepares the repository first and starts SSH execution only after that succeeds. From a saved profile dashboard, use `j`/`k` to select a stage and press `r` to run that stage once, even if it is already marked complete. Retrying Proxy after Pangolin has already been registered opens masked administrator email/password inputs and saves the supplied credentials in the owner-only profile secrets file. Press `q` to quit from navigation or run screens, `esc` to go back, or `x` to delete only the local saved profile, secrets, state, and run logs; delete does not change the remote server. The older one-off guided paths remain available from the advanced legacy setup entry. Setup does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
+Running `setup` without `--ip` opens the full-screen, profile-first terminal UI. It lists saved profiles and presents three setup actions: Bootstrap, Harden, and Platform. Platform runs networking, Pangolin proxy, and observability in order from one command. The TUI collects missing full-run values before any remote command runs and presents explicit choices to create a local configuration repository, use an existing checkout, or clone GitHub. The review screen shows the selected repository action. After confirmation, AegisNode prepares the repository first and starts SSH execution only after that succeeds. From a saved profile dashboard, use `j`/`k` to select an action and press `r` to run it once, even if it is already marked complete. Retrying Platform after Pangolin has already been registered opens masked administrator email/password inputs and saves the supplied credentials in the owner-only profile secrets file. Press `q` to quit from navigation or run screens, `esc` to go back, or `x` to delete only the local saved profile, secrets, state, and run logs; delete does not change the remote server. The older one-off guided paths remain available from the advanced legacy setup entry. Setup does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
 
 For a quick preflight check without opening the TUI:
 
@@ -149,7 +149,7 @@ AegisNode deploys the exact committed `HEAD`. Uncommitted changes to the observa
 
 ## Add an application stack
 
-Use `stack add` to import any Docker Compose file and configure one of its services as a Pangolin public resource:
+Saved-profile dashboards show stacks detected in the profile configuration repository. Press `s` to open the standalone stack manager. From there, `a` imports a Docker Compose file, `e` edits its public-resource metadata, `ctrl+s` saves an edit, `d` removes it after confirmation, and `r` deploys only the selected committed stack. Repository actions are also available without leaving the TUI: `v` views staged, unstaged, and untracked diffs; `g` stages all changes under `stacks/`; `c` commits the staged stack changes with a supplied message; and `p` pushes the current branch when an `origin` remote is configured. The manager reports `commit required`, `push required`, `sync required`, or `in sync`. Press `y` to synchronize the committed repository with the server. Synchronization deploys every current stack and removes containers, generated overrides, deployment manifests, and Pangolin resources for stacks deleted from Git. The direct command remains available for scripted imports:
 
 ```sh
 bin/aegisnode stack add \
@@ -157,7 +157,7 @@ bin/aegisnode stack add \
   --compose /path/to/docker-compose.yml
 ```
 
-The terminal UI shows detected services and container ports, then asks for the service, port, public subdomain, display name, and health-check path. AegisNode copies the original file to `stacks/<name>/compose.yaml` and writes the reviewed public-resource contract to `stacks/<name>/aegisnode.yaml`. It does not inject labels into the consumer-owned Compose file.
+The terminal UI shows detected services and container ports, then asks for the service, port, public subdomain, display name, health-check path, and SSO setting. AegisNode copies the original file to `stacks/<name>/compose.yaml` and writes the reviewed public-resource contract to `stacks/<name>/aegisnode.yaml`. It does not inject labels into the consumer-owned Compose file.
 
 During deployment, AegisNode generates an override that:
 
@@ -167,7 +167,7 @@ During deployment, AegisNode generates an override that:
 - Validates the merged Compose model before stopping or replacing containers.
 - Restarts Newt and verifies that Pangolin created exactly one expected public resource.
 
-Review and commit the generated stack files, then open the profile dashboard, select the Observability stage, and press `r`. AegisNode deploys committed stack configuration only.
+Review and commit the generated stack files, then select that stack in the TUI and press `r`. AegisNode deploys and reports each stack independently, and deploys committed stack configuration only.
 
 DNS registrar changes remain external. Create records for `pangolin.<domain>`, `beszel.<domain>`, and `dozzle.<domain>` pointing to the VPS. Traefik uses HTTP-01 to issue a separate certificate for each hostname, so TCP port 80 must remain reachable.
 

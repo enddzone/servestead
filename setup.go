@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -166,13 +167,6 @@ func runSetup(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		}
 		return nil
 	}
-	if request.StackCompose != "" {
-		return runStack(ctx, []string{
-			"add",
-			"--profile", request.ProfileOptions.ProfileID,
-			"--compose", request.StackCompose,
-		}, stdout, stderr)
-	}
 	if request.Stage != "" {
 		profile, state, config, err := prepareProfileStageSetup(request.ProfileOptions, store, request.Stage)
 		if err != nil {
@@ -216,7 +210,7 @@ func collectSetupRequest(store ProfileStore, output io.Writer) (setupRequest, er
 			return setupRequest{}, err
 		}
 		model := newProfileSetupModel(profiles)
-		program := tea.NewProgram(model, tea.WithOutput(output))
+		program := tea.NewProgram(model, tea.WithOutput(output), tea.WithAltScreen())
 		finalModel, err := program.Run()
 		if err != nil {
 			return setupRequest{}, fmt.Errorf("run setup TUI: %w", err)
@@ -244,13 +238,6 @@ func collectSetupRequest(store ProfileStore, output io.Writer) (setupRequest, er
 		if !result.done {
 			return setupRequest{}, errors.New("setup did not complete")
 		}
-		if result.addStackCompose != "" {
-			options, err := result.optionsForSelectedProfile()
-			if err != nil {
-				return setupRequest{}, err
-			}
-			return setupRequest{ProfileOptions: options, StackCompose: result.addStackCompose}, nil
-		}
 		if result.singleStage != "" {
 			options, err := result.optionsForSelectedProfile()
 			if err != nil {
@@ -268,7 +255,7 @@ func collectSetupRequest(store ProfileStore, output io.Writer) (setupRequest, er
 
 func collectLegacySetupConfig(output io.Writer) (setupConfig, error) {
 	model := newSetupModel()
-	program := tea.NewProgram(model, tea.WithOutput(output))
+	program := tea.NewProgram(model, tea.WithOutput(output), tea.WithAltScreen())
 	finalModel, err := program.Run()
 	if err != nil {
 		return setupConfig{}, fmt.Errorf("run setup TUI: %w", err)
@@ -291,7 +278,6 @@ type setupRequest struct {
 	LegacyConfig   setupConfig
 	ProfileOptions setupCLIOptions
 	Stage          string
-	StackCompose   string
 }
 
 type profileChoice struct {
@@ -329,12 +315,18 @@ const (
 	profileSetupScreenAdvanced
 	profileSetupScreenRepository
 	profileSetupScreenRepositoryDetails
+	profileSetupScreenStacks
 	profileSetupScreenStackCompose
+	profileSetupScreenStackEditor
+	profileSetupScreenStackDeleteConfirm
+	profileSetupScreenStackDiff
+	profileSetupScreenStackCommit
 	profileSetupScreenReview
 	profileSetupScreenDeleteConfirm
 )
 
 var setupStageOrder = []string{"bootstrap", "harden", "network", "proxy", "observability"}
+var dashboardStageOrder = []string{"bootstrap", "harden", "platform"}
 
 type pangolinRegistrationStatus string
 
@@ -383,6 +375,19 @@ type profileSetupModel struct {
 	advanced          []textinput.Model
 	repositoryInputs  []textinput.Model
 	stackComposeInput textinput.Model
+	stackTable        table.Model
+	stacks            []editableStack
+	stackInputs       []textinput.Model
+	stackServices     []composeServiceSummary
+	stackCompose      string
+	stackOriginalName string
+	stackNotice       string
+	stackGitStatus    string
+	stackHead         string
+	stackNeedsPush    bool
+	stackSyncStatus   string
+	stackDiffViewport viewport.Model
+	stackCommitInput  textinput.Model
 	repositoryMode    string
 	focus             int
 	err               string
@@ -391,7 +396,6 @@ type profileSetupModel struct {
 	done              bool
 	legacy            bool
 	cancelled         bool
-	addStackCompose   string
 }
 
 func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
@@ -444,17 +448,19 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 	repositoryList.DisableQuitKeybindings()
 
 	model := profileSetupModel{
-		screen:         profileSetupScreenPicker,
-		profiles:       profiles,
-		profileList:    profileList,
-		repositoryList: repositoryList,
-		stageTable:     newProfileStageTable(nil),
-		progress:       progress.New(progress.WithWidth(42)),
-		planViewport:   viewport.New(82, 10),
-		help:           help.New(),
-		selectedIndex:  -1,
-		width:          82,
-		height:         24,
+		screen:            profileSetupScreenPicker,
+		profiles:          profiles,
+		profileList:       profileList,
+		repositoryList:    repositoryList,
+		stageTable:        newProfileStageTable(nil),
+		stackTable:        newStackTable(nil, "", nil),
+		stackDiffViewport: viewport.New(100, 18),
+		progress:          progress.New(progress.WithWidth(42)),
+		planViewport:      viewport.New(82, 10),
+		help:              help.New(),
+		selectedIndex:     -1,
+		width:             82,
+		height:            24,
 	}
 	model.inputs = setupProfileInputs(setupCLIOptions{})
 	model.advanced = setupAdvancedInputs(setupCLIOptions{})
@@ -462,6 +468,9 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 	model.repositoryMode = "create"
 	model.stackComposeInput = newSetupInputs([]setupInputField{{
 		label: "Docker Compose file", placeholder: "/path/to/docker-compose.yml",
+	}})[0]
+	model.stackCommitInput = newSetupInputs([]setupInputField{{
+		label: "Commit message", placeholder: "Update application stacks",
 	}})[0]
 	model.inputs[0].Focus()
 	return model
@@ -501,7 +510,7 @@ func newProfileStageTable(state *ProfileState) table.Model {
 			{Title: "Last error", Width: 42},
 		}),
 		table.WithRows(profileStageRows(state)),
-		table.WithHeight(7),
+		table.WithHeight(len(dashboardStageOrder)+1),
 		table.WithWidth(78),
 		table.WithFocused(true),
 	)
@@ -509,11 +518,9 @@ func newProfileStageTable(state *ProfileState) table.Model {
 
 func profileStageRows(state *ProfileState) []table.Row {
 	labels := map[string]string{
-		"bootstrap":     "Bootstrap",
-		"harden":        "Harden",
-		"network":       "Network",
-		"proxy":         "Proxy",
-		"observability": "Obs. & stacks",
+		"bootstrap": "Bootstrap",
+		"harden":    "Harden",
+		"platform":  "Platform",
 	}
 	completed := map[string]bool{}
 	if state != nil {
@@ -526,19 +533,89 @@ func profileStageRows(state *ProfileState) []table.Row {
 		}
 	}
 	rows := []table.Row{}
-	for _, stage := range setupStageOrder {
+	for _, stage := range dashboardStageOrder {
 		status := stageStatusPending
 		lastError := ""
-		if completed[stage] {
+		if dashboardStageComplete(stage, completed) {
 			status = stageStatusComplete
 		}
-		if stageStatus, ok := activeStages[stage]; ok && stageStatus.Status != "" {
-			status = stageStatus.Status
-			lastError = stageStatus.LastError
+		for _, internalStage := range dashboardInternalStages(stage) {
+			stageState, ok := activeStages[internalStage]
+			if !ok {
+				continue
+			}
+			if stageState.Status == stageStatusFailed {
+				status = stageStatusFailed
+				lastError = stageState.LastError
+				break
+			}
+			if stageState.Status == stageStatusRunning {
+				status = stageStatusRunning
+				lastError = stageState.LastError
+			}
 		}
 		rows = append(rows, table.Row{labels[stage], status, truncateForTable(lastError, 42)})
 	}
 	return rows
+}
+
+func dashboardInternalStages(stage string) []string {
+	if stage == "platform" {
+		return []string{"network", "proxy", "observability"}
+	}
+	return []string{stage}
+}
+
+func dashboardStageComplete(stage string, completed map[string]bool) bool {
+	for _, internalStage := range dashboardInternalStages(stage) {
+		if !completed[internalStage] {
+			return false
+		}
+	}
+	return true
+}
+
+func newStackTable(stacks []editableStack, baseDomain string, state *ProfileState) table.Model {
+	rows := make([]table.Row, 0, len(stacks))
+	for _, stack := range stacks {
+		resource := "(private)"
+		if len(stack.Metadata.PublicResources) > 0 {
+			public := stack.Metadata.PublicResources[0]
+			host := public.Subdomain
+			if baseDomain != "" {
+				host += "." + baseDomain
+			}
+			resource = fmt.Sprintf("%s → %s:%d", host, public.Service, public.Port)
+		}
+		rows = append(rows, table.Row{stack.Name, standaloneStackStatus(stack.Name, state), resource})
+	}
+	return table.New(
+		table.WithColumns([]table.Column{
+			{Title: "Stack", Width: 18},
+			{Title: "Status", Width: 10},
+			{Title: "Public resource", Width: 44},
+		}),
+		table.WithRows(rows),
+		table.WithHeight(clampInt(len(rows)+1, 2, 13)),
+		table.WithWidth(78),
+		table.WithFocused(true),
+	)
+}
+
+func standaloneStackStatus(name string, state *ProfileState) string {
+	if state == nil {
+		return "unknown"
+	}
+	stage := "stack:" + name
+	if run, ok := state.Runs[state.ActiveRunID]; ok {
+		if current, ok := run.Stages[stage]; ok && current.Status != "" && current.Status != stageStatusPending {
+			return current.Status
+		}
+	}
+	if completedSetupStages(*state)[stage] {
+		return stageStatusComplete
+	}
+	return "unknown"
 }
 
 func truncateForTable(value string, width int) string {
@@ -568,12 +645,13 @@ func profileCompletion(state *ProfileState) float64 {
 		return 0
 	}
 	completed := 0
-	for _, done := range completedSetupStages(*state) {
-		if done {
+	completedStages := completedSetupStages(*state)
+	for _, stage := range dashboardStageOrder {
+		if dashboardStageComplete(stage, completedStages) {
 			completed++
 		}
 	}
-	return float64(completed) / float64(len(setupStageOrder))
+	return float64(completed) / float64(len(dashboardStageOrder))
 }
 
 func (model profileSetupModel) Init() tea.Cmd {
@@ -585,10 +663,16 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		model.width = msg.Width
 		model.height = msg.Height
-		model.profileList.SetSize(clampInt(msg.Width-4, 40, 100), clampInt(msg.Height-8, 8, 18))
-		model.repositoryList.SetSize(clampInt(msg.Width-4, 40, 100), clampInt(msg.Height-8, 12, 16))
-		model.planViewport.Width = clampInt(msg.Width-4, 40, 100)
+		contentWidth := max(40, msg.Width-4)
+		navigationHeight := max(8, msg.Height-7)
+		model.profileList.SetSize(contentWidth, navigationHeight)
+		model.repositoryList.SetSize(contentWidth, navigationHeight)
+		model.planViewport.Width = contentWidth
+		model.planViewport.Height = max(6, msg.Height-14)
+		model.stackDiffViewport.Width = contentWidth
+		model.stackDiffViewport.Height = max(6, msg.Height-10)
 		model.progress.Width = clampInt(msg.Width-8, 24, 64)
+		model.resizeStackTable()
 		return model, nil
 	case pangolinRegistrationStatusMsg:
 		if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) || model.profiles[model.selectedIndex].Profile.ID != msg.profileID {
@@ -614,7 +698,7 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model.cancelled = true
 			return model, tea.Quit
 		case "q":
-			if model.screen != profileSetupScreenIntake && model.screen != profileSetupScreenAdvanced {
+			if !profileSetupScreenAcceptsText(model.screen) {
 				model.cancelled = true
 				return model, tea.Quit
 			}
@@ -637,8 +721,18 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return model.updateRepositoryChoice(msg)
 		case profileSetupScreenRepositoryDetails:
 			return model.updateRepositoryDetails(msg)
+		case profileSetupScreenStacks:
+			return model.updateStacks(msg)
 		case profileSetupScreenStackCompose:
 			return model.updateStackCompose(msg)
+		case profileSetupScreenStackEditor:
+			return model.updateStackEditor(msg)
+		case profileSetupScreenStackDeleteConfirm:
+			return model.updateStackDeleteConfirm(msg)
+		case profileSetupScreenStackDiff:
+			return model.updateStackDiff(msg)
+		case profileSetupScreenStackCommit:
+			return model.updateStackCommit(msg)
 		case profileSetupScreenReview:
 			return model.updateProfileReview(msg)
 		case profileSetupScreenDeleteConfirm:
@@ -649,6 +743,32 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	default:
 		return model, nil
 	}
+}
+
+func profileSetupScreenAcceptsText(screen profileSetupScreen) bool {
+	switch screen {
+	case profileSetupScreenIntake, profileSetupScreenAdvanced, profileSetupScreenRepositoryDetails,
+		profileSetupScreenStackCompose, profileSetupScreenStackEditor, profileSetupScreenStackCommit:
+		return true
+	default:
+		return false
+	}
+}
+
+func (model *profileSetupModel) resizeStackTable() {
+	contentWidth := max(78, model.width-4)
+	resourceWidth := max(38, contentWidth-34)
+	model.stackTable.SetColumns([]table.Column{
+		{Title: "Stack", Width: 18},
+		{Title: "Status", Width: 10},
+		{Title: "Public resource", Width: resourceWidth},
+	})
+	model.stackTable.SetWidth(contentWidth)
+	availableHeight := model.height - 12
+	if model.screen == profileSetupScreenDashboard {
+		availableHeight = model.height - 23
+	}
+	model.stackTable.SetHeight(clampInt(len(model.stacks)+1, 2, max(2, availableHeight)))
 }
 
 func (model profileSetupModel) updateProfilePicker(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -702,7 +822,7 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 				proxyRetry = run.Stages["proxy"].Status == stageStatusFailed
 			}
 		}
-		if stage == "proxy" && (model.pangolinStatus == pangolinRegistrationComplete || proxyRetry) {
+		if stage == "platform" && (model.pangolinStatus == pangolinRegistrationComplete || proxyRetry) {
 			model.err = ""
 			model.focus = 3
 			model.advanced[model.focus].Focus()
@@ -719,9 +839,9 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 		model.screen = profileSetupScreenAdvanced
 	case "s", "S":
 		model.err = ""
-		model.stackComposeInput.SetValue("")
-		model.stackComposeInput.Focus()
-		model.screen = profileSetupScreenStackCompose
+		model.screen = profileSetupScreenStacks
+		model.refreshStacks()
+		model.stackTable.Focus()
 	case "f", "F":
 		model.fresh = true
 		model.setInputsFromChoice(true)
@@ -918,17 +1038,379 @@ func (model profileSetupModel) updateStackCompose(key tea.KeyMsg) (tea.Model, te
 			model.err = "Docker Compose file path is required"
 			return model, nil
 		}
-		if _, err := inspectComposeFile(path); err != nil {
+		services, err := inspectComposeFile(path)
+		if err != nil {
 			model.err = err.Error()
 			return model, nil
 		}
-		model.addStackCompose = path
-		model.done = true
-		return model, tea.Quit
+		compose, err := os.ReadFile(path)
+		if err != nil {
+			model.err = fmt.Sprintf("read Compose file: %v", err)
+			return model, nil
+		}
+		options := withStackAddDefaults(stackAddOptions{
+			Compose: path, SSO: true, HealthPath: "/",
+		}, services)
+		model.stackCompose = string(compose)
+		model.stackServices = services
+		model.stackOriginalName = ""
+		model.stackInputs = stackEditorInputs(options)
+		model.stackComposeInput.Blur()
+		model.focus = 0
+		model.stackInputs[0].Focus()
+		model.err = ""
+		model.screen = profileSetupScreenStackEditor
+		return model, nil
 	}
 	var command tea.Cmd
 	model.stackComposeInput, command = model.stackComposeInput.Update(key)
 	return model, command
+}
+
+func (model profileSetupModel) updateStacks(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "a", "A":
+		model.err = ""
+		model.stackNotice = ""
+		model.stackComposeInput.SetValue("")
+		model.stackComposeInput.Focus()
+		model.screen = profileSetupScreenStackCompose
+	case "enter", "e", "E":
+		stack, ok := model.selectedStack()
+		if !ok {
+			model.err = "no stack selected; press a to add one"
+			return model, nil
+		}
+		model.openStackEditor(stack)
+	case "d", "D":
+		if _, ok := model.selectedStack(); !ok {
+			model.err = "no stack selected"
+			return model, nil
+		}
+		model.err = ""
+		model.screen = profileSetupScreenStackDeleteConfirm
+	case "r", "R":
+		stack, ok := model.selectedStack()
+		if !ok {
+			model.err = "no stack selected"
+			return model, nil
+		}
+		model.singleStage = "stack:" + stack.Name
+		model.done = true
+		return model, tea.Quit
+	case "v", "V":
+		repositoryPath, err := model.selectedRepositoryPath()
+		if err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		diff, err := stackRepositoryDiff(context.Background(), repositoryPath)
+		if err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		model.stackDiffViewport.SetContent(diff)
+		model.stackDiffViewport.GotoTop()
+		model.err = ""
+		model.screen = profileSetupScreenStackDiff
+	case "g", "G":
+		repositoryPath, err := model.selectedRepositoryPath()
+		if err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		if err := stageStackChanges(context.Background(), repositoryPath); err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		model.stackNotice = "All changes under stacks/ are staged."
+		model.refreshStacks()
+	case "c", "C":
+		model.stackCommitInput.SetValue("")
+		model.stackCommitInput.Focus()
+		model.err = ""
+		model.screen = profileSetupScreenStackCommit
+	case "y", "Y":
+		switch {
+		case model.stackGitStatus != "clean":
+			model.err = "stack changes are uncommitted; press v to review, g to stage, and c to commit"
+		case model.stackNeedsPush:
+			model.err = "the stack commit has not been pushed to origin"
+		default:
+			model.singleStage = "stacks"
+			model.done = true
+			return model, tea.Quit
+		}
+	case "p", "P":
+		repositoryPath, err := model.selectedRepositoryPath()
+		if err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		if err := pushStackRepository(context.Background(), repositoryPath); err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		model.stackNotice = "Pushed the current configuration branch to origin."
+		model.refreshStacks()
+	default:
+		var command tea.Cmd
+		model.stackTable, command = model.stackTable.Update(key)
+		return model, command
+	}
+	return model, nil
+}
+
+func (model profileSetupModel) updateStackEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "ctrl+s":
+		return model.saveStackEditor()
+	case "tab", "down":
+		model.stackInputs[model.focus].Blur()
+		model.focus = (model.focus + 1) % len(model.stackInputs)
+		model.stackInputs[model.focus].Focus()
+		return model, nil
+	case "shift+tab", "up":
+		model.stackInputs[model.focus].Blur()
+		model.focus--
+		if model.focus < 0 {
+			model.focus = len(model.stackInputs) - 1
+		}
+		model.stackInputs[model.focus].Focus()
+		return model, nil
+	case "enter":
+		if model.focus < len(model.stackInputs)-1 {
+			model.stackInputs[model.focus].Blur()
+			model.focus++
+			model.stackInputs[model.focus].Focus()
+			return model, nil
+		}
+		return model.saveStackEditor()
+	}
+	var command tea.Cmd
+	model.stackInputs[model.focus], command = model.stackInputs[model.focus].Update(key)
+	return model, command
+}
+
+func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
+	options, err := stackOptionsFromInputs(model.stackInputs, model.stackServices)
+	if err != nil {
+		model.err = err.Error()
+		return model, nil
+	}
+	repositoryPath, err := model.selectedRepositoryPath()
+	if err != nil {
+		model.err = err.Error()
+		return model, nil
+	}
+	if err := writeEditableStack(repositoryPath, model.stackOriginalName, options, []byte(model.stackCompose)); err != nil {
+		model.err = err.Error()
+		return model, nil
+	}
+	action := "updated"
+	if model.stackOriginalName == "" {
+		action = "added"
+	}
+	model.stackNotice = fmt.Sprintf("Stack %s. Press v to review the diff, g to stage, then c to commit.", action)
+	model.err = ""
+	model.screen = profileSetupScreenStacks
+	model.refreshStacks()
+	model.stackTable.Focus()
+	return model, nil
+}
+
+func (model profileSetupModel) updateStackDeleteConfirm(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "y", "Y":
+		stack, ok := model.selectedStack()
+		if !ok {
+			model.err = "no stack selected"
+			model.screen = profileSetupScreenStacks
+			return model, nil
+		}
+		repositoryPath, err := model.selectedRepositoryPath()
+		if err != nil {
+			model.err = err.Error()
+			model.screen = profileSetupScreenStacks
+			return model, nil
+		}
+		if err := removeEditableStack(repositoryPath, stack.Name); err != nil {
+			model.err = err.Error()
+			model.screen = profileSetupScreenStacks
+			return model, nil
+		}
+		model.stackNotice = fmt.Sprintf("Stack %s removed. Review and commit the deletion before deployment.", stack.Name)
+		model.err = ""
+		model.refreshStacks()
+		model.screen = profileSetupScreenStacks
+	case "n", "N":
+		model.screen = profileSetupScreenStacks
+	}
+	return model, nil
+}
+
+func (model profileSetupModel) updateStackDiff(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var command tea.Cmd
+	model.stackDiffViewport, command = model.stackDiffViewport.Update(key)
+	return model, command
+}
+
+func (model profileSetupModel) updateStackCommit(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.String() == "enter" {
+		repositoryPath, err := model.selectedRepositoryPath()
+		if err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		message := strings.TrimSpace(model.stackCommitInput.Value())
+		if err := commitStackChanges(context.Background(), repositoryPath, message); err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		model.stackCommitInput.Blur()
+		model.stackNotice = fmt.Sprintf("Committed stack changes: %s. Press y to synchronize the server.", message)
+		model.err = ""
+		model.screen = profileSetupScreenStacks
+		model.refreshStacks()
+		model.stackTable.Focus()
+		return model, nil
+	}
+	var command tea.Cmd
+	model.stackCommitInput, command = model.stackCommitInput.Update(key)
+	return model, command
+}
+
+func stackEditorInputs(options stackAddOptions) []textinput.Model {
+	sso := "no"
+	if options.SSO {
+		sso = "yes"
+	}
+	return newSetupInputs([]setupInputField{
+		{label: "Stack name", value: options.Name},
+		{label: "Service to publish", value: options.Service},
+		{label: "Container port", value: func() string {
+			if options.Port == 0 {
+				return ""
+			}
+			return strconv.Itoa(options.Port)
+		}()},
+		{label: "Public subdomain", value: options.Subdomain},
+		{label: "Pangolin display name", value: options.DisplayName},
+		{label: "Health-check path", value: options.HealthPath},
+		{label: "Require Pangolin SSO (yes/no)", value: sso},
+	})
+}
+
+func stackOptionsFromInputs(inputs []textinput.Model, services []composeServiceSummary) (stackAddOptions, error) {
+	ssoValue := strings.ToLower(strings.TrimSpace(inputs[6].Value()))
+	if ssoValue != "yes" && ssoValue != "no" {
+		return stackAddOptions{}, errors.New("Require Pangolin SSO must be yes or no")
+	}
+	options := stackAddOptions{
+		Name: strings.TrimSpace(inputs[0].Value()), Service: strings.TrimSpace(inputs[1].Value()),
+		Subdomain: strings.TrimSpace(inputs[3].Value()), DisplayName: strings.TrimSpace(inputs[4].Value()),
+		HealthPath: strings.TrimSpace(inputs[5].Value()), SSO: ssoValue == "yes",
+	}
+	options.Port, _ = strconv.Atoi(strings.TrimSpace(inputs[2].Value()))
+	return options, validateStackAddOptions(options, services)
+}
+
+func (model *profileSetupModel) openStackEditor(stack editableStack) {
+	if len(stack.Metadata.PublicResources) != 1 {
+		model.err = "TUI editing requires exactly one public resource; edit aegisnode.yaml directly for multi-resource stacks"
+		return
+	}
+	options := stackAddOptions{Name: stack.Name, SSO: true, HealthPath: "/"}
+	if len(stack.Metadata.PublicResources) > 0 {
+		resource := stack.Metadata.PublicResources[0]
+		options.Service = resource.Service
+		options.Port = resource.Port
+		options.Subdomain = resource.Subdomain
+		options.DisplayName = resource.Name
+		options.HealthPath = resource.Healthcheck.Path
+		options.SSO = resource.SSO
+	}
+	model.stackOriginalName = stack.Name
+	model.stackCompose = stack.Compose
+	model.stackServices = stack.Services
+	model.stackInputs = stackEditorInputs(options)
+	model.focus = 0
+	model.stackInputs[0].Focus()
+	model.err = ""
+	model.screen = profileSetupScreenStackEditor
+}
+
+func (model profileSetupModel) selectedStack() (editableStack, bool) {
+	cursor := model.stackTable.Cursor()
+	if cursor < 0 || cursor >= len(model.stacks) {
+		return editableStack{}, false
+	}
+	return model.stacks[cursor], true
+}
+
+func (model profileSetupModel) selectedRepositoryPath() (string, error) {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		return "", errors.New("no profile selected")
+	}
+	path := strings.TrimSpace(model.profiles[model.selectedIndex].Profile.ConfigRepositoryPath)
+	if path == "" {
+		return "", errors.New("configuration repository is not ready; run Platform once before managing stacks")
+	}
+	if _, err := os.Stat(filepath.Join(expandUserPath(path), ".git")); err != nil {
+		return "", errors.New("configuration repository is not ready; run Platform once before managing stacks")
+	}
+	return path, nil
+}
+
+func (model *profileSetupModel) refreshStacks() {
+	path, err := model.selectedRepositoryPath()
+	if err != nil {
+		model.err = err.Error()
+		return
+	}
+	stacks, err := loadEditableStacks(path)
+	if err != nil {
+		model.err = err.Error()
+		return
+	}
+	model.stacks = stacks
+	choice := model.profiles[model.selectedIndex]
+	model.stackTable = newStackTable(stacks, choice.Profile.BaseDomain, &choice.State)
+	model.resizeStackTable()
+	status, err := stackRepositoryStatus(context.Background(), path)
+	if err != nil {
+		model.err = err.Error()
+		return
+	}
+	model.stackGitStatus = status
+	if status != "clean" {
+		model.stackHead = ""
+		model.stackNeedsPush = false
+		model.stackSyncStatus = "commit required"
+		model.err = ""
+		return
+	}
+	head, err := stackRepositoryHead(context.Background(), path)
+	if err != nil {
+		model.err = err.Error()
+		return
+	}
+	model.stackHead = head
+	needsPush, err := stackRepositoryNeedsPush(context.Background(), path, head)
+	if err != nil {
+		model.err = err.Error()
+		return
+	}
+	model.stackNeedsPush = needsPush
+	switch {
+	case needsPush:
+		model.stackSyncStatus = "push required"
+	case choice.State.StackRepositoryCommit != head:
+		model.stackSyncStatus = "sync required"
+	default:
+		model.stackSyncStatus = "in sync"
+	}
+	model.err = ""
 }
 
 func inspectComposeFile(path string) ([]composeServiceSummary, error) {
@@ -1015,8 +1497,19 @@ func (model *profileSetupModel) goBack() {
 		model.screen = profileSetupScreenIntake
 	case profileSetupScreenRepositoryDetails:
 		model.screen = profileSetupScreenRepository
-	case profileSetupScreenStackCompose:
+	case profileSetupScreenStacks:
 		model.screen = profileSetupScreenDashboard
+	case profileSetupScreenStackCompose:
+		model.screen = profileSetupScreenStacks
+	case profileSetupScreenStackEditor:
+		model.screen = profileSetupScreenStacks
+	case profileSetupScreenStackDeleteConfirm:
+		model.screen = profileSetupScreenStacks
+	case profileSetupScreenStackDiff:
+		model.screen = profileSetupScreenStacks
+	case profileSetupScreenStackCommit:
+		model.stackCommitInput.Blur()
+		model.screen = profileSetupScreenStacks
 	case profileSetupScreenReview:
 		if model.selectedIndex >= 0 {
 			model.screen = profileSetupScreenDashboard
@@ -1105,12 +1598,26 @@ func (model *profileSetupModel) refreshDashboard() {
 	model.pangolinStatus = pangolinRegistrationUnknown
 	model.pangolinError = ""
 	model.showSetupToken = false
+	model.stacks = nil
+	model.stackGitStatus = ""
+	model.stackHead = ""
+	model.stackNeedsPush = false
+	model.stackSyncStatus = ""
+	model.stackTable = newStackTable(nil, "", nil)
+	model.resizeStackTable()
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
 		model.stageTable = newProfileStageTable(nil)
 		return
 	}
 	state := model.profiles[model.selectedIndex].State
 	model.stageTable = newProfileStageTable(&state)
+	path := model.profiles[model.selectedIndex].Profile.ConfigRepositoryPath
+	if path != "" {
+		if _, err := os.Stat(filepath.Join(expandUserPath(path), ".git")); err == nil {
+			model.refreshStacks()
+			model.stackTable.Blur()
+		}
+	}
 }
 
 func (model *profileSetupModel) checkPangolinRegistration() tea.Cmd {
@@ -1242,17 +1749,17 @@ func (model profileSetupModel) selectedDashboardStage() (string, error) {
 		return "", errors.New("no profile selected")
 	}
 	cursor := model.stageTable.Cursor()
-	if cursor < 0 || cursor >= len(setupStageOrder) {
+	if cursor < 0 || cursor >= len(dashboardStageOrder) {
 		return "", errors.New("no setup stage selected")
 	}
-	return setupStageOrder[cursor], nil
+	return dashboardStageOrder[cursor], nil
 }
 
 func (model profileSetupModel) View() string {
 	var builder strings.Builder
 	builder.WriteString(setupTitleStyle.Render("AegisNode setup"))
 	builder.WriteString("\n")
-	builder.WriteString(setupHelpStyle.Render("Profile-aware full setup runs bootstrap, hardening, networking, and proxy deployment end to end."))
+	builder.WriteString(setupHelpStyle.Render("Profile-aware setup manages the server platform and standalone application stacks."))
 	builder.WriteString("\n\n")
 
 	switch model.screen {
@@ -1268,11 +1775,25 @@ func (model profileSetupModel) View() string {
 		builder.WriteString(model.repositoryChoiceView())
 	case profileSetupScreenRepositoryDetails:
 		builder.WriteString(model.repositoryDetailsView())
+	case profileSetupScreenStacks:
+		builder.WriteString(model.stacksView())
 	case profileSetupScreenStackCompose:
 		builder.WriteString("Add application stack\n")
 		builder.WriteString(setupHelpStyle.Render("Choose any Docker Compose file. AegisNode will inspect its services and guide Pangolin configuration next."))
 		builder.WriteString("\n\n")
 		builder.WriteString(model.stackComposeInput.View())
+	case profileSetupScreenStackEditor:
+		builder.WriteString(model.stackEditorView())
+	case profileSetupScreenStackDeleteConfirm:
+		builder.WriteString(model.stackDeleteConfirmView())
+	case profileSetupScreenStackDiff:
+		builder.WriteString("Stack repository diff\n\n")
+		builder.WriteString(model.stackDiffViewport.View())
+	case profileSetupScreenStackCommit:
+		builder.WriteString("Commit staged stack changes\n")
+		builder.WriteString(setupHelpStyle.Render("Only staged changes under stacks/ are included."))
+		builder.WriteString("\n\n")
+		builder.WriteString(model.stackCommitInput.View())
 	case profileSetupScreenReview:
 		builder.WriteString(model.reviewView())
 	case profileSetupScreenDeleteConfirm:
@@ -1313,9 +1834,96 @@ func (model profileSetupModel) dashboardView() string {
 	builder.WriteString(model.progress.ViewAs(profileCompletion(&choice.State)))
 	builder.WriteString("\n\n")
 	builder.WriteString(model.stageTable.View())
+	builder.WriteString("\n\n")
+	builder.WriteString(fmt.Sprintf("Standalone stacks (%d)\n", len(model.stacks)))
+	if len(model.stacks) == 0 {
+		builder.WriteString(setupHelpStyle.Render("No stacks found in the profile configuration repository."))
+	} else {
+		builder.WriteString(model.stackTable.View())
+	}
 	builder.WriteString("\n")
-	builder.WriteString(setupHelpStyle.Render("Select a stage with j/k or up/down. Press r to run it once, even if complete. Press v to review the full setup plan."))
+	builder.WriteString(setupHelpStyle.Render("Platform runs Network, Proxy, and Observability. Press r to run an action; press s to manage stacks."))
 	return builder.String()
+}
+
+func (model profileSetupModel) stacksView() string {
+	var builder strings.Builder
+	builder.WriteString("Standalone stacks\n")
+	builder.WriteString(setupHelpStyle.Render("Each stack owns its Compose file and public-resource metadata. Changes remain local until reviewed and committed."))
+	builder.WriteString("\n\n")
+	builder.WriteString("Git: ")
+	if model.stackGitStatus == "clean" {
+		builder.WriteString("clean\n\n")
+	} else {
+		changeCount := len(strings.Split(model.stackGitStatus, "\n"))
+		builder.WriteString(fmt.Sprintf("%d change(s) • v diff • g stage all • c commit\n\n", changeCount))
+	}
+	builder.WriteString("Remote: ")
+	switch model.stackSyncStatus {
+	case "in sync":
+		builder.WriteString("in sync\n\n")
+	case "":
+		builder.WriteString("unknown\n\n")
+	default:
+		builder.WriteString(setupWarningStyle.Render(model.stackSyncStatus))
+		advice := " • press y to sync"
+		if model.stackSyncStatus == "commit required" {
+			advice = " • review, stage, and commit first"
+		} else if model.stackSyncStatus == "push required" {
+			advice = " • press p to push first"
+		}
+		builder.WriteString(setupHelpStyle.Render(advice))
+		builder.WriteString("\n\n")
+	}
+	if len(model.stacks) == 0 {
+		builder.WriteString("No application stacks configured. Press a to add one.\n")
+	} else {
+		builder.WriteString(model.stackTable.View())
+	}
+	if model.stackNotice != "" {
+		builder.WriteString("\n")
+		builder.WriteString(setupWarningStyle.Render(model.stackNotice))
+	}
+	return builder.String()
+}
+
+func (model profileSetupModel) stackEditorView() string {
+	var builder strings.Builder
+	title := "Edit stack"
+	if model.stackOriginalName == "" {
+		title = "Add stack"
+	}
+	builder.WriteString(title + "\n")
+	builder.WriteString(setupHelpStyle.Render("The Compose file is preserved; these fields control its Pangolin public resource."))
+	builder.WriteString("\n\nDetected services:\n")
+	for _, service := range model.stackServices {
+		ports := "no declared ports"
+		if len(service.ContainerPorts) > 0 {
+			values := make([]string, len(service.ContainerPorts))
+			for index, port := range service.ContainerPorts {
+				values[index] = strconv.Itoa(port)
+			}
+			ports = strings.Join(values, ", ")
+		}
+		builder.WriteString(fmt.Sprintf("  %s: %s\n", service.Name, ports))
+	}
+	builder.WriteString("\n")
+	for _, input := range model.stackInputs {
+		builder.WriteString(input.View())
+		builder.WriteByte('\n')
+	}
+	return builder.String()
+}
+
+func (model profileSetupModel) stackDeleteConfirmView() string {
+	stack, ok := model.selectedStack()
+	if !ok {
+		return "No stack selected."
+	}
+	return fmt.Sprintf(
+		"Remove stack %s?\n\nThis deletes its local directory, including Compose and application files. Commit the deletion, then press y in the stack manager to remove the remote deployment.\n",
+		stack.Name,
+	)
 }
 
 func (model profileSetupModel) pangolinRegistrationView(choice profileChoice) string {
@@ -1330,7 +1938,7 @@ func (model profileSetupModel) pangolinRegistrationView(choice profileChoice) st
 		builder.WriteString("Pangolin registration: complete.")
 		if !proxyComplete {
 			builder.WriteString("\n")
-			builder.WriteString(setupWarningStyle.Render("Existing administrator credentials are required to finish Proxy setup."))
+			builder.WriteString(setupWarningStyle.Render("Existing administrator credentials are required to finish Platform setup."))
 		}
 	case model.pangolinStatus == pangolinRegistrationUnavailable:
 		builder.WriteString(setupWarningStyle.Render("Pangolin registration: unable to verify."))
@@ -1352,7 +1960,7 @@ func (model profileSetupModel) pangolinRegistrationView(choice profileChoice) st
 	if choice.Secrets.PangolinSetupToken == "" {
 		if model.pangolinStatus == pangolinRegistrationIncomplete {
 			builder.WriteString("\n")
-			builder.WriteString(setupWarningStyle.Render("No saved token. Run the Proxy stage once to generate and deploy one."))
+			builder.WriteString(setupWarningStyle.Render("No saved token. Run Platform once to generate and deploy one."))
 		}
 		return builder.String()
 	}
@@ -1481,7 +2089,7 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 			key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "stage")),
 			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
 			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "advanced")),
-			key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "add stack")),
+			key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "stacks")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 			key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		}
@@ -1519,9 +2127,47 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 			key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "field")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		}
+	case profileSetupScreenStacks:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "sync repo")),
+			key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "diff")),
+			key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "stage all")),
+			key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "commit")),
+			key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "push")),
+			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add")),
+			key.NewBinding(key.WithKeys("e", "enter"), key.WithHelp("e", "edit")),
+			key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "remove")),
+			key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "deploy one")),
+			key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "select")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
 	case profileSetupScreenStackCompose:
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "inspect")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	case profileSetupScreenStackEditor:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "save")),
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "next/save")),
+			key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "field")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	case profileSetupScreenStackDeleteConfirm:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "remove")),
+			key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "keep")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	case profileSetupScreenStackDiff:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "scroll")),
+			key.NewBinding(key.WithKeys("pgup", "pgdown"), key.WithHelp("pgup/pgdn", "page")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	case profileSetupScreenStackCommit:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "commit")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		}
 	case profileSetupScreenReview:
@@ -1561,7 +2207,7 @@ func clampInt(value, minimum, maximum int) int {
 
 func collectFullRunConfig(output io.Writer, config setupConfig) (setupConfig, error) {
 	model := newFullRunModel(config)
-	program := tea.NewProgram(model, tea.WithOutput(output))
+	program := tea.NewProgram(model, tea.WithOutput(output), tea.WithAltScreen())
 	finalModel, err := program.Run()
 	if err != nil {
 		return setupConfig{}, fmt.Errorf("run setup intake TUI: %w", err)
@@ -1791,7 +2437,7 @@ func prepareProfileStageSetup(options setupCLIOptions, store ProfileStore, stage
 	if err := validateStageRunConfig(stage, config); err != nil {
 		return Profile{}, ProfileState{}, setupConfig{}, err
 	}
-	if stage == "proxy" || stage == "observability" {
+	if stage == "proxy" || stage == "observability" || stage == "platform" || stage == "stacks" || strings.HasPrefix(stage, "stack:") {
 		secrets, err := store.LoadSecrets(profile.ID)
 		if err != nil {
 			return Profile{}, ProfileState{}, setupConfig{}, err
@@ -1835,6 +2481,9 @@ func prepareProfileStageSetup(options setupCLIOptions, store ProfileStore, stage
 }
 
 func setupModeForStage(stage string) setupMode {
+	if strings.HasPrefix(stage, "stack:") {
+		return setupModeObservability
+	}
 	switch stage {
 	case "bootstrap":
 		return setupModeBootstrapHarden
@@ -1846,6 +2495,10 @@ func setupModeForStage(stage string) setupMode {
 		return setupModeProxy
 	case "observability":
 		return setupModeObservability
+	case "stacks":
+		return setupModeObservability
+	case "platform":
+		return setupModeFullRun
 	default:
 		return setupModeFullRun
 	}
@@ -1867,7 +2520,7 @@ func validateStageRunConfig(stage string, config setupConfig) error {
 		if !linuxUsername.MatchString(config.AdminUser) {
 			return errors.New("admin SSH user must be a valid Linux username")
 		}
-	case "proxy":
+	case "proxy", "platform":
 		return validateProxyConfig(proxyConfig{
 			Host:             config.Host,
 			SSHUser:          config.AdminUser,
@@ -1878,11 +2531,17 @@ func validateStageRunConfig(stage string, config setupConfig) error {
 			SetupToken:       firstNonEmpty(config.PangolinSetupToken, "00000000000000000000000000000000"),
 			AdminEmail:       firstNonEmpty(config.PangolinAdminEmail, config.LetsEncryptEmail),
 		})
-	case "observability":
+	case "observability", "stacks":
 		if config.BaseDomain == "" || config.PangolinAdminEmail == "" {
-			return errors.New("profile domain and Pangolin administrator email are required for the observability stage")
+			return errors.New("profile domain and Pangolin administrator email are required for repository synchronization")
 		}
 	default:
+		if strings.HasPrefix(stage, "stack:") && stackSlugPattern.MatchString(strings.TrimPrefix(stage, "stack:")) {
+			if config.BaseDomain == "" || config.PangolinAdminEmail == "" {
+				return errors.New("profile domain and Pangolin administrator email are required for stack deployment")
+			}
+			return nil
+		}
 		return fmt.Errorf("unknown setup stage: %s", stage)
 	}
 	return nil
@@ -2118,7 +2777,7 @@ func runProfileSetupPlanWithRunView(ctx context.Context, store ProfileStore, pro
 	reporter := &synchronizedTaskReporter{reporters: []TaskReporter{profileReporter, liveReporter}}
 	model := newProfileRunModel(profile, config, runID, completedStages, "", messages, cancel)
 	model.start = startProfileRunCommand(runContext, profile, config, runID, completedStages, reporter, profileReporter, messages)
-	program := tea.NewProgram(model, tea.WithOutput(stderr))
+	program := tea.NewProgram(model, tea.WithOutput(stderr), tea.WithAltScreen())
 	finalModel, err := program.Run()
 	if err != nil {
 		return fmt.Errorf("run setup TUI: %w", err)
@@ -2149,7 +2808,7 @@ func runProfileSetupStagePlan(ctx context.Context, store ProfileStore, profile P
 	if err := runPreflight(config, stdout); err != nil {
 		return err
 	}
-	if stage == "observability" {
+	if stage == "observability" || stage == "platform" || stage == "stacks" || strings.HasPrefix(stage, "stack:") {
 		fmt.Fprintln(stdout, "Preparing the configuration repository before SSH execution...")
 		var err error
 		profile, config, err = prepareDeclarativeSetup(ctx, store, profile, state, config)
@@ -2179,6 +2838,9 @@ func runProfileSetupStagePlan(ctx context.Context, store ProfileStore, profile P
 		}
 		return err
 	}
+	if stage == "stacks" {
+		state.StackRepositoryCommit = config.ConfigRepositoryCommit
+	}
 	reporter.finishRun(runStatusComplete)
 	if reporter.err != nil {
 		return reporter.err
@@ -2192,7 +2854,7 @@ func runProfileSetupStagePlanWithRunView(ctx context.Context, store ProfileStore
 	if err := runPreflight(config, stdout); err != nil {
 		return err
 	}
-	if stage == "observability" {
+	if stage == "observability" || stage == "platform" || stage == "stacks" || strings.HasPrefix(stage, "stack:") {
 		fmt.Fprintln(stdout, "Preparing the configuration repository before SSH execution...")
 		var err error
 		profile, config, err = prepareDeclarativeSetup(ctx, store, profile, state, config)
@@ -2223,7 +2885,7 @@ func runProfileSetupStagePlanWithRunView(ctx context.Context, store ProfileStore
 	reporter := &synchronizedTaskReporter{reporters: []TaskReporter{profileReporter, liveReporter}}
 	model := newProfileRunModel(profile, config, runID, completedSetupStages(state), stage, messages, cancel)
 	model.start = startProfileStageRunCommand(runContext, profile, config, runID, stage, reporter, profileReporter, messages)
-	program := tea.NewProgram(model, tea.WithOutput(stderr))
+	program := tea.NewProgram(model, tea.WithOutput(stderr), tea.WithAltScreen())
 	finalModel, err := program.Run()
 	if err != nil {
 		return fmt.Errorf("run setup TUI: %w", err)
@@ -2352,33 +3014,75 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 	stageStderr = setupStageWriter(stderr, "observability", "stderr")
 	if completedStages["observability"] {
 		fmt.Fprintln(stageStdout, "Step 5/5: deploy observability stack already complete; skipping.")
-		return nil
+	} else {
+		fmt.Fprintln(stageStdout, "Step 5/5: deploy observability stack.")
+		observabilityConfig := observabilityConfig{
+			Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
+			BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
+			AdminPassword: config.BeszelAdminPassword, PangolinPassword: config.PangolinAdminPassword, SystemToken: config.BeszelSystemToken,
+			HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
+			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
+			RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256, GitHubToken: config.GitHubToken,
+		}
+		observabilityClient, err := newObservabilityRemoteClient(ctx, observabilityConfig, stageStdout, stageStderr)
+		if err != nil {
+			return err
+		}
+		if err := runObservabilityStepsWithReporter(ctx, observabilityClient, observabilityConfig, runID, reporter, stageStdout); err != nil {
+			_ = observabilityClient.Close()
+			return fmt.Errorf("observability deployment failed: %w", err)
+		}
+		if err := observabilityClient.Close(); err != nil {
+			return err
+		}
 	}
-	fmt.Fprintln(stageStdout, "Step 5/5: deploy observability stack.")
-	observabilityConfig := observabilityConfig{
-		Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
-		BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
-		AdminPassword: config.BeszelAdminPassword, PangolinPassword: config.PangolinAdminPassword, SystemToken: config.BeszelSystemToken,
-		HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
-		RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
-		RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256, GitHubToken: config.GitHubToken,
-		Stacks: config.Stacks,
+	for _, stack := range config.Stacks {
+		if completedStages["stack:"+stack.Name] {
+			fmt.Fprintf(setupStageWriter(stdout, "stack:"+stack.Name, "stdout"), "Standalone %s stack already complete; skipping.\n", stack.Name)
+			continue
+		}
+		if err := runConfiguredStackStage(ctx, profile, config, runID, stack, reporter, stdout, stderr); err != nil {
+			return err
+		}
 	}
-	observabilityClient, err := newObservabilityRemoteClient(ctx, observabilityConfig, stageStdout, stageStderr)
-	if err != nil {
-		return err
-	}
-	if err := runObservabilityStepsWithReporter(ctx, observabilityClient, observabilityConfig, runID, reporter, stageStdout); err != nil {
-		_ = observabilityClient.Close()
-		return fmt.Errorf("observability deployment failed: %w", err)
-	}
-	return observabilityClient.Close()
+	return nil
 }
 
 func runSetupStage(ctx context.Context, profile Profile, config setupConfig, runID string, stage string, reporter TaskReporter, stdout, stderr io.Writer) error {
 	stageStdout := setupStageWriter(stdout, stage, "stdout")
 	stageStderr := setupStageWriter(stderr, stage, "stderr")
 	switch stage {
+	case "stacks":
+		syncConfig := observabilityConfig{
+			Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
+			BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
+			PangolinPassword: config.PangolinAdminPassword,
+			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
+			RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256,
+			GitHubToken: config.GitHubToken, Stacks: config.Stacks,
+		}
+		fmt.Fprintln(stageStdout, "One-time action: synchronize committed stack configuration.")
+		client, err := newObservabilityRemoteClient(ctx, syncConfig, stageStdout, stageStderr)
+		if err != nil {
+			return err
+		}
+		tasks := stackRepositoryReconcileTasks(syncConfig, firstNonEmpty(config.AdminUser, "root"))
+		if err := runTasksWithReporter(ctx, client, config.AdminUser, runID, stage, tasks, stageStdout, reporter); err != nil {
+			_ = client.Close()
+			return fmt.Errorf("stack repository synchronization failed: %w", err)
+		}
+		return client.Close()
+	case "platform":
+		fmt.Fprintln(stageStdout, "One-time action: configure Network, Proxy, and Observability.")
+		if err := runSetupStage(ctx, profile, config, runID, "network", reporter, stdout, stderr); err != nil {
+			return err
+		}
+		if err := runSetupStage(ctx, profile, config, runID, "proxy", reporter, stdout, stderr); err != nil {
+			return err
+		}
+		platformConfig := config
+		platformConfig.Stacks = nil
+		return runSetupStage(ctx, profile, platformConfig, runID, "observability", reporter, stdout, stderr)
 	case "bootstrap":
 		adminPublicKey, err := os.ReadFile(config.AdminPublicKeyPath)
 		if err != nil {
@@ -2474,8 +3178,39 @@ func runSetupStage(ctx context.Context, profile Profile, config setupConfig, run
 		}
 		return observabilityClient.Close()
 	default:
+		if strings.HasPrefix(stage, "stack:") {
+			name := strings.TrimPrefix(stage, "stack:")
+			for _, stack := range config.Stacks {
+				if stack.Name == name {
+					return runConfiguredStackStage(ctx, profile, config, runID, stack, reporter, stdout, stderr)
+				}
+			}
+			return fmt.Errorf("stack %q is not present in the committed configuration", name)
+		}
 		return fmt.Errorf("unknown setup stage: %s", stage)
 	}
+}
+
+func runConfiguredStackStage(ctx context.Context, profile Profile, config setupConfig, runID string, stack configuredStack, reporter TaskReporter, stdout, stderr io.Writer) error {
+	stage := "stack:" + stack.Name
+	stageStdout := setupStageWriter(stdout, stage, "stdout")
+	stageStderr := setupStageWriter(stderr, stage, "stderr")
+	observabilityConfig := observabilityConfig{
+		Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
+		BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
+		PangolinPassword: config.PangolinAdminPassword, RepositoryCommit: config.ConfigRepositoryCommit,
+	}
+	fmt.Fprintf(stageStdout, "One-time action: deploy standalone %s stack.\n", stack.Name)
+	client, err := newObservabilityRemoteClient(ctx, observabilityConfig, stageStdout, stageStderr)
+	if err != nil {
+		return err
+	}
+	tasks := configuredStackTasks(observabilityConfig, stack, firstNonEmpty(config.AdminUser, "root"))
+	if err := runTasksWithReporter(ctx, client, config.AdminUser, runID, stage, tasks, stageStdout, reporter); err != nil {
+		_ = client.Close()
+		return fmt.Errorf("%s stack deployment failed: %w", stack.Name, err)
+	}
+	return client.Close()
 }
 
 func printStageCompletionGuidance(stdout io.Writer, config setupConfig, stage string) {
@@ -2488,6 +3223,16 @@ func printStageCompletionGuidance(stdout io.Writer, config setupConfig, stage st
 		fmt.Fprintf(stdout, "Retrieve Pangolin login with: aegisnode pangolin-credentials --profile %s\n", config.ProfileID)
 	case "observability":
 		fmt.Fprintf(stdout, "\nBeszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\n", config.BaseDomain, config.BaseDomain)
+	case "platform":
+		fmt.Fprintf(stdout, "\nProxy URL: https://pangolin.%s\n", config.BaseDomain)
+		fmt.Fprintf(stdout, "Beszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\n", config.BaseDomain, config.BaseDomain)
+		fmt.Fprintln(stdout, requiredDNSGuidance(config.BaseDomain, config.Host))
+	case "stacks":
+		fmt.Fprintf(stdout, "\nStack repository synchronized at %s.\n", config.ConfigRepositoryCommit)
+	default:
+		if strings.HasPrefix(stage, "stack:") {
+			fmt.Fprintf(stdout, "\nStandalone stack %s deployed from committed configuration.\n", strings.TrimPrefix(stage, "stack:"))
+		}
 	}
 }
 
@@ -2629,8 +3374,47 @@ type profileRunModel struct {
 func newProfileRunModel(profile Profile, config setupConfig, runID string, completedStages map[string]bool, stageFilter string, messages <-chan tea.Msg, cancel context.CancelFunc) profileRunModel {
 	stageTotals := setupRunStageTaskTotals(config)
 	stages := []profileRunStageView{}
-	for _, stage := range setupStageOrder {
-		if stageFilter != "" && stage != stageFilter {
+	runStages := append([]string(nil), setupStageOrder...)
+	if stageFilter == "platform" {
+		runStages = []string{"network", "proxy", "observability"}
+	} else if stageFilter == "stacks" {
+		runStages = []string{"stacks"}
+		syncConfig := observabilityConfig{
+			BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
+			PangolinPassword: config.PangolinAdminPassword,
+			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
+			RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256,
+			GitHubToken: config.GitHubToken, Stacks: config.Stacks,
+		}
+		stageTotals["stacks"] = len(stackRepositoryReconcileTasks(syncConfig, firstNonEmpty(config.AdminUser, "root")))
+	} else if strings.HasPrefix(stageFilter, "stack:") {
+		runStages = []string{stageFilter}
+		name := strings.TrimPrefix(stageFilter, "stack:")
+		for _, stack := range config.Stacks {
+			if stack.Name == name {
+				stageTotals[stageFilter] = len(configuredStackTasks(observabilityConfig{
+					RepositoryCommit: config.ConfigRepositoryCommit,
+					BaseDomain:       config.BaseDomain,
+					AdminEmail:       config.PangolinAdminEmail,
+					PangolinPassword: config.PangolinAdminPassword,
+				}, stack, firstNonEmpty(config.AdminUser, "root")))
+				break
+			}
+		}
+	} else if stageFilter == "" {
+		for _, stack := range config.Stacks {
+			stage := "stack:" + stack.Name
+			runStages = append(runStages, stage)
+			stageTotals[stage] = len(configuredStackTasks(observabilityConfig{
+				RepositoryCommit: config.ConfigRepositoryCommit,
+				BaseDomain:       config.BaseDomain,
+				AdminEmail:       config.PangolinAdminEmail,
+				PangolinPassword: config.PangolinAdminPassword,
+			}, stack, firstNonEmpty(config.AdminUser, "root")))
+		}
+	}
+	for _, stage := range runStages {
+		if stageFilter != "" && stageFilter != "platform" && stage != stageFilter {
 			continue
 		}
 		stages = append(stages, profileRunStageView{Key: stage, Label: profileRunStageLabel(stage), Status: stageStatusPending, Total: stageTotals[stage]})
@@ -2710,7 +3494,7 @@ func setupRunStageTaskTotals(config setupConfig) map[string]int {
 			HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
 			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryOrigin: config.ConfigRepositoryOrigin,
 			RepositoryCompose: config.ConfigRepositoryCompose, RepositorySHA256: config.ConfigRepositorySHA256,
-			GitHubToken: config.GitHubToken, Stacks: config.Stacks,
+			GitHubToken: config.GitHubToken,
 		})),
 	}
 }
@@ -2818,6 +3602,9 @@ func startProfileStageRunCommand(ctx context.Context, profile Profile, config se
 					err = profileReporter.err
 				}
 			} else {
+				if stage == "stacks" {
+					profileReporter.state.StackRepositoryCommit = config.ConfigRepositoryCommit
+				}
 				profileReporter.finishRun(runStatusComplete)
 				if profileReporter.err != nil {
 					err = profileReporter.err
@@ -2984,7 +3771,14 @@ func profileRunStageLabel(stage string) string {
 		return "Proxy"
 	case "observability":
 		return "Observability & stacks"
+	case "platform":
+		return "Platform"
+	case "stacks":
+		return "Sync stacks"
 	default:
+		if strings.HasPrefix(stage, "stack:") {
+			return "Stack " + strings.TrimPrefix(stage, "stack:")
+		}
 		return "Run"
 	}
 }

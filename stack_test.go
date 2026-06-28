@@ -207,6 +207,174 @@ func TestConfiguredStacksRejectReservedAndDuplicateSubdomains(t *testing.T) {
 	}
 }
 
+func TestEditableStackLifecycle(t *testing.T) {
+	repository := t.TempDir()
+	options := stackAddOptions{
+		Name: "site", Service: "web", Port: 80, Subdomain: "site",
+		DisplayName: "Site", HealthPath: "/health", SSO: true,
+	}
+	if err := writeEditableStack(repository, "", options, []byte(testApplicationCompose)); err != nil {
+		t.Fatal(err)
+	}
+	extraFile := filepath.Join(repository, "stacks", "site", "app.env.example")
+	if err := os.WriteFile(extraFile, []byte("KEY=value\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	stacks, err := loadEditableStacks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stacks) != 1 || stacks[0].Name != "site" || stacks[0].Metadata.PublicResources[0].Subdomain != "site" {
+		t.Fatalf("unexpected added stack: %+v", stacks)
+	}
+
+	options.Name = "renamed-site"
+	options.Subdomain = "app"
+	options.DisplayName = "Renamed Site"
+	options.SSO = false
+	if err := writeEditableStack(repository, "site", options, []byte(testApplicationCompose)); err != nil {
+		t.Fatal(err)
+	}
+	stacks, err = loadEditableStacks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource := stacks[0].Metadata.PublicResources[0]
+	if stacks[0].Name != "renamed-site" || resource.Subdomain != "app" || resource.Name != "Renamed Site" || resource.SSO {
+		t.Fatalf("unexpected edited stack: %+v", stacks[0])
+	}
+	if _, err := os.Stat(filepath.Join(repository, "stacks", "renamed-site", "app.env.example")); err != nil {
+		t.Fatalf("rename did not preserve stack-owned files: %v", err)
+	}
+
+	if err := removeEditableStack(repository, "renamed-site"); err != nil {
+		t.Fatal(err)
+	}
+	stacks, err = loadEditableStacks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stacks) != 0 {
+		t.Fatalf("removed stack is still listed: %+v", stacks)
+	}
+}
+
+func TestStackRepositoryDiffStageAndCommit(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init")
+	runGitCommand(t, repository, "config", "user.name", "Test")
+	runGitCommand(t, repository, "config", "user.email", "test@example.com")
+	options := stackAddOptions{
+		Name: "site", Service: "web", Port: 80, Subdomain: "site",
+		DisplayName: "Site", HealthPath: "/", SSO: true,
+	}
+	if err := writeEditableStack(repository, "", options, []byte(testApplicationCompose)); err != nil {
+		t.Fatal(err)
+	}
+
+	diff, err := stackRepositoryDiff(context.Background(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"Untracked: stacks/site/compose.yaml", "services:", "aegisnode.yaml"} {
+		if !strings.Contains(diff, expected) {
+			t.Fatalf("untracked diff missing %q:\n%s", expected, diff)
+		}
+	}
+	if err := stageStackChanges(context.Background(), repository); err != nil {
+		t.Fatal(err)
+	}
+	diff, err = stackRepositoryDiff(context.Background(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diff, "Staged changes") || !strings.Contains(diff, "new file mode") {
+		t.Fatalf("staged diff is incomplete:\n%s", diff)
+	}
+	if err := commitStackChanges(context.Background(), repository, "Add site stack"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := stackRepositoryStatus(context.Background(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != "clean" {
+		t.Fatalf("repository is not clean after commit: %s", status)
+	}
+	log, err := runGit(context.Background(), repository, nil, "log", "-1", "--pretty=%s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(log) != "Add site stack" {
+		t.Fatalf("unexpected commit: %q", log)
+	}
+}
+
+func TestStackRepositorySyncRemovesDeletedDeployments(t *testing.T) {
+	task := removedStackCleanupTask(observabilityConfig{
+		AdminEmail: "admin@example.com", PangolinPassword: "password",
+		Stacks: []configuredStack{{Name: "kept"}},
+	})
+	for _, expected := range []string{
+		".stack-*.deployment",
+		"/opt/aegisnode/generated/*.pangolin.yaml",
+		`desired=' kept '`,
+		`com.docker.compose.project="$project"`,
+		"docker rm -f",
+		`rm -f -- /opt/aegisnode/generated/"$name".pangolin.yaml`,
+		`-X DELETE "$api/resource/$resource_id"`,
+		"docker start aegis-newt",
+	} {
+		if !strings.Contains(task.Apply, expected) {
+			t.Fatalf("deleted-stack cleanup missing %q:\n%s", expected, task.Apply)
+		}
+	}
+	command := exec.Command("sh", "-n")
+	command.Stdin = strings.NewReader(task.Apply)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("deleted-stack cleanup is not valid shell: %v\n%s\n%s", err, output, task.Apply)
+	}
+}
+
+func TestRunStackRepositorySyncIncludesCleanupAndCurrentStacks(t *testing.T) {
+	services, err := inspectComposeServices([]byte(testApplicationCompose))
+	if err != nil {
+		t.Fatal(err)
+	}
+	override, err := generateStackPangolinOverride("site", stackMetadata{
+		Version: 1,
+		PublicResources: []stackPublicResource{{
+			Service: "web", Name: "Site", Subdomain: "site", Port: 80, Protocol: "http",
+		}},
+	}, services, Profile{BaseDomain: "example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stack := configuredStack{
+		Name: "site", Compose: testApplicationCompose, Metadata: "version: 1\n",
+		ComposeSHA256: "abc", Override: override,
+		Resources: []stackPublicResource{{Service: "web", Subdomain: "site", Port: 80}},
+	}
+	tasks := stackRepositoryReconcileTasks(observabilityConfig{
+		BaseDomain: "example.com", AdminEmail: "admin@example.com",
+		PangolinPassword: "password", RepositoryCommit: "commit", Stacks: []configuredStack{stack},
+	}, "aegisadmin")
+	if len(tasks) < 2 || tasks[0].Name != "Remove stacks deleted from committed configuration" {
+		t.Fatalf("sync does not begin with deleted-stack cleanup: %+v", tasks)
+	}
+	foundDeploy := false
+	for _, task := range tasks {
+		if task.Name == "Deploy committed site stack" {
+			foundDeploy = true
+		}
+	}
+	if !foundDeploy {
+		t.Fatalf("sync did not deploy the current stack: %+v", tasks)
+	}
+}
+
 func assertServiceSummary(t *testing.T, services []composeServiceSummary, name string, ports []int, publishes bool) {
 	t.Helper()
 	for _, service := range services {

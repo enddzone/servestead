@@ -183,6 +183,76 @@ sys.exit(0 if ok else 1)`),
 	return tasks
 }
 
+func stackRepositoryReconcileTasks(config observabilityConfig, group string) []Task {
+	tasks := []Task{}
+	if config.RepositoryOrigin != "" {
+		tasks = append(tasks, observabilityRepositoryTask(config, group))
+	}
+	tasks = append(tasks, removedStackCleanupTask(config))
+	for _, stack := range config.Stacks {
+		tasks = append(tasks, configuredStackTasks(config, stack, group)...)
+	}
+	return tasks
+}
+
+func removedStackCleanupTask(config observabilityConfig) Task {
+	names := make([]string, 0, len(config.Stacks))
+	for _, stack := range config.Stacks {
+		names = append(names, stack.Name)
+	}
+	sort.Strings(names)
+	desired := " " + strings.Join(names, " ") + " "
+	loginPayload := fmt.Sprintf(`{"email":%s,"password":%s}`,
+		jsonString(config.AdminEmail), jsonString(config.PangolinPassword))
+	selectResources := `import json,sys
+resources=json.load(sys.stdin)["data"]["resources"]
+names=sys.argv[1:]
+for resource in resources:
+ nice_id=resource.get("niceId","")
+ if any(nice_id.startswith("aegisnode-"+name+"-") for name in names):
+  print(resource["resourceId"])`
+	script := commandScript(
+		"desired="+shellQuote(desired),
+		"removed=''",
+		"for candidate in "+shellQuote(observabilityRepositoryDirectory)+".stack-*.deployment /opt/aegisnode/generated/*.pangolin.yaml; do",
+		"  [ -e \"$candidate\" ] || continue",
+		"  case \"$candidate\" in",
+		"    "+shellQuote(observabilityRepositoryDirectory)+".stack-*.deployment) name=\"${candidate#"+observabilityRepositoryDirectory+".stack-}\"; name=\"${name%.deployment}\" ;;",
+		"    /opt/aegisnode/generated/*.pangolin.yaml) name=\"${candidate#/opt/aegisnode/generated/}\"; name=\"${name%.pangolin.yaml}\" ;;",
+		"  esac",
+		"  case \"$name\" in ''|*[!a-z0-9-]*) continue ;; esac",
+		"  case \"$desired\" in *\" $name \"*) continue ;; esac",
+		"  case \" $removed \" in *\" $name \"*) continue ;; esac",
+		"  removed=\"$removed $name\"",
+		"done",
+		"[ -n \"$removed\" ] || exit 0",
+		`cookie_file="$(mktemp)"`,
+		`cleanup_removed_stacks() { rm -f "$cookie_file"; docker start aegis-newt >/dev/null 2>&1 || true; }`,
+		"trap cleanup_removed_stacks EXIT",
+		"docker stop aegis-newt >/dev/null 2>&1 || true",
+		"for name in $removed; do",
+		"  project=\"aegisnode-$name\"",
+		"  containers=\"$(docker ps -aq --filter label=com.docker.compose.project=\"$project\")\"",
+		"  [ -z \"$containers\" ] || docker rm -f $containers",
+		"  networks=\"$(docker network ls -q --filter label=com.docker.compose.project=\"$project\")\"",
+		"  [ -z \"$networks\" ] || docker network rm $networks",
+		"  rm -rf -- "+shellQuote(observabilityRepositoryDirectory)+"/stacks/\"$name\"",
+		"  rm -f -- /opt/aegisnode/generated/\"$name\".pangolin.yaml "+shellQuote(observabilityRepositoryDirectory)+".stack-\"$name\".deployment",
+		"done",
+		`api='http://127.0.0.1:3000/api/v1'`,
+		`curl -fsS -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data `+shellQuote(loginPayload)+` >/dev/null`,
+		`resources="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/resources?pageSize=100")"`,
+		`delete_ids="$(printf '%s' "$resources" | python3 -c `+shellQuote(selectResources)+` $removed)"`,
+		`for resource_id in $delete_ids; do`,
+		`  curl -fsS -b "$cookie_file" -X DELETE "$api/resource/$resource_id" -H 'X-CSRF-Token: x-csrf-protection' >/dev/null`,
+		`done`,
+		"docker start aegis-newt >/dev/null",
+		`rm -f "$cookie_file"`,
+		"trap - EXIT",
+	)
+	return Task{Name: "Remove stacks deleted from committed configuration", Apply: script}
+}
+
 func stackResourceVerifyCommand(config observabilityConfig, stack configuredStack) string {
 	specs := make([]string, 0, len(stack.Resources))
 	for _, resource := range stack.Resources {
