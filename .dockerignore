@@ -1,0 +1,7 @@
+.git
+.github
+.lavish
+bin
+dist
+coverage.out
+*.test

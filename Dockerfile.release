@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1.7
+
+ARG GO_VERSION=1.26.4
+
+FROM golang:${GO_VERSION}-bookworm AS build
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/servestead .
+
+FROM cgr.dev/chainguard/git:latest-glibc
+COPY --from=build /out/servestead /servestead
+
+USER 65532:65532
+ENTRYPOINT ["/servestead"]
