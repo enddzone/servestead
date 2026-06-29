@@ -1,6 +1,7 @@
 package main
 
 import (
+	"aegisnode/resources"
 	"bytes"
 	"context"
 	"errors"
@@ -847,29 +848,25 @@ func generateStackPangolinOverride(stackName string, metadata stackMetadata, ser
 	if err := validateStackMetadata(stackName, metadata, services); err != nil {
 		return "", err
 	}
-	var builder strings.Builder
-	builder.WriteString("services:\n")
 	resourcesByService := map[string][]stackPublicResource{}
-	serviceOrder := []string{}
 	for _, resource := range metadata.PublicResources {
-		if len(resourcesByService[resource.Service]) == 0 {
-			serviceOrder = append(serviceOrder, resource.Service)
-		}
 		resourcesByService[resource.Service] = append(resourcesByService[resource.Service], resource)
 	}
+	type stackOverrideService struct {
+		Labels     []string
+		Name       string
+		Public     bool
+		ResetPorts bool
+	}
+	overrideServices := make([]stackOverrideService, 0, len(services))
 	for _, serviceSummary := range services {
 		service := serviceSummary.Name
-		builder.WriteString("  " + service + ":\n")
 		resources := resourcesByService[service]
-		if len(resources) > 0 && servicePublishesPorts(services, service) {
-			builder.WriteString("    ports: !reset []\n")
+		overrideService := stackOverrideService{
+			Name:       service,
+			Public:     len(resources) > 0,
+			ResetPorts: len(resources) > 0 && servicePublishesPorts(services, service),
 		}
-		if len(resources) > 0 {
-			builder.WriteString("    networks:\n      - " + aegisPublicNetwork + "\n")
-		}
-		builder.WriteString("    labels:\n")
-		builder.WriteString("      - " + yamlDoubleQuote("dockhand.update=false") + "\n")
-		builder.WriteString("      - " + yamlDoubleQuote("dockhand.notify=false") + "\n")
 		for _, resource := range resources {
 			if resource.SSO && firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail) == "" {
 				return "", fmt.Errorf("resource %q enables SSO but the profile has no Pangolin administrator email", resource.ID)
@@ -896,15 +893,19 @@ func generateStackPangolinOverride(stackName string, metadata stackMetadata, ser
 					prefix+".targets[0].healthcheck.path="+resource.Healthcheck.Path,
 				)
 			}
-			for _, label := range labels {
-				builder.WriteString("      - " + yamlDoubleQuote(label) + "\n")
-			}
+			overrideService.Labels = append(overrideService.Labels, labels...)
 		}
+		overrideServices = append(overrideServices, overrideService)
 	}
-	if len(serviceOrder) > 0 {
-		builder.WriteString("networks:\n  " + aegisPublicNetwork + ":\n    external: true\n")
-	}
-	return builder.String(), nil
+	return mustRenderResourceTemplate(resources.StackPangolinOverride, struct {
+		AegisPublicNetwork string
+		HasPublicResources bool
+		Services           []stackOverrideService
+	}{
+		AegisPublicNetwork: aegisPublicNetwork,
+		HasPublicResources: len(metadata.PublicResources) > 0,
+		Services:           overrideServices,
+	}), nil
 }
 
 func servicePublishesPorts(services []composeServiceSummary, name string) bool {

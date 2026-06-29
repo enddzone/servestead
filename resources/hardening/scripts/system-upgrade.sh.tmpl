@@ -1,0 +1,6 @@
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+{{ aptGet "update" }}
+{{ aptGet "full-upgrade -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold" }}
+{{ aptGet "autoremove -y" }}
+if [ -f /var/run/reboot-required ]; then echo 'reboot required after package upgrades'; fi

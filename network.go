@@ -1,6 +1,7 @@
 package main
 
 import (
+	"aegisnode/resources"
 	"context"
 	"errors"
 	"flag"
@@ -116,45 +117,15 @@ func networkTasks(config networkConfig) []Task {
 }
 
 func removeConflictingDockerPackagesCommand() string {
-	return commandScript(
-		"for package in docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc; do",
-		"  "+aptGetCommand("remove -y \"$package\"")+" >/dev/null 2>&1 || true",
-		"done",
-	)
+	return commandScript(mustRenderResourceTemplate(resources.NetworkRemoveConflictingDockerScript, nil))
 }
 
 func dockerRepositoryCommand() string {
-	return commandScript(
-		". /etc/os-release",
-		`codename="${UBUNTU_CODENAME:-$VERSION_CODENAME}"`,
-		`test -n "$codename"`,
-		`architecture="$(dpkg --print-architecture)"`,
-		`cat > /etc/apt/sources.list.d/docker.sources <<EOF
-Types: deb
-URIs: https://download.docker.com/linux/ubuntu
-Suites: ${codename}
-Components: stable
-Architectures: ${architecture}
-Signed-By: /etc/apt/keyrings/docker.asc
-EOF`,
-	)
+	return commandScript(mustRenderResourceTemplate(resources.NetworkDockerRepositoryScript, nil))
 }
 
 func dockerDaemonConfig() string {
-	return strings.Join([]string{
-		"{",
-		`  "storage-driver": "overlay2",`,
-		`  "log-driver": "json-file",`,
-		`  "log-opts": {`,
-		`    "max-size": "50m",`,
-		`    "max-file": "3"`,
-		`  },`,
-		`  "iptables": true,`,
-		`  "ip-forward-no-drop": true,`,
-		`  "no-new-privileges": true`,
-		"}",
-		"",
-	}, "\n")
+	return mustReadResource(resources.NetworkDockerDaemonConfig)
 }
 
 func administrativeSudoAccessCommand(adminUser string) string {
@@ -182,27 +153,15 @@ func ufwMasqueradeCommand() string {
 func installUFWMasqueradeBlockCommand(marker string, subnets ...string) string {
 	startMarker := "# START " + marker
 	endMarker := "# END " + marker
-	commands := []string{
-		"test -f /etc/ufw/before.rules",
-		`tmp="$(mktemp)"`,
-		"awk -v start=" + shellQuote(startMarker) + " -v end=" + shellQuote(endMarker) + ` 'BEGIN { skip = 0 } $0 == start { skip = 1; next } $0 == end { skip = 0; next } !skip { print }' /etc/ufw/before.rules > "$tmp"`,
-		`cat > /etc/ufw/before.rules <<EOF`,
-		startMarker,
-		"*nat",
-		":POSTROUTING ACCEPT [0:0]",
-	}
-	for _, subnet := range subnets {
-		commands = append(commands, "-A POSTROUTING -s "+subnet+" -o ${egress_interface} -j MASQUERADE")
-	}
-	commands = append(commands,
-		"COMMIT",
-		endMarker,
-		"",
-		"EOF",
-		`cat "$tmp" >> /etc/ufw/before.rules`,
-		`rm -f "$tmp"`,
-	)
-	return strings.Join(commands, "\n")
+	return mustRenderResourceTemplate(resources.NetworkUFWMasqueradeScript, struct {
+		EndMarker   string
+		StartMarker string
+		Subnets     []string
+	}{
+		EndMarker:   endMarker,
+		StartMarker: startMarker,
+		Subnets:     subnets,
+	})
 }
 
 func sshPortForHost(host string) (string, error) {

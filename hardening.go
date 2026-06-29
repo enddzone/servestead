@@ -1,6 +1,7 @@
 package main
 
 import (
+	"aegisnode/resources"
 	"context"
 	"errors"
 	"flag"
@@ -68,7 +69,7 @@ func runHardeningStepsWithReporter(ctx context.Context, client remoteClient, con
 }
 
 func hardeningTasks() []Task {
-	sysctlContent := strings.Join(sysctlConfigLines(), "\n") + "\n"
+	sysctlContent := sysctlHardeningConfig()
 	return []Task{
 		{Name: "Validate supported Ubuntu release", Apply: supportedUbuntuCommand()},
 		{Name: "Validate sysctl keys", Apply: validateSysctlKeysCommand()},
@@ -81,7 +82,7 @@ func hardeningTasks() []Task {
 		{Name: "Validate and reload SSH", Apply: sshHardeningCommand()},
 		{Name: "Write sysctl hardening config", Apply: remoteWriteFileCommand("/etc/sysctl.d/99-vps-hardening.conf", sysctlContent, "root", "root", 0644)},
 		{Name: "Reload sysctl settings", Apply: commandScript("sysctl --system")},
-		{Name: "Enable unattended upgrades", Apply: remoteWriteFileCommand("/etc/apt/apt.conf.d/20auto-upgrades", "APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n", "root", "root", 0644)},
+		{Name: "Enable unattended upgrades", Apply: remoteWriteFileCommand("/etc/apt/apt.conf.d/20auto-upgrades", mustReadResource(resources.HardeningAutoUpgradesConfig), "root", "root", 0644)},
 		{Name: "Configure CrowdSec keyring", Apply: commandScript(
 			"install -d -m 0755 -o root -g root /etc/apt/keyrings",
 			"curl -fsSL https://packagecloud.io/crowdsec/crowdsec/gpgkey -o /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.key",
@@ -102,109 +103,69 @@ func hardeningTasks() []Task {
 }
 
 func configureSwapCommand() string {
-	return commandScript(
-		`mem_kib="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"`,
-		`test -n "$mem_kib"`,
-		`ram_gib="$(( (mem_kib + 1048575) / 1048576 ))"`,
-		`if [ "$ram_gib" -lt 2 ]; then swap_gib="$((ram_gib * 2))"; elif [ "$ram_gib" -le 8 ]; then swap_gib="$ram_gib"; else swap_gib=4; fi`,
-		`desired_bytes="$((swap_gib * 1073741824))"`,
-		`current_bytes=0`,
-		`if [ -f /swapfile ]; then current_bytes="$(stat -c %s /swapfile)"; fi`,
-		`if [ "$current_bytes" -ne "$desired_bytes" ]; then`,
-		`  available_bytes="$(df --output=avail -B1 / | tail -n 1 | tr -d ' ')"`,
-		`  additional_bytes="$((desired_bytes - current_bytes))"`,
-		`  if [ "$additional_bytes" -gt 0 ] && [ "$available_bytes" -lt "$additional_bytes" ]; then echo "insufficient disk space for ${swap_gib} GiB swap file" >&2; exit 1; fi`,
-		`  if swapon --show=NAME --noheadings --raw | grep -Fxq /swapfile; then swapoff /swapfile; fi`,
-		`  rm -f /swapfile`,
-		`  if ! fallocate -l "${swap_gib}G" /swapfile; then dd if=/dev/zero of=/swapfile bs=1M count="$((swap_gib * 1024))" status=progress; fi`,
-		`fi`,
-		`chmod 600 /swapfile`,
-		`if [ "$(blkid -p -s TYPE -o value /swapfile 2>/dev/null || true)" != "swap" ]; then mkswap /swapfile >/dev/null; fi`,
-		`if ! swapon --show=NAME --noheadings --raw | grep -Fxq /swapfile; then swapon /swapfile; fi`,
-		`if ! grep -Eq '^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]' /etc/fstab; then printf '%s\n' '/swapfile none swap sw 0 0' >> /etc/fstab; fi`,
-		`echo "configured ${swap_gib} GiB swap for ${ram_gib} GiB RAM"`,
-	)
+	return commandScript(mustReadResource(resources.HardeningConfigureSwapScript))
 }
 
 func systemUpgradeCommand() string {
-	return commandScript(
-		"export DEBIAN_FRONTEND=noninteractive",
-		"export NEEDRESTART_MODE=a",
-		aptGetCommand("update"),
-		aptGetCommand("full-upgrade -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"),
-		aptGetCommand("autoremove -y"),
-		"if [ -f /var/run/reboot-required ]; then echo 'reboot required after package upgrades'; fi",
-	)
+	return commandScript(mustRenderResourceTemplate(resources.HardeningSystemUpgradeScript, nil))
 }
 
 func sshHardeningCommand() string {
-	return commandScript(
-		"passwd -l root >/dev/null 2>&1 || true",
-		"install -d -m 0755 -o root -g root /run/sshd",
-		"/usr/sbin/sshd -t",
-		"systemctl reload-or-restart ssh || systemctl reload-or-restart sshd",
-	)
+	return commandScript(mustReadResource(resources.HardeningSSHReloadScript))
 }
 
 func sshdHardeningConfig() string {
-	return strings.Join([]string{
-		"# Managed by AegisNode.",
-		"PermitRootLogin no",
-		"PasswordAuthentication no",
-		"KbdInteractiveAuthentication no",
-		"PubkeyAuthentication yes",
-		"",
-	}, "\n")
+	return mustReadResource(resources.HardeningSSHConfig)
 }
 
 func supportedUbuntuCommand() string {
-	return commandScript(
-		". /etc/os-release",
-		`test "$ID" = "ubuntu"`,
-		`dpkg --compare-versions "$VERSION_ID" ge 22.04`,
-		`kernel_version="$(uname -r | cut -d- -f1)"`,
-		`dpkg --compare-versions "$kernel_version" ge 5.15`,
-	)
+	return commandScript(mustReadResource(resources.HardeningSupportedUbuntu))
 }
 
 func validateSysctlKeysCommand() string {
 	lines := []string{}
 	for _, setting := range sysctlSettings() {
-		lines = append(lines, "sysctl -n "+shellQuote(setting.name)+" >/dev/null")
+		lines = append(lines, "sysctl -n "+shellQuote(setting.Name)+" >/dev/null")
 	}
 	return commandScript(lines...)
 }
 
 type sysctlSetting struct {
-	name  string
-	value string
+	Name  string
+	Value string
 }
 
 func sysctlSettings() []sysctlSetting {
 	return []sysctlSetting{
-		{name: "net.ipv4.conf.all.rp_filter", value: "1"},
-		{name: "net.ipv4.conf.default.rp_filter", value: "1"},
-		{name: "net.ipv4.conf.all.accept_source_route", value: "0"},
-		{name: "net.ipv4.conf.default.accept_source_route", value: "0"},
-		{name: "net.ipv4.conf.all.accept_redirects", value: "0"},
-		{name: "net.ipv4.conf.default.accept_redirects", value: "0"},
-		{name: "net.ipv4.conf.all.secure_redirects", value: "0"},
-		{name: "net.ipv4.conf.default.secure_redirects", value: "0"},
-		{name: "net.ipv4.conf.all.send_redirects", value: "0"},
-		{name: "net.ipv4.conf.default.send_redirects", value: "0"},
-		{name: "net.ipv4.tcp_syncookies", value: "1"},
-		{name: "net.ipv4.tcp_synack_retries", value: "5"},
-		{name: "kernel.dmesg_restrict", value: "1"},
-		{name: "kernel.unprivileged_bpf_disabled", value: "1"},
-		{name: "vm.swappiness", value: "10"},
-		{name: "vm.vfs_cache_pressure", value: "50"},
+		{Name: "net.ipv4.conf.all.rp_filter", Value: "1"},
+		{Name: "net.ipv4.conf.default.rp_filter", Value: "1"},
+		{Name: "net.ipv4.conf.all.accept_source_route", Value: "0"},
+		{Name: "net.ipv4.conf.default.accept_source_route", Value: "0"},
+		{Name: "net.ipv4.conf.all.accept_redirects", Value: "0"},
+		{Name: "net.ipv4.conf.default.accept_redirects", Value: "0"},
+		{Name: "net.ipv4.conf.all.secure_redirects", Value: "0"},
+		{Name: "net.ipv4.conf.default.secure_redirects", Value: "0"},
+		{Name: "net.ipv4.conf.all.send_redirects", Value: "0"},
+		{Name: "net.ipv4.conf.default.send_redirects", Value: "0"},
+		{Name: "net.ipv4.tcp_syncookies", Value: "1"},
+		{Name: "net.ipv4.tcp_synack_retries", Value: "5"},
+		{Name: "kernel.dmesg_restrict", Value: "1"},
+		{Name: "kernel.unprivileged_bpf_disabled", Value: "1"},
+		{Name: "vm.swappiness", Value: "10"},
+		{Name: "vm.vfs_cache_pressure", Value: "50"},
 	}
 }
 
 func sysctlConfigLines() []string {
 	lines := []string{"# Managed by AegisNode."}
 	for _, setting := range sysctlSettings() {
-		lines = append(lines, setting.name+" = "+setting.value)
+		lines = append(lines, setting.Name+" = "+setting.Value)
 	}
 	return lines
+}
+
+func sysctlHardeningConfig() string {
+	return mustRenderResourceTemplate(resources.HardeningSysctlConfig, struct {
+		Settings []sysctlSetting
+	}{Settings: sysctlSettings()})
 }

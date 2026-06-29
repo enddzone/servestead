@@ -1,6 +1,7 @@
 package main
 
 import (
+	"aegisnode/resources"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -590,53 +591,24 @@ for spec in specs:
  if len(matches)!=1:
   ok=False
 sys.exit(0 if ok else 1)`
-	commands := []string{
-		`api='http://127.0.0.1:3000/api/v1'`,
-		`cookie_file="$(mktemp)"`,
-		`trap 'rm -f "$cookie_file"' EXIT`,
-	}
-	commands = append(commands, pangolinLoginCommand(loginPayload)...)
-	commands = append(commands,
-		`for attempt in $(seq 1 30); do`,
-		`  resources="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/resources?pageSize=100")"`,
-		`  if printf '%s' "$resources" | python3 -c `+shellQuote(verify)+` `+shellQuote(specification)+`; then exit 0; fi`,
-		`  sleep 2`,
-		`done`,
-		`echo `+shellQuote("Pangolin did not create the expected public resources for stack "+stack.Name)+` >&2`,
-		`exit 1`,
-	)
-	return commandScript(commands...)
+	return commandScript(mustRenderResourceTemplate(resources.ObservabilityStackResourceVerifyScript, struct {
+		FailureMessage        string
+		PangolinLoginCommands []string
+		Specification         string
+		VerifyResources       string
+	}{
+		FailureMessage:        "Pangolin did not create the expected public resources for stack " + stack.Name,
+		PangolinLoginCommands: pangolinLoginCommand(loginPayload),
+		Specification:         specification,
+		VerifyResources:       verify,
+	}))
 }
 
 func pangolinLoginCommand(loginPayload string) []string {
-	return []string{
-		`login_response="$(mktemp)"`,
-		`set +e`,
-		`login_status="$(curl -sS -o "$login_response" -w '%{http_code}' -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data ` + shellQuote(loginPayload) + `)"`,
-		`login_result=$?`,
-		`set -e`,
-		`if [ "$login_result" -ne 0 ]; then`,
-		`  echo 'Pangolin administrator login failed before receiving a response.' >&2`,
-		`  if [ -s "$login_response" ]; then cat "$login_response" >&2; echo >&2; fi`,
-		`  rm -f "$login_response"`,
-		`  exit "$login_result"`,
-		`fi`,
-		`case "$login_status" in`,
-		`  2??) rm -f "$login_response" ;;`,
-		`  401)`,
-		`    echo 'Pangolin rejected the saved administrator credentials. Run the same setup action once with PANGOLIN_ADMIN_PASSWORD set to the current Pangolin admin password, or enter it in Advanced setup.' >&2`,
-		`    if [ -s "$login_response" ]; then cat "$login_response" >&2; echo >&2; fi`,
-		`    rm -f "$login_response"`,
-		`    exit 1`,
-		`    ;;`,
-		`  *)`,
-		`    echo "Pangolin administrator login failed (HTTP $login_status)." >&2`,
-		`    if [ -s "$login_response" ]; then cat "$login_response" >&2; echo >&2; fi`,
-		`    rm -f "$login_response"`,
-		`    exit 1`,
-		`    ;;`,
-		`esac`,
-	}
+	script := mustRenderResourceTemplate(resources.ObservabilityPangolinLoginScript, struct {
+		LoginPayload string
+	}{LoginPayload: loginPayload})
+	return strings.Split(strings.TrimSuffix(script, "\n"), "\n")
 }
 
 func sha256Hex(value string) string {
@@ -645,11 +617,7 @@ func sha256Hex(value string) string {
 }
 
 func observabilityEnvironmentFile(config observabilityConfig) string {
-	return strings.Join([]string{
-		"BESZEL_ADMIN_PASSWORD=" + config.AdminPassword,
-		"BESZEL_SYSTEM_TOKEN=" + config.SystemToken,
-		"",
-	}, "\n")
+	return mustRenderResourceTemplate(resources.ObservabilityEnvironment, config)
 }
 
 func observabilityRepositoryTask(config observabilityConfig, group string) Task {
@@ -710,163 +678,58 @@ func observabilityRepositoryTask(config observabilityConfig, group string) Task 
 }
 
 func beszelConfigFile(config observabilityConfig) string {
-	return strings.Join([]string{
-		"systems:",
-		"  - name: local-vps",
-		"    host: beszel-agent",
-		"    port: 45876",
-		"    token: " + yamlSingleQuote(config.SystemToken),
-		"    users:",
-		"      - " + yamlSingleQuote(config.AdminEmail),
-		"",
-	}, "\n")
+	return mustRenderResourceTemplate(resources.ObservabilityBeszelConfig, config)
 }
 
 func observabilityComposeFile(config observabilityConfig) string {
-	labels := func(key, name, host string, port int, healthPath string) []string {
-		prefix := "pangolin.public-resources." + key
-		return []string{
-			"      - " + prefix + ".name=" + name,
-			"      - " + prefix + ".protocol=http",
-			"      - " + prefix + ".full-domain=" + host + "." + config.BaseDomain,
-			"      - " + prefix + ".auth.sso-enabled=true",
-			"      - " + prefix + ".auth.sso-users[0]=" + config.AdminEmail,
-			"      - " + prefix + ".targets[0].hostname=" + host,
-			fmt.Sprintf("      - %s.targets[0].port=%d", prefix, port),
-			"      - " + prefix + ".targets[0].method=http",
-			"      - " + prefix + ".targets[0].healthcheck.enabled=true",
-			"      - " + prefix + ".targets[0].healthcheck.hostname=" + host,
-			fmt.Sprintf("      - %s.targets[0].healthcheck.port=%d", prefix, port),
-			"      - " + prefix + ".targets[0].healthcheck.scheme=http",
-			"      - " + prefix + ".targets[0].healthcheck.path=" + healthPath,
-		}
+	return mustRenderResourceTemplate(resources.ObservabilityCompose, struct {
+		observabilityConfig
+		AegisPublicNetwork          string
+		BeszelAgentImage            string
+		BeszelImage                 string
+		BeszelLabels                []string
+		BeszelURL                   string
+		DockhandDataDirectory       string
+		DockhandImage               string
+		DockhandLabels              []string
+		DozzleImage                 string
+		DozzleLabels                []string
+		ObservabilityStackDirectory string
+		SocketProxyImage            string
+	}{
+		observabilityConfig:         config,
+		AegisPublicNetwork:          aegisPublicNetwork,
+		BeszelAgentImage:            beszelAgentImage,
+		BeszelImage:                 beszelImage,
+		BeszelLabels:                observabilityComposeLabels(config, "aegisnode-beszel", "Beszel", "beszel", 8090, "/"),
+		BeszelURL:                   "https://beszel." + config.BaseDomain,
+		DockhandDataDirectory:       observabilityStackDirectory + "/dockhand_data",
+		DockhandImage:               dockhandImage,
+		DockhandLabels:              observabilityComposeLabels(config, "aegisnode-dockhand", "Dockhand", "dockhand", 3000, "/api/auth/session"),
+		DozzleImage:                 dozzleImage,
+		DozzleLabels:                observabilityComposeLabels(config, "aegisnode-dozzle", "Dozzle", "dozzle", 8080, "/healthcheck"),
+		ObservabilityStackDirectory: observabilityStackDirectory,
+		SocketProxyImage:            socketProxyImage,
+	})
+}
+
+func observabilityComposeLabels(config observabilityConfig, key, name, host string, port int, healthPath string) []string {
+	prefix := "pangolin.public-resources." + key
+	return []string{
+		prefix + ".name=" + name,
+		prefix + ".protocol=http",
+		prefix + ".full-domain=" + host + "." + config.BaseDomain,
+		prefix + ".auth.sso-enabled=true",
+		prefix + ".auth.sso-users[0]=" + config.AdminEmail,
+		prefix + ".targets[0].hostname=" + host,
+		fmt.Sprintf("%s.targets[0].port=%d", prefix, port),
+		prefix + ".targets[0].method=http",
+		prefix + ".targets[0].healthcheck.enabled=true",
+		prefix + ".targets[0].healthcheck.hostname=" + host,
+		fmt.Sprintf("%s.targets[0].healthcheck.port=%d", prefix, port),
+		prefix + ".targets[0].healthcheck.scheme=http",
+		prefix + ".targets[0].healthcheck.path=" + healthPath,
 	}
-	lines := []string{
-		"services:",
-		"  beszel:",
-		"    image: " + beszelImage,
-		"    container_name: beszel",
-		"    restart: unless-stopped",
-		"    security_opt:",
-		"      - no-new-privileges:true",
-		"    environment:",
-		"      USER_EMAIL: " + yamlDoubleQuote(config.AdminEmail),
-		"      USER_PASSWORD: ${BESZEL_ADMIN_PASSWORD}",
-		"      TRUSTED_AUTH_HEADER: \"Remote-Email\"",
-		"      APP_URL: " + yamlDoubleQuote("https://beszel."+config.BaseDomain),
-		"      DISABLE_PASSWORD_AUTH: \"true\"",
-		"    expose:",
-		"      - \"8090\"",
-		"    volumes:",
-		"      - " + observabilityStackDirectory + "/beszel_data:/beszel_data",
-		"    networks:",
-		"      - " + aegisPublicNetwork,
-		"    labels:",
-	}
-	lines = append(lines, labels("aegisnode-beszel", "Beszel", "beszel", 8090, "/")...)
-	lines = append(lines,
-		"",
-		"  beszel-agent:",
-		"    image: "+beszelAgentImage,
-		"    container_name: beszel-agent",
-		"    restart: unless-stopped",
-		"    depends_on:",
-		"      - beszel",
-		"    environment:",
-		"      HUB_URL: \"http://beszel:8090\"",
-		"      TOKEN: ${BESZEL_SYSTEM_TOKEN}",
-		"      KEY_FILE: \"/keys/id_ed25519.pub\"",
-		"      DOCKER_HOST: \"tcp://socket-proxy:2375\"",
-		"    volumes:",
-		"      - "+observabilityStackDirectory+"/agent_keys:/keys:ro",
-		"      - /proc:/host/proc:ro",
-		"      - /sys:/host/sys:ro",
-		"      - /etc/os-release:/etc/os-release:ro",
-		"    networks:",
-		"      - "+aegisPublicNetwork,
-		"",
-		"  dozzle:",
-		"    image: "+dozzleImage,
-		"    container_name: dozzle",
-		"    restart: unless-stopped",
-		"    security_opt:",
-		"      - no-new-privileges:true",
-		"    environment:",
-		"      DOCKER_HOST: \"tcp://socket-proxy:2375\"",
-		"      DOZZLE_AUTH_PROVIDER: \"forward-proxy\"",
-		"      DOZZLE_ENABLE_ACTIONS: \"false\"",
-		"      DOZZLE_ENABLE_SHELL: \"false\"",
-		"    expose:",
-		"      - \"8080\"",
-		"    networks:",
-		"      - "+aegisPublicNetwork,
-		"    labels:",
-	)
-	lines = append(lines, labels("aegisnode-dozzle", "Dozzle", "dozzle", 8080, "/healthcheck")...)
-	lines = append(lines,
-		"",
-		"  dockhand:",
-		"    image: "+dockhandImage,
-		"    container_name: dockhand",
-		"    restart: unless-stopped",
-		"    depends_on:",
-		"      - dockhand-socket-proxy",
-		"    security_opt:",
-		"      - no-new-privileges:true",
-		"    environment:",
-		"      DOCKER_HOST: \"tcp://dockhand-socket-proxy:2375\"",
-		"      HOST_DATA_DIR: "+yamlDoubleQuote(observabilityStackDirectory+"/dockhand_data"),
-		"      COOKIE_SECURE: \"true\"",
-		"    expose:",
-		"      - \"3000\"",
-		"    ports:",
-		"      - \"127.0.0.1:3003:3000\"",
-		"    volumes:",
-		"      - "+observabilityStackDirectory+"/dockhand_data:/app/data",
-		"    networks:",
-		"      - "+aegisPublicNetwork,
-		"      - aegis-dockhand",
-		"    labels:",
-		"      - dockhand.update=false",
-		"      - dockhand.notify=false",
-	)
-	lines = append(lines, labels("aegisnode-dockhand", "Dockhand", "dockhand", 3000, "/api/auth/session")...)
-	lines = append(lines,
-		"",
-		"  dockhand-socket-proxy:",
-		"    image: "+socketProxyImage,
-		"    container_name: aegis-dockhand-socket-proxy",
-		"    restart: unless-stopped",
-		"    security_opt:",
-		"      - no-new-privileges:true",
-		"    environment:",
-		"      CONTAINERS: \"1\"",
-		"      EVENTS: \"1\"",
-		"      EXEC: \"1\"",
-		"      IMAGES: \"1\"",
-		"      INFO: \"1\"",
-		"      NETWORKS: \"1\"",
-		"      PING: \"1\"",
-		"      VERSION: \"1\"",
-		"      VOLUMES: \"1\"",
-		"      POST: \"1\"",
-		"    volumes:",
-		"      - /var/run/docker.sock:/var/run/docker.sock:ro",
-		"    networks:",
-		"      - aegis-dockhand",
-		"    labels:",
-		"      - dockhand.hidden=true",
-		"      - dockhand.update=false",
-		"      - dockhand.notify=false",
-		"",
-		"networks:",
-		"  "+aegisPublicNetwork+":",
-		"    external: true",
-		"  aegis-dockhand:",
-		"    internal: true",
-		"",
-	)
-	return strings.Join(lines, "\n")
 }
 
 func observabilityResourceReconcileCommand(config observabilityConfig, composeCommand string) string {
@@ -883,29 +746,17 @@ for spec in specs:
  for resource in matches:
   if resource.get("resourceId") != keep:
    print(resource["resourceId"])`
-	commands := []string{
-		"docker stop aegis-newt >/dev/null",
-		composeCommand + " down --remove-orphans >/dev/null 2>&1 || true",
-		"sleep 2",
-		`api='http://127.0.0.1:3000/api/v1'`,
-		`cookie_file="$(mktemp)"`,
-		`reconciliation_complete=0`,
-		`cleanup_reconciliation() {`,
-		`  rm -f "$cookie_file"`,
-		`  if [ "$reconciliation_complete" != "1" ]; then docker start aegis-newt >/dev/null 2>&1 || true; fi`,
-		`}`,
-		`trap cleanup_reconciliation EXIT`,
-	}
-	commands = append(commands, pangolinLoginCommand(loginPayload)...)
-	commands = append(commands,
-		`resources="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/resources?pageSize=100")"`,
-		`delete_ids="$(printf '%s' "$resources" | python3 -c `+shellQuote(selectDeletes)+` `+shellQuote(specs)+`)"`,
-		`for resource_id in $delete_ids; do`,
-		`  curl -fsS -b "$cookie_file" -X DELETE "$api/resource/$resource_id" -H 'X-CSRF-Token: x-csrf-protection' >/dev/null`,
-		`done`,
-		`reconciliation_complete=1`,
-	)
-	return commandScript(commands...)
+	return commandScript(mustRenderResourceTemplate(resources.ObservabilityResourceReconcileScript, struct {
+		ComposeCommand        string
+		PangolinLoginCommands []string
+		SelectDeletes         string
+		Specs                 string
+	}{
+		ComposeCommand:        composeCommand,
+		PangolinLoginCommands: pangolinLoginCommand(loginPayload),
+		SelectDeletes:         selectDeletes,
+		Specs:                 specs,
+	}))
 }
 
 func observabilityResourceVerifyCommand(config observabilityConfig) string {
@@ -928,29 +779,17 @@ sys.exit(0 if ok else 1)`
 targets=json.load(sys.stdin)["data"]["targets"]
 ok=len(targets)==1 and targets[0].get("hcEnabled") is True
 sys.exit(0 if ok else 1)`
-	commands := []string{
-		`api='http://127.0.0.1:3000/api/v1'`,
-		`cookie_file="$(mktemp)"`,
-		`trap 'rm -f "$cookie_file"' EXIT`,
-	}
-	commands = append(commands, pangolinLoginCommand(loginPayload)...)
-	commands = append(commands,
-		`for attempt in $(seq 1 30); do`,
-		`  resources="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/resources?pageSize=100")"`,
-		`  if resource_ids="$(printf '%s' "$resources" | python3 -c `+shellQuote(verifyResources)+` `+shellQuote(specs)+`)"; then`,
-		`    healthchecks_enabled=1`,
-		`    for resource_id in $resource_ids; do`,
-		`      targets="$(curl -fsS -b "$cookie_file" "$api/resource/$resource_id/targets")"`,
-		`      if ! printf '%s' "$targets" | python3 -c `+shellQuote(verifyTargets)+`; then healthchecks_enabled=0; fi`,
-		`    done`,
-		`    if [ "$healthchecks_enabled" = "1" ]; then exit 0; fi`,
-		`  fi`,
-		`  sleep 2`,
-		`done`,
-		`echo 'Pangolin did not converge to exactly one managed Beszel, Dozzle, and Dockhand resource with health checks enabled.' >&2`,
-		`exit 1`,
-	)
-	return commandScript(commands...)
+	return commandScript(mustRenderResourceTemplate(resources.ObservabilityResourceVerifyScript, struct {
+		PangolinLoginCommands []string
+		Specs                 string
+		VerifyResources       string
+		VerifyTargets         string
+	}{
+		PangolinLoginCommands: pangolinLoginCommand(loginPayload),
+		Specs:                 specs,
+		VerifyResources:       verifyResources,
+		VerifyTargets:         verifyTargets,
+	}))
 }
 
 func observabilityResourceSpecs(baseDomain string) string {

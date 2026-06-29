@@ -1,0 +1,12 @@
+api='http://127.0.0.1:3000/api/v1'
+cookie_file="$(mktemp)"
+trap 'rm -f "$cookie_file"' EXIT
+{{ range .PangolinLoginCommands }}{{ . }}
+{{ end -}}
+for attempt in $(seq 1 30); do
+  resources="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/resources?pageSize=100")"
+  if printf '%s' "$resources" | python3 -c {{ shellQuote .VerifyResources }} {{ shellQuote .Specification }}; then exit 0; fi
+  sleep 2
+done
+echo {{ shellQuote .FailureMessage }} >&2
+exit 1

@@ -1,0 +1,19 @@
+api='http://127.0.0.1:3000/api/v1'
+cookie_file="$(mktemp)"
+trap 'rm -f "$cookie_file"' EXIT
+{{ range .PangolinLoginCommands }}{{ . }}
+{{ end -}}
+for attempt in $(seq 1 30); do
+  resources="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/resources?pageSize=100")"
+  if resource_ids="$(printf '%s' "$resources" | python3 -c {{ shellQuote .VerifyResources }} {{ shellQuote .Specs }})"; then
+    healthchecks_enabled=1
+    for resource_id in $resource_ids; do
+      targets="$(curl -fsS -b "$cookie_file" "$api/resource/$resource_id/targets")"
+      if ! printf '%s' "$targets" | python3 -c {{ shellQuote .VerifyTargets }}; then healthchecks_enabled=0; fi
+    done
+    if [ "$healthchecks_enabled" = "1" ]; then exit 0; fi
+  fi
+  sleep 2
+done
+echo 'Pangolin did not converge to exactly one managed Beszel, Dozzle, and Dockhand resource with health checks enabled.' >&2
+exit 1

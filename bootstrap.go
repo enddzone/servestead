@@ -1,6 +1,7 @@
 package main
 
 import (
+	"aegisnode/resources"
 	"context"
 	"errors"
 	"flag"
@@ -109,12 +110,13 @@ func sudoersCommand(adminUser string) string {
 	path := "/etc/sudoers.d/" + adminUser
 	temporaryPath := path + ".aegisnode.tmp"
 	content := adminUser + " ALL=(ALL) NOPASSWD:ALL\n"
-	return strings.Join([]string{
-		"set -e",
-		"printf '%s' " + shellQuote(content) + " > " + shellQuote(temporaryPath),
-		"chown root:root " + shellQuote(temporaryPath),
-		"chmod 0440 " + shellQuote(temporaryPath),
-		"visudo -cf " + shellQuote(temporaryPath),
-		"mv " + shellQuote(temporaryPath) + " " + shellQuote(path),
-	}, "\n")
+	return mustRenderResourceTemplate(resources.BootstrapSudoersScript, struct {
+		Content       string
+		Path          string
+		TemporaryPath string
+	}{
+		Content:       content,
+		Path:          path,
+		TemporaryPath: temporaryPath,
+	})
 }

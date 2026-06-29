@@ -1,6 +1,7 @@
 package main
 
 import (
+	"aegisnode/resources"
 	"context"
 	"encoding/json"
 	"errors"
@@ -206,108 +207,27 @@ func proxyTasks(config proxyConfig) []Task {
 }
 
 func pangolinComposeFile(config proxyConfig) string {
-	return strings.Join([]string{
-		"services:",
-		"  pangolin:",
-		"    image: " + pangolinImage,
-		"    container_name: pangolin",
-		"    restart: unless-stopped",
-		"    security_opt:",
-		"      - no-new-privileges:true",
-		"    environment:",
-		"      PANGOLIN_SETUP_TOKEN: " + yamlDoubleQuote(config.SetupToken),
-		"    volumes:",
-		"      - ./config:/app/config",
-		"    ports:",
-		"      - \"127.0.0.1:3000:3000\"",
-		"    healthcheck:",
-		"      test: [\"CMD\", \"curl\", \"-f\", \"http://localhost:3001/api/v1/\"]",
-		"      interval: \"10s\"",
-		"      timeout: \"10s\"",
-		"      retries: 15",
-		"",
-		"  gerbil:",
-		"    image: " + gerbilImage,
-		"    container_name: gerbil",
-		"    restart: unless-stopped",
-		"    depends_on:",
-		"      pangolin:",
-		"        condition: service_healthy",
-		"    command:",
-		"      - --reachableAt=http://gerbil:3004",
-		"      - --generateAndSaveKeyTo=/var/config/key",
-		"      - --remoteConfig=http://pangolin:3001/api/v1/",
-		"    volumes:",
-		"      - ./config:/var/config",
-		"    cap_add:",
-		"      - NET_ADMIN",
-		"      - SYS_MODULE",
-		"    ports:",
-		"      - \"51820:51820/udp\"",
-		"      - \"21820:21820/udp\"",
-		"      - \"443:443\"",
-		"      - \"80:80\"",
-		"",
-		"  traefik:",
-		"    image: " + traefikImage,
-		"    container_name: traefik",
-		"    restart: unless-stopped",
-		"    network_mode: service:gerbil",
-		"    depends_on:",
-		"      pangolin:",
-		"        condition: service_healthy",
-		"    command:",
-		"      - --configFile=/etc/traefik/traefik_config.yml",
-		"    volumes:",
-		"      - ./config/traefik:/etc/traefik:ro",
-		"      - ./config/letsencrypt:/letsencrypt",
-		"      - ./config/traefik/logs:/var/log/traefik",
-		"",
-		"  socket-proxy:",
-		"    image: " + socketProxyImage,
-		"    container_name: aegis-socket-proxy",
-		"    restart: unless-stopped",
-		"    security_opt:",
-		"      - no-new-privileges:true",
-		"    environment:",
-		"      CONTAINERS: \"1\"",
-		"      EVENTS: \"1\"",
-		"      INFO: \"1\"",
-		"      NETWORKS: \"1\"",
-		"      PING: \"1\"",
-		"      VERSION: \"1\"",
-		"      POST: \"0\"",
-		"    volumes:",
-		"      - /var/run/docker.sock:/var/run/docker.sock:ro",
-		"    networks:",
-		"      - " + aegisPublicNetwork,
-		"",
-		"  newt:",
-		"    image: " + newtImage,
-		"    container_name: aegis-newt",
-		"    restart: unless-stopped",
-		"    depends_on:",
-		"      - socket-proxy",
-		"    environment:",
-		"      PANGOLIN_ENDPOINT: " + yamlDoubleQuote("https://pangolin."+config.BaseDomain),
-		"      NEWT_ID: " + yamlDoubleQuote(config.NewtID),
-		"      NEWT_SECRET: " + yamlDoubleQuote(config.NewtSecret),
-		"      DOCKER_SOCKET: \"tcp://socket-proxy:2375\"",
-		"      DOCKER_ENFORCE_NETWORK_VALIDATION: \"true\"",
-		"    networks:",
-		"      - " + aegisPublicNetwork,
-		"",
-		"networks:",
-		"  default:",
-		"    driver: bridge",
-		"    name: pangolin",
-		"    ipam:",
-		"      config:",
-		"        - subnet: " + proxyDockerSubnet,
-		"  " + aegisPublicNetwork + ":",
-		"    external: true",
-		"",
-	}, "\n")
+	return mustRenderResourceTemplate(resources.ProxyCompose, struct {
+		proxyConfig
+		AegisPublicNetwork string
+		GerbilImage        string
+		NewtImage          string
+		PangolinEndpoint   string
+		PangolinImage      string
+		ProxyDockerSubnet  string
+		SocketProxyImage   string
+		TraefikImage       string
+	}{
+		proxyConfig:        config,
+		AegisPublicNetwork: aegisPublicNetwork,
+		GerbilImage:        gerbilImage,
+		NewtImage:          newtImage,
+		PangolinEndpoint:   "https://pangolin." + config.BaseDomain,
+		PangolinImage:      pangolinImage,
+		ProxyDockerSubnet:  proxyDockerSubnet,
+		SocketProxyImage:   socketProxyImage,
+		TraefikImage:       traefikImage,
+	})
 }
 
 func pangolinBootstrapCommand(config proxyConfig) string {
@@ -317,49 +237,15 @@ func pangolinBootstrapCommand(config proxyConfig) string {
 		jsonString(config.AdminEmail), jsonString(config.AdminPassword))
 	sitePayload := fmt.Sprintf(`{"name":"local-vps","niceId":"local-vps","type":"newt","subnet":"100.89.1.0/24","newtId":%s,"secret":%s}`,
 		jsonString(config.NewtID), jsonString(config.NewtSecret))
-	return commandScript(
-		`api='http://127.0.0.1:3000/api/v1'`,
-		`pangolin_request() {`,
-		`  label="$1"`,
-		`  shift`,
-		`  response_file="$(mktemp)"`,
-		`  status="$(curl -sS -o "$response_file" -w '%{http_code}' "$@")" || {`,
-		`    result=$?`,
-		`    echo "Pangolin $label request failed before receiving a response." >&2`,
-		`    cat "$response_file" >&2`,
-		`    rm -f "$response_file"`,
-		`    return "$result"`,
-		`  }`,
-		`  case "$status" in`,
-		`    2??) cat "$response_file" ;;`,
-		`    *)`,
-		`      echo "Pangolin $label failed (HTTP $status):" >&2`,
-		`      cat "$response_file" >&2`,
-		`      echo >&2`,
-		`      rm -f "$response_file"`,
-		`      return 1`,
-		`      ;;`,
-		`  esac`,
-		`  rm -f "$response_file"`,
-		`}`,
-		`for attempt in $(seq 1 60); do curl -fsS "$api/" >/dev/null && break; sleep 2; done`,
-		`curl -fsS "$api/" >/dev/null`,
-		`setup="$(curl -fsS "$api/auth/initial-setup-complete")"`,
-		`if printf '%s' "$setup" | grep -Eq '"complete"[[:space:]]*:[[:space:]]*false'; then`,
-		`  pangolin_request 'administrator creation' -X PUT "$api/auth/set-server-admin" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data `+shellQuote(adminPayload)+` >/dev/null`,
-		`fi`,
-		`cookie_file="$(mktemp)"`,
-		`trap 'rm -f "$cookie_file"' EXIT`,
-		`pangolin_request 'administrator login' -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data `+shellQuote(loginPayload)+` >/dev/null`,
-		`orgs="$(curl -fsS -b "$cookie_file" "$api/orgs")"`,
-		`if ! printf '%s' "$orgs" | grep -Eq '"orgId"[[:space:]]*:[[:space:]]*"aegisnode"'; then`,
-		`  pangolin_request 'organization creation' -b "$cookie_file" -X PUT "$api/org" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data '{"orgId":"aegisnode","name":"AegisNode","subnet":"100.89.0.0/16","utilitySubnet":"100.88.0.0/16"}' >/dev/null`,
-		`fi`,
-		`sites="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/sites?pageSize=100")"`,
-		`if ! printf '%s' "$sites" | grep -Eq '"niceId"[[:space:]]*:[[:space:]]*"local-vps"'; then`,
-		`  pangolin_request 'Newt site creation' -b "$cookie_file" -X PUT "$api/org/aegisnode/site" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data `+shellQuote(sitePayload)+` >/dev/null`,
-		`fi`,
-	)
+	return commandScript(mustRenderResourceTemplate(resources.ProxyBootstrapPangolinScript, struct {
+		AdminPayload string
+		LoginPayload string
+		SitePayload  string
+	}{
+		AdminPayload: adminPayload,
+		LoginPayload: loginPayload,
+		SitePayload:  sitePayload,
+	}))
 }
 
 func jsonString(value string) string {
@@ -384,159 +270,27 @@ func requiredDNSGuidance(baseDomain, host string) string {
 }
 
 func traefikStaticConfigFile(config proxyConfig) string {
-	return strings.Join([]string{
-		"api:",
-		"  insecure: true",
-		"  dashboard: true",
-		"providers:",
-		"  http:",
-		"    endpoint: \"http://pangolin:3001/api/v1/traefik-config\"",
-		"    pollInterval: \"5s\"",
-		"  file:",
-		"    filename: \"/etc/traefik/dynamic_config.yml\"",
-		"experimental:",
-		"  plugins:",
-		"    badger:",
-		"      moduleName: \"github.com/fosrl/badger\"",
-		"      version: \"v1.4.0\"",
-		"log:",
-		"  level: \"INFO\"",
-		"  format: \"common\"",
-		"certificatesResolvers:",
-		"  letsencrypt:",
-		"    acme:",
-		"      httpChallenge:",
-		"        entryPoint: web",
-		"      email: " + yamlDoubleQuote(config.LetsEncryptEmail),
-		"      storage: \"/letsencrypt/acme.json\"",
-		"      caServer: \"https://acme-v02.api.letsencrypt.org/directory\"",
-		"entryPoints:",
-		"  web:",
-		"    address: \":80\"",
-		"  websecure:",
-		"    address: \":443\"",
-		"    transport:",
-		"      respondingTimeouts:",
-		"        readTimeout: \"30m\"",
-		"    http:",
-		"      tls:",
-		"        certResolver: \"letsencrypt\"",
-		"      encodedCharacters:",
-		"        allowEncodedSlash: true",
-		"        allowEncodedQuestionMark: true",
-		"serversTransport:",
-		"  insecureSkipVerify: true",
-		"ping:",
-		"  entryPoint: \"web\"",
-		"",
-	}, "\n")
+	return mustRenderResourceTemplate(resources.ProxyTraefikStaticConfig, config)
 }
 
 func traefikDynamicConfigFile(config proxyConfig) string {
 	dashboardHost := "pangolin." + config.BaseDomain
-	return strings.Join([]string{
-		"http:",
-		"  middlewares:",
-		"    badger:",
-		"      plugin:",
-		"        badger:",
-		"          disableForwardAuth: true",
-		"    redirect-to-https:",
-		"      redirectScheme:",
-		"        scheme: https",
-		"  routers:",
-		"    main-app-router-redirect:",
-		"      rule: \"Host(`" + dashboardHost + "`)\"",
-		"      service: next-service",
-		"      entryPoints:",
-		"        - web",
-		"      middlewares:",
-		"        - redirect-to-https",
-		"        - badger",
-		"    next-router:",
-		"      rule: \"Host(`" + dashboardHost + "`) && !PathPrefix(`/api/v1`)\"",
-		"      service: next-service",
-		"      entryPoints:",
-		"        - websecure",
-		"      middlewares:",
-		"        - badger",
-		"      tls:",
-		"        certResolver: letsencrypt",
-		"    api-router:",
-		"      rule: \"Host(`" + dashboardHost + "`) && PathPrefix(`/api/v1`)\"",
-		"      service: api-service",
-		"      entryPoints:",
-		"        - websecure",
-		"      middlewares:",
-		"        - badger",
-		"      tls:",
-		"        certResolver: letsencrypt",
-		"    ws-router:",
-		"      rule: \"Host(`" + dashboardHost + "`)\"",
-		"      service: api-service",
-		"      entryPoints:",
-		"        - websecure",
-		"      middlewares:",
-		"        - badger",
-		"      tls:",
-		"        certResolver: letsencrypt",
-		"  services:",
-		"    next-service:",
-		"      loadBalancer:",
-		"        servers:",
-		"          - url: \"http://pangolin:3002\"",
-		"    api-service:",
-		"      loadBalancer:",
-		"        servers:",
-		"          - url: \"http://pangolin:3000\"",
-		"tcp:",
-		"  serversTransports:",
-		"    pp-transport-v1:",
-		"      proxyProtocol:",
-		"        version: 1",
-		"    pp-transport-v2:",
-		"      proxyProtocol:",
-		"        version: 2",
-		"",
-	}, "\n")
+	return mustRenderResourceTemplate(resources.ProxyTraefikDynamicConfig, struct {
+		DashboardHost string
+	}{DashboardHost: dashboardHost})
 }
 
 func pangolinConfigFile(config proxyConfig) string {
 	dashboardHost := "pangolin." + config.BaseDomain
-	return strings.Join([]string{
-		"gerbil:",
-		"  start_port: 51820",
-		"  base_endpoint: " + yamlSingleQuote(dashboardHost),
-		"app:",
-		"  dashboard_url: " + yamlSingleQuote("https://"+dashboardHost),
-		"  log_level: info",
-		"  telemetry:",
-		"    anonymous_usage: true",
-		"domains:",
-		"  domain1:",
-		"    base_domain: " + yamlSingleQuote(config.BaseDomain),
-		"server:",
-		"  secret: " + yamlSingleQuote(config.ServerSecret),
-		"  cors:",
-		"    origins:",
-		"      - " + yamlSingleQuote("https://"+dashboardHost),
-		"    methods:",
-		"      - GET",
-		"      - POST",
-		"      - PUT",
-		"      - DELETE",
-		"      - PATCH",
-		"    allowed_headers:",
-		"      - X-CSRF-Token",
-		"      - Content-Type",
-		"    credentials: false",
-		"flags:",
-		"  require_email_verification: false",
-		"  disable_signup_without_invite: true",
-		"  disable_user_create_org: false",
-		"  allow_raw_resources: true",
-		"",
-	}, "\n")
+	return mustRenderResourceTemplate(resources.ProxyPangolinConfig, struct {
+		proxyConfig
+		DashboardHost string
+		DashboardURL  string
+	}{
+		proxyConfig:   config,
+		DashboardHost: dashboardHost,
+		DashboardURL:  "https://" + dashboardHost,
+	})
 }
 
 func yamlSingleQuote(value string) string {

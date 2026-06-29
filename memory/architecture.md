@@ -30,10 +30,20 @@ All defaults can be overridden by CLI flags. The cloud SSH key must already exis
 - `cloud.go`: minimal standard-library clients for the two provider APIs.
 - `bootstrap.go`: admin bootstrap remote command sequence.
 - `remote.go`: native SSH client, known-host handling, shell quoting, and remote file writes.
+- `resources/`: embedded deployment resources grouped by runtime area (`bootstrap`, `hardening`, `network`, `observability`, `proxy`, and `stacks`).
+- `resource_renderer.go`: `go:embed` rendering bridge that applies existing shell, YAML, JSON, and apt command helpers to resource templates.
 - `*_test.go`: provider contract, native command, key generation, and CLI tests.
 - `README.md`: operator-facing build and usage instructions.
 
 The remote runner intentionally uses `golang.org/x/crypto/ssh` instead of local OpenSSH or Ansible binaries. Provider API clients remain minimal standard-library HTTP clients; adding provider SDKs is not justified by the current command surface.
+
+## Resource embedding practice
+
+Generated deployment files and substantial shell scripts should live under `resources/` and be embedded with Go's `embed.FS`. Keep the tree organized by owning runtime area so resources are easy to find: proxy Compose and Pangolin/Traefik configs under `resources/proxy/`, observability scaffolds under `resources/observability/`, Docker/UFW assets under `resources/network/`, hardening assets under `resources/hardening/`, bootstrap scripts under `resources/bootstrap/`, and generated stack overrides under `resources/stacks/`.
+
+Resource templates should contain file and script structure. Go should keep validation, dynamic payload construction, resource grouping, and quoting-sensitive helpers such as `shellQuote`, `yamlSingleQuote`, `yamlDoubleQuote`, and `jsonString`. Existing functions such as `pangolinComposeFile` and `observabilityComposeFile` should remain thin render wrappers unless a wider package refactor is explicitly planned.
+
+Do not embed user-owned application Compose files, runtime environment files, profile secrets, or configuration repository content. Those remain external operator data. When adding a new generated artifact, add it to `resources/resources.go`, render it through `resource_renderer.go`, and verify it through the existing task or Compose tests.
 
 ## External references checked
 
