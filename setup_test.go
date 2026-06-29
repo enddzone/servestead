@@ -370,6 +370,77 @@ func TestPrepareFailedProxyUsesExplicitPangolinPasswordOverride(t *testing.T) {
 	}
 }
 
+func TestPrepareProfileStageSetupPersistsChangedPangolinCredentialsForAPI(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		ID:                 "profile-1",
+		IP:                 "203.0.113.10",
+		AdminUser:          "servestead",
+		PrivateKeyPath:     "/tmp/aegis-key",
+		BaseDomain:         "example.com",
+		LetsEncryptEmail:   "admin@example.com",
+		PangolinAdminEmail: "old-admin@example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{
+		ActiveRunID: "run-1",
+		Runs: map[string]SetupRun{"run-1": {
+			ID:     "run-1",
+			Status: runStatusComplete,
+			Stages: map[string]SetupStageStatus{
+				"proxy": {Status: stageStatusComplete},
+			},
+		}},
+	}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSecrets(profile.ID, ProfileSecrets{
+		ServerSecret:          "server-secret",
+		PangolinAdminPassword: "old-password",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, config, err := prepareProfileStageSetup(setupCLIOptions{
+		ProfileID:             profile.ID,
+		PangolinAdminEmail:    "new-admin@example.com",
+		PangolinAdminPassword: "new-password",
+	}, store, "observability")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.PangolinAdminEmail != "new-admin@example.com" || config.PangolinAdminPassword != "new-password" {
+		t.Fatalf("changed Pangolin credentials were not reflected in setup config: %+v", config)
+	}
+	loadedProfile, _, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedProfile.PangolinAdminEmail != "new-admin@example.com" {
+		t.Fatalf("changed Pangolin admin email was not saved: %+v", loadedProfile)
+	}
+	secrets, err := store.LoadSecrets(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secrets.PangolinAdminPassword != "new-password" {
+		t.Fatalf("changed Pangolin admin password was not saved: %+v", secrets)
+	}
+	command := observabilityResourceVerifyCommand(observabilityConfig{
+		BaseDomain:       config.BaseDomain,
+		AdminEmail:       config.PangolinAdminEmail,
+		PangolinPassword: config.PangolinAdminPassword,
+	})
+	for _, expected := range []string{`"email":"new-admin@example.com"`, `"password":"new-password"`} {
+		if !strings.Contains(command, expected) {
+			t.Fatalf("Pangolin API login command did not use changed credential %q:\n%s", expected, command)
+		}
+	}
+}
+
 func TestAdvancedSetupMasksPangolinPassword(t *testing.T) {
 	inputs := setupAdvancedInputs(setupCLIOptions{PangolinAdminPassword: "secret"})
 	if inputs[4].EchoMode != textinput.EchoPassword {
@@ -1357,6 +1428,9 @@ func TestProfileRunModelRendersTaskProgressAndLogs(t *testing.T) {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("run view missing %q:\n%s", expected, view)
 		}
+	}
+	if strings.Contains(view, "Harden stdout: remote output") {
+		t.Fatalf("run view should not prefix streamed log output with stage and stream:\n%s", view)
 	}
 }
 

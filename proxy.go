@@ -59,7 +59,6 @@ func runProxy(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	flags.StringVar(&config.LetsEncryptEmail, "email", "", "Let's Encrypt account email")
 	flags.StringVar(&config.ServerSecret, "server-secret", "", "Pangolin server secret")
 	flags.StringVar(&config.ServerSecret, "postgres-password", "", "deprecated alias for --server-secret")
-	flags.StringVar(&config.SetupToken, "setup-token", "", "Pangolin initial admin setup token (generated when omitted)")
 	flags.StringVar(&config.AdminEmail, "pangolin-admin-email", "", "Pangolin administrator email (defaults to --email)")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -132,7 +131,7 @@ func validateProxyConfig(config proxyConfig) error {
 		return errors.New("--server-secret must not contain newlines")
 	}
 	if !pangolinSetupToken.MatchString(config.SetupToken) {
-		return errors.New("--setup-token must contain exactly 32 lowercase letters or digits")
+		return errors.New("Pangolin setup token must contain exactly 32 lowercase letters or digits")
 	}
 	if strings.ContainsAny(config.AdminEmail, " \t\r\n") || !strings.Contains(config.AdminEmail, "@") {
 		return errors.New("--pangolin-admin-email must be a valid email address")
@@ -251,15 +250,6 @@ func pangolinBootstrapCommand(config proxyConfig) string {
 func jsonString(value string) string {
 	encoded, _ := json.Marshal(value)
 	return string(encoded)
-}
-
-func printPangolinSetupGuidance(output io.Writer, baseDomain, setupToken string) {
-	if setupToken == "" {
-		return
-	}
-	fmt.Fprintf(output, "Pangolin initial setup: https://pangolin.%s/auth/initial-setup\n", baseDomain)
-	fmt.Fprintf(output, "Pangolin setup token: %s\n", setupToken)
-	fmt.Fprintln(output, "The token is valid only until the initial server admin is registered.")
 }
 
 func requiredDNSGuidance(baseDomain, host string) string {

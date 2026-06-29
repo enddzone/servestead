@@ -1,6 +1,6 @@
 # Implementation Progress
 
-Last updated: 2026-06-26
+Last updated: 2026-06-29
 
 Source of truth for planned work: `implementation_plan.html`.
 UX overhaul handoff source: `ux_overhaul_plan.html`.
@@ -17,6 +17,8 @@ UX overhaul handoff source: `ux_overhaul_plan.html`.
 - Phase 5: **not started**
 
 The interactive HTML checklist uses browser-local storage. `ux_overhaul_plan.html` now defaults all completed UX overhaul tasks to checked when no browser-local checklist exists. This file records repository implementation progress independently of browser state.
+
+Operator-facing compatibility preference recorded on 2026-06-29: when replacing obsolete commands, remove the old command instead of keeping a compatibility alias unless explicitly requested. Pangolin initial setup tokens are internal bootstrap details; user-facing retrieval should expose the saved administrator username and password through the current credentials flow.
 
 ## UX overhaul backend handoff — 2026-06-26
 

@@ -79,7 +79,7 @@ bin/servestead setup \
   --yes
 ```
 
-Running `setup` without `--ip` opens the full-screen, profile-first terminal UI. It lists saved profiles and presents three setup actions: Bootstrap, Harden, and Platform. Platform runs networking, Pangolin proxy, and observability in order from one command. The TUI collects missing full-run values before any remote command runs and presents explicit choices to create a local configuration repository, use an existing checkout, or clone GitHub. The review screen shows the selected repository action. After confirmation, Servestead prepares the repository first and starts SSH execution only after that succeeds. From a saved profile dashboard, use `j`/`k` to select an action and press `r` to run it once, even if it is already marked complete. Retrying Platform after Pangolin has already been registered opens masked administrator email/password inputs and saves the supplied credentials in the owner-only profile secrets file. Press `q` to quit from navigation or run screens, `esc` to go back, or `x` to delete only the local saved profile, secrets, state, and run logs; delete does not change the remote server. The older one-off guided paths remain available from the advanced legacy setup entry. Setup does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
+Running `setup` without `--ip` opens the full-screen, profile-first terminal UI. It lists saved profiles and presents three setup actions: Bootstrap, Harden, and Platform. Platform runs networking, Pangolin proxy, and observability in order from one command. The TUI collects missing full-run values before any remote command runs and presents explicit choices to create a local configuration repository, use an existing checkout, or clone GitHub. The review screen shows the selected repository action. After confirmation, Servestead prepares the repository first and starts SSH execution only after that succeeds. From a saved profile dashboard, use `j`/`k` to select an action and press `r` to run it once, even if it is already marked complete. Press `p` to reveal the saved Pangolin administrator username and password. Retrying Platform after Pangolin has already been registered opens masked administrator email/password inputs and saves the supplied credentials in the owner-only profile secrets file. Press `q` to quit from navigation or run screens, `esc` to go back, or `x` to delete only the local saved profile, secrets, state, and run logs; delete does not change the remote server. The older one-off guided paths remain available from the advanced legacy setup entry. Setup does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
 
 For a quick preflight check without opening the TUI:
 
@@ -189,6 +189,7 @@ Retrieve the generated Pangolin administrator credentials:
 
 ```sh
 bin/servestead pangolin-credentials --profile <profile-id>
+bin/servestead pangolin-credentials --ip 203.0.113.10
 ```
 
 For an existing registered Pangolin profile created before automated bootstrap, set `PANGOLIN_ADMIN_PASSWORD` once when rerunning setup so Servestead can save the existing password in the owner-only profile secrets file.

@@ -24,8 +24,7 @@ Direct commands:
   servestead harden --host <ipv4> --private-key <path>
   servestead network --host <ipv4> --private-key <path>
   servestead proxy --host <ipv4> --private-key <path> --domain <domain> --email <email> --server-secret <secret>
-  servestead pangolin-token (--profile <id> | --ip <ipv4>)
-  servestead pangolin-credentials --profile <id>
+  servestead pangolin-credentials (--profile <id> | --ip <ipv4>)
   servestead stack add --profile <id> --compose <path> [--publish <service:port:subdomain[:id]> ...] [--env-file <path>]
   servestead stack env set --profile <id> --stack <name> --file <path>
   servestead stack env remove --profile <id> --stack <name>
@@ -72,12 +71,6 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv ge
 		return err
 	case "proxy":
 		err := runProxy(ctx, args[1:], stdout, stderr)
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	case "pangolin-token":
-		err := runPangolinToken(args[1:], stdout, stderr)
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
