@@ -77,6 +77,17 @@
       ],
       "depNameTemplate": "anchore/syft",
       "datasourceTemplate": "github-releases"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.github\\/workflows\\/(security|release)\\.yml$/"
+      ],
+      "matchStrings": [
+        "TRIVY_VERSION: (?<currentValue>v[0-9.]+)"
+      ],
+      "depNameTemplate": "aquasecurity/trivy",
+      "datasourceTemplate": "github-releases"
     }
   ]
 }

@@ -17,6 +17,7 @@ permissions:
 
 env:
   GOVULNCHECK_VERSION: v1.5.0
+  TRIVY_VERSION: v0.71.2
 
 jobs:
   govulncheck:
@@ -69,6 +70,7 @@ jobs:
           output: trivy-results.sarif
           severity: HIGH,CRITICAL
           exit-code: "0"
+          version: ${{ env.TRIVY_VERSION }}
 
       - name: Upload SARIF
         uses: github/codeql-action/upload-sarif@v4.36.2
@@ -83,3 +85,4 @@ jobs:
           format: table
           severity: HIGH,CRITICAL
           exit-code: "1"
+          version: ${{ env.TRIVY_VERSION }}

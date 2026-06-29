@@ -20,6 +20,7 @@ permissions:
 env:
   GORELEASER_VERSION: v2.16.0
   SYFT_VERSION: v1.46.0
+  TRIVY_VERSION: v0.71.2
 
 jobs:
   binaries:
@@ -140,6 +141,7 @@ jobs:
           output: trivy-image.sarif
           severity: HIGH,CRITICAL
           exit-code: "0"
+          version: ${{ env.TRIVY_VERSION }}
 
       - name: Upload image SARIF
         uses: github/codeql-action/upload-sarif@v4.36.2
@@ -154,3 +156,4 @@ jobs:
           format: table
           severity: HIGH,CRITICAL
           exit-code: "1"
+          version: ${{ env.TRIVY_VERSION }}
