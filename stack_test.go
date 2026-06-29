@@ -314,13 +314,27 @@ func TestStackEnvironmentIsStoredOutsideRepositoryAndSentOverStdin(t *testing.T)
 		Name: "site", Override: "services: {}\n", Environment: environment,
 	}
 	tasks := configuredStackTasks(observabilityConfig{}, stack, "aegisadmin")
+	var dataTask Task
 	var writeTask Task
 	joinedApply := ""
 	for _, task := range tasks {
 		joinedApply += task.Apply
+		if task.Name == "Prepare site data directory" {
+			dataTask = task
+		}
 		if task.Name == "Write site environment" {
 			writeTask = task
 		}
+	}
+	if !strings.Contains(dataTask.Apply, "install -d -m 0755 -o root -g root '/data'") ||
+		!strings.Contains(dataTask.Apply, "install -d -m 0750 -o 1000 -g 1000 '/data/site'") ||
+		!strings.Contains(dataTask.Apply, "if [ ! -e '/data/site' ]; then") {
+		t.Fatalf("data directory convention was not prepared:\n%s", dataTask.Apply)
+	}
+	command := exec.Command("sh", "-n")
+	command.Stdin = strings.NewReader(dataTask.Apply)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("data directory task is not valid shell: %v\n%s\n%s", err, output, dataTask.Apply)
 	}
 	if writeTask.Stdin != environment || strings.Contains(writeTask.Apply, "secret-value") ||
 		strings.Contains(joinedApply, "secret-value") {
@@ -554,6 +568,42 @@ func TestEditableStackLifecycle(t *testing.T) {
 	}
 	if len(stacks) != 0 {
 		t.Fatalf("removed stack is still listed: %+v", stacks)
+	}
+}
+
+func TestEditableStackDiscoveryGuidesManualStackLayout(t *testing.T) {
+	repository := t.TempDir()
+	stacksDirectory := filepath.Join(repository, "stacks")
+	if err := os.MkdirAll(filepath.Join(stacksDirectory, "seerr"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stacksDirectory, "compose.yaml"), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadEditableStacks(repository)
+	if err == nil || !strings.Contains(err.Error(), "outside a stack directory") ||
+		!strings.Contains(err.Error(), filepath.Join("stacks", "<stack-name>", "compose.yaml")) {
+		t.Fatalf("misplaced Compose file did not get actionable guidance: %v", err)
+	}
+	if err := os.Remove(filepath.Join(stacksDirectory, "compose.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	stacks, err := loadEditableStacks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stacks) != 0 {
+		t.Fatalf("empty stack directory should be ignored: %+v", stacks)
+	}
+	if err := os.WriteFile(filepath.Join(stacksDirectory, "seerr", "compose.yaml"), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stacks, err = loadEditableStacks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stacks) != 1 || stacks[0].Name != "seerr" || !stacks[0].MetadataMissing {
+		t.Fatalf("compose-only stack was not loaded as a draft: %+v", stacks)
 	}
 }
 

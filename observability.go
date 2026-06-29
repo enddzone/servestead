@@ -14,6 +14,7 @@ import (
 const observabilityStackDirectory = "/opt/aegisnode/stacks/observability"
 const observabilityRepositoryDirectory = "/opt/aegisnode/repository"
 const observabilityEnvironmentPath = "/etc/aegisnode/observability.env"
+const applicationDataDirectory = "/data"
 const stackEnvironmentDirectory = "/etc/aegisnode/stacks"
 
 const (
@@ -162,6 +163,7 @@ func configuredStackTasks(config observabilityConfig, stack configuredStack, gro
 		tasks = append(tasks, Task{Name: "Deploy committed " + stack.Name + " stack", Apply: commandScript(deployCommands...)})
 	}
 	tasks = append(tasks,
+		stackDataDirectoryTask(stack),
 		stackEnvironmentTask(stack, environmentPath),
 		Task{Name: "Generate " + stack.Name + " deployment override", Apply: commandScript(
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" /opt/aegisnode/generated",
@@ -207,6 +209,16 @@ sys.exit(0 if ok else 1)`))
 		tasks = append(tasks, dockhandGitStackReconcileTask(config, stack))
 	}
 	return tasks
+}
+
+func stackDataDirectoryTask(stack configuredStack) Task {
+	dataDirectory := applicationDataDirectory + "/" + stack.Name
+	return Task{Name: "Prepare " + stack.Name + " data directory", Apply: commandScript(
+		"install -d -m 0755 -o root -g root "+shellQuote(applicationDataDirectory),
+		"if [ ! -e "+shellQuote(dataDirectory)+" ]; then",
+		"  install -d -m 0750 -o 1000 -g 1000 "+shellQuote(dataDirectory),
+		"fi",
+	)}
 }
 
 func stackEnvironmentTask(stack configuredStack, path string) Task {

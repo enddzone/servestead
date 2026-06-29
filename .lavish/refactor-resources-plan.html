@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en" data-theme="business">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AegisNode Resources Refactor Plan</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :where(.grid, .flex, .layout-grid, .layout-flex) > *,
+    :where([style*="display: grid"], [style*="display:grid"], [style*="display: flex"], [style*="display:flex"]) > * {
+      min-width: 0;
+    }
+    :where(p, h1, h2, h3, h4, h5, h6, li, dd, blockquote, figcaption, td, th, .badge, .label) {
+      overflow-wrap: anywhere;
+    }
+    :where(img, svg, video, canvas, iframe) {
+      max-width: 100%;
+      height: auto;
+    }
+    html { scroll-behavior: smooth; }
+    body {
+      background:
+        linear-gradient(180deg, rgba(126, 87, 194, 0.12), rgba(126, 87, 194, 0) 22rem),
+        var(--color-base-100);
+    }
+    .terminal-strip {
+      border-left: 4px solid #7e57c2;
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+    .section-anchor {
+      scroll-margin-top: 7rem;
+    }
+    .resource-tree {
+      white-space: pre-wrap;
+      line-height: 1.45;
+    }
+    .decision-card input[type="radio"] {
+      margin-top: 0.25rem;
+    }
+    .summary-stat .stat-value {
+      font-size: clamp(1.65rem, 3vw, 2.25rem);
+      line-height: 1.1;
+    }
+    .summary-stat,
+    .summary-stat :where(.stat-title, .stat-value, .stat-desc) {
+      min-width: 0;
+      max-width: 100%;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: "base",
+      securityLevel: "strict",
+      themeVariables: {
+        primaryColor: "#2f3440",
+        primaryTextColor: "#f8f8f2",
+        primaryBorderColor: "#7e57c2",
+        lineColor: "#d6d3d1",
+        secondaryColor: "#3b4252",
+        tertiaryColor: "#1f2937",
+        noteBkgColor: "#4a3b20",
+        noteTextColor: "#fff7ed"
+      }
+    });
+  </script>
+</head>
+<body class="min-h-screen text-base-content">
+  <div class="sticky top-0 z-30 border-b border-base-content/10 bg-base-100/95 backdrop-blur">
+    <div class="navbar mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+      <div class="navbar-start min-w-0">
+        <div>
+          <div class="text-xs uppercase tracking-wide text-base-content/60">AegisNode technical plan</div>
+          <div class="truncate text-lg font-bold">Embed generated resources with Go</div>
+        </div>
+      </div>
+      <div class="navbar-end hidden gap-2 lg:flex">
+        <a class="btn btn-ghost btn-sm" href="#inventory">Inventory</a>
+        <a class="btn btn-ghost btn-sm" href="#target">Target</a>
+        <a class="btn btn-ghost btn-sm" href="#steps">Steps</a>
+        <a class="btn btn-primary btn-sm" href="#review">Review choices</a>
+      </div>
+    </div>
+  </div>
+
+  <main class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 lg:py-10">
+    <section class="terminal-strip rounded-box border border-base-content/10 bg-base-100 p-5 shadow-sm lg:p-7">
+      <div class="grid gap-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(260px,0.65fr)]">
+        <div>
+          <div class="mb-3 flex flex-wrap gap-2">
+            <span class="badge badge-primary badge-soft">Plan only</span>
+            <span class="badge badge-warning badge-soft">No implementation yet</span>
+            <span class="badge badge-neutral badge-soft">Verified against source</span>
+          </div>
+          <h1 class="mb-4 text-3xl font-bold leading-tight sm:text-4xl">Move generated scripts, Compose, and config files into embedded resources without changing behavior.</h1>
+          <p class="max-w-3xl text-base-content/75">
+            The repository currently has no standalone shell scripts, Dockerfiles, or Compose files at the project root.
+            The deployable artifacts are generated from Go functions in files like <span class="mono">proxy.go</span>,
+            <span class="mono">observability.go</span>, <span class="mono">network.go</span>, and
+            <span class="mono">hardening.go</span>. The refactor should extract the file-like content and larger scripts
+            into a readable <span class="mono">resources/</span> tree, embed them with <span class="mono">go:embed</span>,
+            and keep existing call sites stable.
+          </p>
+        </div>
+        <div class="rounded-box bg-base-200 p-4">
+          <div class="mb-3 text-sm font-semibold text-base-content/70">Success criteria</div>
+          <ul class="space-y-2 text-sm">
+            <li class="flex gap-2"><span class="status status-primary mt-1"></span><span>Existing CLI commands and remote paths remain unchanged.</span></li>
+            <li class="flex gap-2"><span class="status status-primary mt-1"></span><span>Rendered Compose, YAML, JSON, env, and shell scripts stay behaviorally equivalent.</span></li>
+            <li class="flex gap-2"><span class="status status-primary mt-1"></span><span>Resource names and locations are easy to scan and retrieve.</span></li>
+            <li class="flex gap-2"><span class="status status-primary mt-1"></span><span>Tests cover rendering and existing deployment task composition.</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section-anchor mt-8 grid gap-4 md:grid-cols-4" id="summary">
+      <div class="stat summary-stat rounded-box border border-base-content/10 bg-base-100">
+        <div class="stat-title">Standalone scripts found</div>
+        <div class="stat-value text-primary">0</div>
+        <div class="stat-desc">No checked-in <span class="mono">*.sh</span> files today</div>
+      </div>
+      <div class="stat summary-stat rounded-box border border-base-content/10 bg-base-100">
+        <div class="stat-title">Generated Compose surfaces</div>
+        <div class="stat-value text-primary">3</div>
+        <div class="stat-desc">Proxy, observability, stack override</div>
+      </div>
+      <div class="stat summary-stat rounded-box border border-base-content/10 bg-base-100">
+        <div class="stat-title">High-risk area</div>
+        <div class="stat-value text-warning">Shell</div>
+        <div class="stat-desc">Quoting and idempotence must stay exact</div>
+      </div>
+      <div class="stat summary-stat rounded-box border border-base-content/10 bg-base-100">
+        <div class="stat-title">Scope</div>
+        <div class="stat-value text-primary">Balanced</div>
+        <div class="stat-desc">Extract artifacts, keep tiny command helpers</div>
+      </div>
+    </section>
+
+    <section class="section-anchor mt-10" id="inventory">
+      <div class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h2 class="text-2xl font-bold">Current Inventory</h2>
+          <p class="text-sm text-base-content/65">Items that are currently embedded as Go string assembly or script fragments.</p>
+        </div>
+        <span class="badge badge-outline">Source inspected: <span class="mono ml-1">*.go</span></span>
+      </div>
+      <div class="overflow-x-auto rounded-box border border-base-content/10 bg-base-100">
+        <table class="table table-zebra table-sm">
+          <thead>
+            <tr>
+              <th>Area</th>
+              <th>Current source</th>
+              <th>Resource target</th>
+              <th>Recommendation</th>
+              <th>Risk</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="font-semibold">Proxy Compose</td>
+              <td><span class="mono">proxy.go</span> <span class="mono">pangolinComposeFile</span></td>
+              <td><span class="mono">resources/proxy/docker-compose.yml.tmpl</span></td>
+              <td>Move to template with image constants, token, domain, Newt credentials, and network values.</td>
+              <td><span class="badge badge-warning badge-soft">Medium</span></td>
+            </tr>
+            <tr>
+              <td class="font-semibold">Proxy configs</td>
+              <td><span class="mono">pangolinConfigFile</span>, <span class="mono">traefik*ConfigFile</span></td>
+              <td><span class="mono">resources/proxy/*.yml.tmpl</span></td>
+              <td>Move file-shaped YAML to templates; preserve existing quote helper behavior.</td>
+              <td><span class="badge badge-warning badge-soft">Medium</span></td>
+            </tr>
+            <tr>
+              <td class="font-semibold">Pangolin bootstrap</td>
+              <td><span class="mono">pangolinBootstrapCommand</span></td>
+              <td><span class="mono">resources/proxy/scripts/bootstrap-pangolin.sh.tmpl</span></td>
+              <td>Move as a shell template fed by JSON payloads generated in Go.</td>
+              <td><span class="badge badge-error badge-soft">High</span></td>
+            </tr>
+            <tr>
+              <td class="font-semibold">Observability Compose</td>
+              <td><span class="mono">observabilityComposeFile</span></td>
+              <td><span class="mono">resources/observability/docker-compose.yml.tmpl</span></td>
+              <td>Move scaffold template; keep validation in Go because it parses user-owned committed files.</td>
+              <td><span class="badge badge-warning badge-soft">Medium</span></td>
+            </tr>
+            <tr>
+              <td class="font-semibold">Beszel and env files</td>
+              <td><span class="mono">beszelConfigFile</span>, <span class="mono">observabilityEnvironmentFile</span></td>
+              <td><span class="mono">resources/observability/beszel-config.yml.tmpl</span>, <span class="mono">observability.env.tmpl</span></td>
+              <td>Extract as small templates; verify no generated secrets are committed to the scaffold.</td>
+              <td><span class="badge badge-success badge-soft">Low</span></td>
+            </tr>
+            <tr>
+              <td class="font-semibold">Network files and scripts</td>
+              <td><span class="mono">network.go</span> Docker source, daemon JSON, UFW block</td>
+              <td><span class="mono">resources/network/</span></td>
+              <td>Extract daemon JSON, Docker sources, and UFW block. Keep package install composition in Go.</td>
+              <td><span class="badge badge-warning badge-soft">Medium</span></td>
+            </tr>
+            <tr>
+              <td class="font-semibold">Hardening files and scripts</td>
+              <td><span class="mono">hardening.go</span> sshd, sysctl, swap, auto-upgrades</td>
+              <td><span class="mono">resources/hardening/</span></td>
+              <td>Move static configs and the larger swap/system scripts. Keep sysctl setting data in Go or render through a template.</td>
+              <td><span class="badge badge-warning badge-soft">Medium</span></td>
+            </tr>
+            <tr>
+              <td class="font-semibold">Stack deployment override</td>
+              <td><span class="mono">stack.go</span> <span class="mono">generateStackPangolinOverride</span></td>
+              <td><span class="mono">resources/stacks/pangolin-override.yml.tmpl</span></td>
+              <td>Move to a range-based template, but keep validation and service/resource grouping in Go.</td>
+              <td><span class="badge badge-warning badge-soft">Medium</span></td>
+            </tr>
+            <tr>
+              <td class="font-semibold">User-owned Compose</td>
+              <td><span class="mono">stacks/&lt;name&gt;/compose.yaml</span> in config repos</td>
+              <td>Do not embed</td>
+              <td>Leave user imported Compose files and runtime env content external and owner-controlled.</td>
+              <td><span class="badge badge-success badge-soft">Low</span></td>
+            </tr>
+            <tr>
+              <td class="font-semibold">Remote primitives</td>
+              <td><span class="mono">remoteWriteFileCommand</span>, <span class="mono">commandScript</span>, apt helpers</td>
+              <td>Mostly stay in Go</td>
+              <td>These are safer as small Go helpers because they encode, quote, or assemble task primitives.</td>
+              <td><span class="badge badge-success badge-soft">Low</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section-anchor mt-10" id="target">
+      <div class="grid gap-6 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        <div class="rounded-box border border-base-content/10 bg-base-100 p-5">
+          <h2 class="mb-3 text-2xl font-bold">Target Flow</h2>
+          <p class="mb-4 text-sm text-base-content/65">
+            Existing functions can keep their names and return strings, but their bodies should render embedded resources instead of assembling long string slices.
+          </p>
+          <div class="mermaid">
+flowchart TB
+  A["resources/ package<br/>embed.FS + path constants"] --> B["resource renderer<br/>text/template + helpers"]
+  B --> C["Existing Go functions<br/>pangolinComposeFile, observabilityComposeFile, etc."]
+  C --> D["Task builders<br/>proxyTasks, observabilityTasks, networkTasks"]
+  D --> E["remoteWriteFileCommand<br/>or commandScript"]
+  E --> F["SSH execution on target VPS"]
+  G["User-owned config repos<br/>stacks/&lt;name&gt;/compose.yaml"] --> D
+          </div>
+        </div>
+        <div class="rounded-box border border-base-content/10 bg-base-100 p-5">
+          <h2 class="mb-3 text-2xl font-bold">Proposed Resource Tree</h2>
+          <pre class="resource-tree mono rounded-box bg-base-200 p-4 text-xs sm:text-sm">resources/
+  resources.go                 # embed.FS plus stable path constants
+  proxy/
+    docker-compose.yml.tmpl
+    pangolin-config.yml.tmpl
+    traefik-static.yml.tmpl
+    traefik-dynamic.yml.tmpl
+    scripts/
+      bootstrap-pangolin.sh.tmpl
+  observability/
+    docker-compose.yml.tmpl
+    beszel-config.yml.tmpl
+    observability.env.tmpl
+    scripts/
+      reconcile-resources.sh.tmpl
+      verify-resources.sh.tmpl
+      dockhand-environment.sh.tmpl
+  stacks/
+    pangolin-override.yml.tmpl
+    scripts/
+      verify-public-resources.sh.tmpl
+      cleanup-removed-stacks.sh.tmpl
+      reconcile-dockhand-git-stack.sh.tmpl
+  network/
+    docker-daemon.json
+    docker.sources.tmpl
+    scripts/
+      ufw-masquerade.sh.tmpl
+      remove-conflicting-docker-packages.sh
+  hardening/
+    sshd-hardening.conf
+    auto-upgrades.conf
+    sysctl.conf.tmpl
+    scripts/
+      configure-swap.sh
+      system-upgrade.sh
+      supported-ubuntu.sh
+  bootstrap/
+    scripts/
+      write-sudoers.sh.tmpl</pre>
+          <div class="mt-4 alert alert-info alert-soft">
+            <span>Do not create empty Dockerfile folders now. There are no Dockerfiles in the inspected repository; add <span class="mono">resources/docker/</span> only if future source actually needs it.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section-anchor mt-10" id="comparison">
+      <h2 class="mb-4 text-2xl font-bold">Main Design Choices</h2>
+      <div class="grid gap-4 lg:grid-cols-3">
+        <div class="rounded-box border border-primary/40 bg-base-100 p-5">
+          <div class="mb-2 flex items-center justify-between gap-2">
+            <h3 class="font-bold">Balanced extraction</h3>
+            <span class="badge badge-primary badge-soft">Recommended</span>
+          </div>
+          <p class="text-sm text-base-content/70">Move file-like artifacts and larger procedural scripts. Keep short command helpers and validation logic in Go.</p>
+          <div class="divider my-3"></div>
+          <ul class="space-y-2 text-sm">
+            <li>Best readability gain without turning every task into template plumbing.</li>
+            <li>Lower quoting risk than maximal extraction.</li>
+            <li>Matches current tests with small call-site changes.</li>
+          </ul>
+        </div>
+        <div class="rounded-box border border-base-content/10 bg-base-100 p-5">
+          <h3 class="mb-2 font-bold">Maximal extraction</h3>
+          <p class="text-sm text-base-content/70">Move nearly every command fragment into shell templates, including small apt and user-management snippets.</p>
+          <div class="divider my-3"></div>
+          <ul class="space-y-2 text-sm">
+            <li>Most visible shell code in files.</li>
+            <li>More template variables and more surface for quoting mistakes.</li>
+            <li>Likely overkill for one-line commands.</li>
+          </ul>
+        </div>
+        <div class="rounded-box border border-base-content/10 bg-base-100 p-5">
+          <h3 class="mb-2 font-bold">Compose/YAML first</h3>
+          <p class="text-sm text-base-content/70">Move only Compose and configuration files now, then revisit scripts later.</p>
+          <div class="divider my-3"></div>
+          <ul class="space-y-2 text-sm">
+            <li>Lowest first diff risk.</li>
+            <li>Leaves the hardest-to-read shell scripts inline.</li>
+            <li>Good fallback if you want a very incremental PR.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section-anchor mt-10" id="steps">
+      <h2 class="mb-4 text-2xl font-bold">Implementation Plan</h2>
+      <ul class="steps steps-vertical w-full lg:steps-horizontal">
+        <li class="step step-primary">Characterize</li>
+        <li class="step step-primary">Embed</li>
+        <li class="step step-primary">Move files</li>
+        <li class="step step-primary">Move scripts</li>
+        <li class="step step-primary">Verify</li>
+      </ul>
+      <div class="mt-6 grid gap-4 lg:grid-cols-2">
+        <div class="rounded-box border border-base-content/10 bg-base-100 p-5">
+          <h3 class="mb-2 font-bold">1. Characterize current output</h3>
+          <p class="text-sm text-base-content/70">Use existing tests as the safety net, then add focused render tests only where coverage is thin.</p>
+          <div class="mt-3 rounded-box bg-base-200 p-3 text-sm">
+            Verify: <span class="mono">go test ./...</span> before resource movement, plus existing Docker Compose validation tests when local Docker is available.
+          </div>
+        </div>
+        <div class="rounded-box border border-base-content/10 bg-base-100 p-5">
+          <h3 class="mb-2 font-bold">2. Add embedded resource access</h3>
+          <p class="text-sm text-base-content/70">Create <span class="mono">resources/resources.go</span> with <span class="mono">embed.FS</span> and path constants. Add a root-package renderer so existing quote helpers can be reused without import cycles.</p>
+          <div class="mt-3 rounded-box bg-base-200 p-3 text-sm">
+            Verify: compile-only tests prove every referenced resource exists and every template parses.
+          </div>
+        </div>
+        <div class="rounded-box border border-base-content/10 bg-base-100 p-5">
+          <h3 class="mb-2 font-bold">3. Move file-like artifacts</h3>
+          <p class="text-sm text-base-content/70">Start with static and low-risk files: Docker daemon JSON, sshd hardening config, auto-upgrades config, Beszel config, env file, then Compose/YAML templates.</p>
+          <div class="mt-3 rounded-box bg-base-200 p-3 text-sm">
+            Verify: current tests that assert service names, labels, image pins, config values, and Compose validity keep passing.
+          </div>
+        </div>
+        <div class="rounded-box border border-base-content/10 bg-base-100 p-5">
+          <h3 class="mb-2 font-bold">4. Move larger scripts</h3>
+          <p class="text-sm text-base-content/70">Extract Pangolin bootstrap, UFW masquerade, swap setup, resource reconciliation, and Dockhand scripts after the renderer is proven.</p>
+          <div class="mt-3 rounded-box bg-base-200 p-3 text-sm">
+            Verify: tests continue checking key commands, API payloads, CSRF headers, cleanup traps, and credential error messages.
+          </div>
+        </div>
+        <div class="rounded-box border border-base-content/10 bg-base-100 p-5 lg:col-span-2">
+          <h3 class="mb-2 font-bold">5. Update docs and run full verification</h3>
+          <p class="text-sm text-base-content/70">Document the resource organization only if useful for maintainers. Avoid touching user-facing README behavior unless generated artifact details are currently described there.</p>
+          <div class="mt-3 grid gap-3 md:grid-cols-3">
+            <div class="rounded-box bg-base-200 p-3 text-sm"><span class="mono">go test ./...</span></div>
+            <div class="rounded-box bg-base-200 p-3 text-sm">Docker Compose validation tests, if Docker is installed</div>
+            <div class="rounded-box bg-base-200 p-3 text-sm">Manual scan for secrets or generated values in resources</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section-anchor mt-10" id="risks">
+      <h2 class="mb-4 text-2xl font-bold">Risks and Boundaries</h2>
+      <div class="grid gap-4 lg:grid-cols-2">
+        <div class="rounded-box border border-base-content/10 bg-base-100 p-5">
+          <h3 class="mb-3 font-bold">Mitigations</h3>
+          <div class="space-y-3">
+            <div class="alert alert-warning alert-soft"><span>Shell and YAML quoting can regress silently. Reuse the existing <span class="mono">shellQuote</span>, <span class="mono">yamlSingleQuote</span>, <span class="mono">yamlDoubleQuote</span>, and <span class="mono">jsonString</span> behavior from templates.</span></div>
+            <div class="alert alert-info alert-soft"><span>Template parse errors should fail during tests or package initialization, not during a half-completed remote deployment.</span></div>
+            <div class="alert alert-info alert-soft"><span>Existing dirty worktree changes should be left alone. The implementation should touch only resource-related files and tests.</span></div>
+          </div>
+        </div>
+        <div class="rounded-box border border-base-content/10 bg-base-100 p-5">
+          <h3 class="mb-3 font-bold">Non-goals</h3>
+          <ul class="list-disc space-y-2 pl-5 text-sm text-base-content/75">
+            <li>No image version changes.</li>
+            <li>No remote path changes under <span class="mono">/opt/aegisnode</span> or <span class="mono">/etc/aegisnode</span>.</li>
+            <li>No changes to user-owned configuration repository layout.</li>
+            <li>No Dockerfile work unless a Dockerfile is introduced or discovered.</li>
+            <li>No rewrite to YAML encoders or a new deployment abstraction as part of this refactor.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section-anchor mt-10" id="review">
+      <div class="rounded-box border border-primary/40 bg-base-100 p-5 lg:p-6">
+        <div class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h2 class="text-2xl font-bold">Review Choices</h2>
+            <p class="text-sm text-base-content/65">Pick the direction you want before implementation. These controls queue a concise prompt back to the agent.</p>
+          </div>
+          <span class="badge badge-primary badge-soft">Feedback requested</span>
+        </div>
+
+        <form class="decision-card grid gap-4 lg:grid-cols-3" data-lavish-question="resources-refactor-choices" id="decision-form">
+          <fieldset class="fieldset rounded-box border border-base-content/10 bg-base-200 p-4">
+            <legend class="fieldset-legend">Extraction scope</legend>
+            <label class="label cursor-pointer items-start justify-start gap-3">
+              <input class="radio radio-primary" type="radio" name="scope" value="balanced" checked>
+              <span><strong>Balanced</strong><br><span class="text-sm text-base-content/65">Files and larger scripts only.</span></span>
+            </label>
+            <label class="label cursor-pointer items-start justify-start gap-3">
+              <input class="radio radio-primary" type="radio" name="scope" value="maximal">
+              <span><strong>Maximal</strong><br><span class="text-sm text-base-content/65">Almost all shell fragments.</span></span>
+            </label>
+            <label class="label cursor-pointer items-start justify-start gap-3">
+              <input class="radio radio-primary" type="radio" name="scope" value="compose-yaml-first">
+              <span><strong>Compose/YAML first</strong><br><span class="text-sm text-base-content/65">Smallest first pass.</span></span>
+            </label>
+          </fieldset>
+
+          <fieldset class="fieldset rounded-box border border-base-content/10 bg-base-200 p-4">
+            <legend class="fieldset-legend">Embed shape</legend>
+            <label class="label cursor-pointer items-start justify-start gap-3">
+              <input class="radio radio-primary" type="radio" name="embed_shape" value="subpackage" checked>
+              <span><strong>resources package</strong><br><span class="text-sm text-base-content/65"><span class="mono">resources.FS</span> plus constants.</span></span>
+            </label>
+            <label class="label cursor-pointer items-start justify-start gap-3">
+              <input class="radio radio-primary" type="radio" name="embed_shape" value="root-embed">
+              <span><strong>root embed file</strong><br><span class="text-sm text-base-content/65"><span class="mono">resources.go</span> in package main.</span></span>
+            </label>
+          </fieldset>
+
+          <fieldset class="fieldset rounded-box border border-base-content/10 bg-base-200 p-4">
+            <legend class="fieldset-legend">Script organization</legend>
+            <label class="label cursor-pointer items-start justify-start gap-3">
+              <input class="radio radio-primary" type="radio" name="script_org" value="shared-partials" checked>
+              <span><strong>Shared partials</strong><br><span class="text-sm text-base-content/65">Only for reused login/Dockhand helpers.</span></span>
+            </label>
+            <label class="label cursor-pointer items-start justify-start gap-3">
+              <input class="radio radio-primary" type="radio" name="script_org" value="standalone-scripts">
+              <span><strong>Standalone scripts</strong><br><span class="text-sm text-base-content/65">Repeat prelude code per script for readability.</span></span>
+            </label>
+          </fieldset>
+
+          <fieldset class="fieldset lg:col-span-3">
+            <legend class="fieldset-legend">Constraints or changes</legend>
+            <textarea class="textarea textarea-bordered min-h-28 w-full" name="notes" placeholder="Add anything you want changed before implementation."></textarea>
+          </fieldset>
+
+          <div class="flex flex-wrap items-center gap-3 lg:col-span-3">
+            <button class="btn btn-primary" type="submit">Queue selected direction</button>
+            <button class="btn btn-ghost" type="button" id="queue-default">Queue recommended plan</button>
+            <span class="text-sm text-base-content/60" id="queue-status">Nothing queued yet.</span>
+          </div>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    function queuePrompt(message, options) {
+      if (window.lavish && typeof window.lavish.queuePrompt === "function") {
+        window.lavish.queuePrompt(message, options || {});
+        return true;
+      }
+      return false;
+    }
+
+    function formValues(form) {
+      const data = new FormData(form);
+      return {
+        scope: data.get("scope"),
+        embedShape: data.get("embed_shape"),
+        scriptOrg: data.get("script_org"),
+        notes: String(data.get("notes") || "").trim()
+      };
+    }
+
+    function describeChoice(values) {
+      const notes = values.notes ? "\nNotes: " + values.notes : "";
+      return "Approve resources refactor plan with scope=" + values.scope +
+        ", embed_shape=" + values.embedShape +
+        ", script_org=" + values.scriptOrg + "." + notes;
+    }
+
+    const form = document.getElementById("decision-form");
+    const status = document.getElementById("queue-status");
+
+    form.addEventListener("submit", function(event) {
+      event.preventDefault();
+      const values = formValues(form);
+      const message = describeChoice(values);
+      queuePrompt(message, {
+        tag: "resources-refactor-choice",
+        text: "Resources refactor: " + values.scope + ", " + values.embedShape + ", " + values.scriptOrg,
+        element: form,
+        queueKey: "resources-refactor-choice",
+        data: values
+      });
+      status.textContent = "Queued: " + values.scope + " / " + values.embedShape + " / " + values.scriptOrg;
+    });
+
+    document.getElementById("queue-default").addEventListener("click", function() {
+      form.querySelector("input[name='scope'][value='balanced']").checked = true;
+      form.querySelector("input[name='embed_shape'][value='subpackage']").checked = true;
+      form.querySelector("input[name='script_org'][value='shared-partials']").checked = true;
+      const values = formValues(form);
+      const message = describeChoice(values);
+      queuePrompt(message, {
+        tag: "resources-refactor-recommended",
+        text: "Use recommended resources refactor plan",
+        element: form,
+        queueKey: "resources-refactor-choice",
+        data: values
+      });
+      status.textContent = "Queued the recommended plan.";
+    });
+  </script>
+</body>
+</html>

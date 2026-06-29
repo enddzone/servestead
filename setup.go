@@ -444,6 +444,7 @@ type profileSetupModel struct {
 	stackServiceTable        table.Model
 	stackCompose             string
 	stackOriginalName        string
+	stackMetadataMissing     bool
 	stackResources           []stackPublicResource
 	stackResourceTable       table.Model
 	stackResourceInputs      []textinput.Model
@@ -692,8 +693,12 @@ func dashboardStageComplete(stage string, completed map[string]bool) bool {
 func newStackTable(stacks []editableStack, baseDomain string, state *ProfileState) table.Model {
 	rows := make([]table.Row, 0, len(stacks))
 	for _, stack := range stacks {
+		status := standaloneStackStatus(stack.Name, state)
 		resource := "(private)"
-		if len(stack.Metadata.PublicResources) == 1 {
+		if stack.MetadataMissing {
+			status = "draft"
+			resource = "needs review; press enter"
+		} else if len(stack.Metadata.PublicResources) == 1 {
 			public := stack.Metadata.PublicResources[0]
 			host := public.Subdomain
 			if baseDomain != "" {
@@ -703,7 +708,7 @@ func newStackTable(stacks []editableStack, baseDomain string, state *ProfileStat
 		} else if len(stack.Metadata.PublicResources) > 1 {
 			resource = fmt.Sprintf("%d public resources", len(stack.Metadata.PublicResources))
 		}
-		rows = append(rows, table.Row{stack.Name, standaloneStackStatus(stack.Name, state), resource})
+		rows = append(rows, table.Row{stack.Name, status, resource})
 	}
 	return table.New(
 		table.WithColumns([]table.Column{
@@ -732,6 +737,19 @@ func standaloneStackStatus(name string, state *ProfileState) string {
 		return stageStatusComplete
 	}
 	return "unknown"
+}
+
+func firstStackMissingMetadata(stacks []editableStack) (editableStack, bool) {
+	for _, stack := range stacks {
+		if stack.MetadataMissing {
+			return stack, true
+		}
+	}
+	return editableStack{}, false
+}
+
+func stackNeedsMetadataMessage(name string) string {
+	return fmt.Sprintf("stack %s needs review; press enter, then ctrl+s to create %s", name, stackMetadataFilename)
 }
 
 func truncateForTable(value string, width int) string {
@@ -1235,6 +1253,7 @@ func (model profileSetupModel) loadStackCompose(selectedPath string) (tea.Model,
 	model.stackCompose = string(compose)
 	model.stackServices = services
 	model.stackOriginalName = ""
+	model.stackMetadataMissing = false
 	model.stackResources = nil
 	model.stackResourceTable = newStackResourceTable(nil)
 	model.stackServiceTable = newStackServiceTable(services, nil)
@@ -1287,6 +1306,10 @@ func (model profileSetupModel) updateStacks(key tea.KeyMsg) (tea.Model, tea.Cmd)
 			model.err = "no stack selected"
 			return model, nil
 		}
+		if stack.MetadataMissing {
+			model.err = stackNeedsMetadataMessage(stack.Name)
+			return model, nil
+		}
 		if model.stackGitStatus != "clean" {
 			model.err = "stack changes are uncommitted; press v to review, g to stage, and c to commit"
 			return model, nil
@@ -1330,11 +1353,19 @@ func (model profileSetupModel) updateStacks(key tea.KeyMsg) (tea.Model, tea.Cmd)
 		model.stackNotice = "All changes under stacks/ are staged."
 		model.refreshStacks()
 	case "c", "C":
+		if stack, ok := firstStackMissingMetadata(model.stacks); ok {
+			model.err = stackNeedsMetadataMessage(stack.Name)
+			return model, nil
+		}
 		model.stackCommitInput.SetValue("")
 		model.stackCommitInput.Focus()
 		model.err = ""
 		model.screen = profileSetupScreenStackCommit
 	case "y", "Y":
+		if stack, ok := firstStackMissingMetadata(model.stacks); ok {
+			model.err = stackNeedsMetadataMessage(stack.Name)
+			return model, nil
+		}
 		switch {
 		case model.stackGitStatus != "clean":
 			model.err = "stack changes are uncommitted; press v to review, g to stage, and c to commit"
@@ -1350,6 +1381,10 @@ func (model profileSetupModel) updateStacks(key tea.KeyMsg) (tea.Model, tea.Cmd)
 			return model, tea.Quit
 		}
 	case "p", "P":
+		if stack, ok := firstStackMissingMetadata(model.stacks); ok {
+			model.err = stackNeedsMetadataMessage(stack.Name)
+			return model, nil
+		}
 		repositoryPath, err := model.selectedRepositoryPath()
 		if err != nil {
 			model.err = err.Error()
@@ -1508,7 +1543,7 @@ func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
 		}
 	}
 	action := "updated"
-	if model.stackOriginalName == "" {
+	if model.stackOriginalName == "" || model.stackMetadataMissing {
 		action = "added"
 	}
 	model.stackNotice = fmt.Sprintf("Stack %s. Press v to review the diff, g to stage, then c to commit.", action)
@@ -1876,6 +1911,7 @@ func stackResourceFromInputs(inputs []textinput.Model) (stackPublicResource, err
 func (model *profileSetupModel) openStackEditor(stack editableStack) {
 	options := stackAddOptions{Name: stack.Name}
 	model.stackOriginalName = stack.Name
+	model.stackMetadataMissing = stack.MetadataMissing
 	repositoryPath, _ := model.selectedRepositoryPath()
 	model.stackComposePath = filepath.Join(repositoryPath, "stacks", stack.Name, "compose.yaml")
 	model.stackCompose = stack.Compose
@@ -2112,6 +2148,14 @@ func (model *profileSetupModel) refreshStacks() {
 		model.stackHead = ""
 		model.stackNeedsPush = false
 		model.stackSyncStatus = "commit required"
+		model.err = ""
+		return
+	}
+	if stack, ok := firstStackMissingMetadata(stacks); ok {
+		model.stackHead = ""
+		model.stackNeedsPush = false
+		model.stackSyncStatus = "review required"
+		model.stackNotice = stackNeedsMetadataMessage(stack.Name)
 		model.err = ""
 		return
 	}
@@ -2639,12 +2683,14 @@ func (model profileSetupModel) stacksView() string {
 			advice = " • review, stage, and commit first"
 		} else if model.stackSyncStatus == "push required" {
 			advice = " • press p to push first"
+		} else if model.stackSyncStatus == "review required" {
+			advice = " • press enter and save metadata first"
 		}
 		builder.WriteString(setupHelpStyle.Render(advice))
 		builder.WriteString("\n\n")
 	}
 	if len(model.stacks) == 0 {
-		builder.WriteString("No application stacks configured. Press a to add one.\n")
+		builder.WriteString("No application stacks configured. Press a to import a Compose file, or place one at stacks/<name>/compose.yaml.\n")
 	} else {
 		builder.WriteString(model.stackTable.View())
 	}
@@ -2679,6 +2725,8 @@ func (model profileSetupModel) stackEditorView() string {
 	title := "Edit stack"
 	if model.stackOriginalName == "" {
 		title = "Add stack"
+	} else if model.stackMetadataMissing {
+		title = "Review stack"
 	}
 	builder.WriteString(title + "\n")
 	builder.WriteString(setupHelpStyle.Render("The Compose file is preserved. Add zero or more Pangolin public resources; zero keeps the stack private."))

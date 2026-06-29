@@ -850,6 +850,61 @@ public_resources:
 	}
 }
 
+func TestProfileStackManagerReviewsComposeOnlyStack(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init")
+	stackDirectory := filepath.Join(repository, "stacks", "seerr")
+	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, "compose.yaml"), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{Runs: map[string]SetupRun{}}
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID: "profile-1", IP: "203.0.113.10", BaseDomain: "example.com",
+			ConfigRepositoryPath: repository,
+		},
+		State: state,
+	}})
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenStacks
+	model.refreshStacks()
+	if model.err != "" {
+		t.Fatal(model.err)
+	}
+	if len(model.stacks) != 1 || !model.stacks[0].MetadataMissing {
+		t.Fatalf("compose-only stack was not shown as a draft: %+v", model.stacks)
+	}
+	view := model.stacksView()
+	if !strings.Contains(view, "draft") || !strings.Contains(view, "needs review") {
+		t.Fatalf("draft stack guidance missing:\n%s", view)
+	}
+	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	blocked := updated.(profileSetupModel)
+	if command != nil || blocked.done || !strings.Contains(blocked.err, "needs review") {
+		t.Fatalf("draft deployment was not blocked: %+v", blocked)
+	}
+	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyEnter})
+	reviewing := updated.(profileSetupModel)
+	if command != nil || reviewing.screen != profileSetupScreenStackEditor || !reviewing.stackMetadataMissing {
+		t.Fatalf("draft stack did not open for review: %+v", reviewing)
+	}
+	updated, command = reviewing.updateStackEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
+	saved := updated.(profileSetupModel)
+	if command != nil || saved.screen != profileSetupScreenStacks || saved.err != "" {
+		t.Fatalf("draft stack did not save: %+v", saved)
+	}
+	if _, err := os.Stat(filepath.Join(stackDirectory, stackMetadataFilename)); err != nil {
+		t.Fatalf("metadata was not created: %v", err)
+	}
+	if len(saved.stacks) != 1 || saved.stacks[0].MetadataMissing {
+		t.Fatalf("saved stack still appears as draft: %+v", saved.stacks)
+	}
+}
+
 func TestProfileSetupUsesAvailableTerminalHeight(t *testing.T) {
 	model := newProfileSetupModel(nil)
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 140, Height: 60})

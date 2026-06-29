@@ -70,10 +70,11 @@ type stackAddOptions struct {
 }
 
 type editableStack struct {
-	Name     string
-	Compose  string
-	Metadata stackMetadata
-	Services []composeServiceSummary
+	Name            string
+	Compose         string
+	Metadata        stackMetadata
+	Services        []composeServiceSummary
+	MetadataMissing bool
 }
 
 func loadEditableStacks(repositoryPath string) ([]editableStack, error) {
@@ -87,7 +88,17 @@ func loadEditableStacks(repositoryPath string) ([]editableStack, error) {
 	}
 	stacks := []editableStack{}
 	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == "observability" {
+		if !entry.IsDir() {
+			if isStackComposeFilename(entry.Name()) {
+				return nil, fmt.Errorf(
+					"compose file %s is outside a stack directory; move it to %s or press a in setup to import it",
+					filepath.Join("stacks", entry.Name()),
+					filepath.Join("stacks", "<stack-name>", "compose.yaml"),
+				)
+			}
+			continue
+		}
+		if entry.Name() == "observability" {
 			continue
 		}
 		if !stackSlugPattern.MatchString(entry.Name()) {
@@ -96,6 +107,17 @@ func loadEditableStacks(repositoryPath string) ([]editableStack, error) {
 		directory := filepath.Join(stacksDirectory, entry.Name())
 		compose, err := os.ReadFile(filepath.Join(directory, "compose.yaml"))
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				children, readErr := os.ReadDir(directory)
+				if readErr == nil && len(children) == 0 {
+					continue
+				}
+				return nil, fmt.Errorf(
+					"stack %s is incomplete: expected %s; move a Compose file there or press a in setup to import one",
+					entry.Name(),
+					filepath.Join("stacks", entry.Name(), "compose.yaml"),
+				)
+			}
 			return nil, fmt.Errorf("stack %s: read compose.yaml: %w", entry.Name(), err)
 		}
 		services, err := inspectComposeServices(compose)
@@ -103,22 +125,37 @@ func loadEditableStacks(repositoryPath string) ([]editableStack, error) {
 			return nil, fmt.Errorf("stack %s: %w", entry.Name(), err)
 		}
 		metadataData, err := os.ReadFile(filepath.Join(directory, stackMetadataFilename))
+		metadataMissing := false
+		metadata := stackMetadata{Version: 1}
 		if err != nil {
-			return nil, fmt.Errorf("stack %s: read %s: %w", entry.Name(), stackMetadataFilename, err)
-		}
-		var metadata stackMetadata
-		if err := yaml.Unmarshal(metadataData, &metadata); err != nil {
-			return nil, fmt.Errorf("stack %s metadata: %w", entry.Name(), err)
-		}
-		if err := validateStackMetadata(entry.Name(), metadata, services); err != nil {
-			return nil, fmt.Errorf("stack %s metadata: %w", entry.Name(), err)
+			if !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("stack %s: read %s: %w", entry.Name(), stackMetadataFilename, err)
+			}
+			metadataMissing = true
+		} else {
+			if err := yaml.Unmarshal(metadataData, &metadata); err != nil {
+				return nil, fmt.Errorf("stack %s metadata: %w", entry.Name(), err)
+			}
+			if err := validateStackMetadata(entry.Name(), metadata, services); err != nil {
+				return nil, fmt.Errorf("stack %s metadata: %w", entry.Name(), err)
+			}
 		}
 		stacks = append(stacks, editableStack{
 			Name: entry.Name(), Compose: string(compose), Metadata: metadata, Services: services,
+			MetadataMissing: metadataMissing,
 		})
 	}
 	sort.Slice(stacks, func(i, j int) bool { return stacks[i].Name < stacks[j].Name })
 	return stacks, nil
+}
+
+func isStackComposeFilename(name string) bool {
+	switch strings.ToLower(name) {
+	case "compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml":
+		return true
+	default:
+		return false
+	}
 }
 
 func writeEditableStack(repositoryPath, originalName string, options stackAddOptions, compose []byte) error {
