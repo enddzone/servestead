@@ -11,8 +11,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/servestead .
 
-FROM scratch
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+FROM cgr.dev/chainguard/git:latest-glibc
 COPY --from=build /out/servestead /servestead
 
 USER 65532:65532
