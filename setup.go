@@ -428,7 +428,7 @@ type profileSetupModel struct {
 	singleStage              string
 	pangolinStatus           pangolinRegistrationStatus
 	pangolinError            string
-	showPangolinCredentials  bool
+	showPangolinAccess       bool
 	fresh                    bool
 	inputs                   []textinput.Model
 	advanced                 []textinput.Model
@@ -998,8 +998,8 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 		model.err = ""
 		model.screen = profileSetupScreenDeleteConfirm
 	case "p", "P":
-		if model.selectedProfileHasPangolinCredentials() {
-			model.showPangolinCredentials = !model.showPangolinCredentials
+		if model.selectedProfileHasPangolinAccess() {
+			model.showPangolinAccess = !model.showPangolinAccess
 		}
 	case "c", "C":
 		return model, model.checkPangolinRegistration()
@@ -2392,7 +2392,7 @@ func (model *profileSetupModel) storeFocusedInputs(inputs []textinput.Model, adv
 func (model *profileSetupModel) refreshDashboard() {
 	model.pangolinStatus = pangolinRegistrationUnknown
 	model.pangolinError = ""
-	model.showPangolinCredentials = false
+	model.showPangolinAccess = false
 	model.stacks = nil
 	model.stackGitStatus = ""
 	model.stackHead = ""
@@ -2434,11 +2434,14 @@ func (model *profileSetupModel) checkPangolinRegistration() tea.Cmd {
 	}
 }
 
-func (model profileSetupModel) selectedProfileHasPangolinCredentials() bool {
+func (model profileSetupModel) selectedProfileHasPangolinAccess() bool {
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
 		return false
 	}
 	choice := model.profiles[model.selectedIndex]
+	if model.pangolinStatus == pangolinRegistrationIncomplete {
+		return choice.Secrets.PangolinSetupToken != ""
+	}
 	return choice.Secrets.PangolinAdminPassword != "" &&
 		firstNonEmpty(choice.Profile.PangolinAdminEmail, choice.Profile.LetsEncryptEmail) != ""
 }
@@ -2617,12 +2620,12 @@ func (model profileSetupModel) View() string {
 	}
 	builder.WriteString("\n\n")
 	builder.WriteString(model.help.View(profileSetupHelp{
-		screen:                 model.screen,
-		hasProfile:             model.selectedIndex >= 0,
-		hasPangolinCredentials: model.selectedProfileHasPangolinCredentials(),
-		stackComposeManual:     model.stackComposeManual,
-		stackEnvironmentMode:   model.stackEnvironmentMode,
-		stackEditorFocus:       model.focus,
+		screen:               model.screen,
+		hasProfile:           model.selectedIndex >= 0,
+		hasPangolinAccess:    model.selectedProfileHasPangolinAccess(),
+		stackComposeManual:   model.stackComposeManual,
+		stackEnvironmentMode: model.stackEnvironmentMode,
+		stackEditorFocus:     model.focus,
 	}))
 	return builder.String()
 }
@@ -2891,17 +2894,30 @@ func (model profileSetupModel) pangolinRegistrationView(choice profileChoice) st
 	if !proxyComplete {
 		return builder.String()
 	}
+	if model.pangolinStatus == pangolinRegistrationIncomplete {
+		if choice.Secrets.PangolinSetupToken == "" {
+			builder.WriteString("\n")
+			builder.WriteString(setupWarningStyle.Render("No saved setup token. Run Platform once to generate and deploy one."))
+			return builder.String()
+		}
+		if model.showPangolinAccess {
+			builder.WriteString("\n")
+			printPangolinInitialSetupAccess(&builder, choice.Profile.BaseDomain, choice.Secrets.PangolinSetupToken)
+		} else {
+			builder.WriteString("\n")
+			builder.WriteString(setupHelpStyle.Render("Press p to reveal the saved setup token and initial-setup URL."))
+		}
+		return builder.String()
+	}
 	username := firstNonEmpty(choice.Profile.PangolinAdminEmail, choice.Profile.LetsEncryptEmail)
 	if choice.Secrets.PangolinAdminPassword == "" || username == "" {
 		builder.WriteString("\n")
 		builder.WriteString(setupWarningStyle.Render("No saved Pangolin administrator credentials. Enter the current email and password in Advanced setup before running Platform, Observability, or stacks."))
 		return builder.String()
 	}
-	if model.showPangolinCredentials {
+	if model.showPangolinAccess {
 		builder.WriteString("\n")
-		builder.WriteString(fmt.Sprintf("Pangolin URL: https://pangolin.%s\n", choice.Profile.BaseDomain))
-		builder.WriteString(fmt.Sprintf("Username: %s\n", username))
-		builder.WriteString(fmt.Sprintf("Password: %s", choice.Secrets.PangolinAdminPassword))
+		printPangolinAdminCredentials(&builder, choice.Profile, choice.Secrets)
 	} else {
 		builder.WriteString("\n")
 		builder.WriteString(setupHelpStyle.Render("Press p to reveal the saved Pangolin admin username and password."))
@@ -2998,12 +3014,12 @@ func (model profileSetupModel) deleteConfirmView() string {
 }
 
 type profileSetupHelp struct {
-	screen                 profileSetupScreen
-	hasProfile             bool
-	hasPangolinCredentials bool
-	stackComposeManual     bool
-	stackEnvironmentMode   stackEnvironmentMode
-	stackEditorFocus       int
+	screen               profileSetupScreen
+	hasProfile           bool
+	hasPangolinAccess    bool
+	stackComposeManual   bool
+	stackEnvironmentMode stackEnvironmentMode
+	stackEditorFocus     int
 }
 
 func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
@@ -3030,8 +3046,8 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 			bindings = append(bindings, key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "fresh")))
 			bindings = append(bindings, key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete")))
 		}
-		if helpMap.hasPangolinCredentials {
-			bindings = append(bindings, key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "credentials")))
+		if helpMap.hasPangolinAccess {
+			bindings = append(bindings, key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "reveal")))
 		}
 		return bindings
 	case profileSetupScreenIntake:

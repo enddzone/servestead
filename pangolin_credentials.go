@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"strings"
 )
+
+var savedPangolinInitialSetupComplete = func(ctx context.Context, dashboardURL string) (bool, error) {
+	return pangolinInitialSetupComplete(ctx, pangolinRegistrationHTTPClient, dashboardURL)
+}
 
 func runPangolinCredentials(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("pangolin-credentials", flag.ContinueOnError)
@@ -57,11 +62,27 @@ func printSavedPangolinCredentials(store ProfileStore, profileID, ip string, out
 	if err != nil {
 		return err
 	}
+	if profile.BaseDomain != "" && secrets.PangolinSetupToken != "" {
+		complete, err := savedPangolinInitialSetupComplete(context.Background(), "https://pangolin."+profile.BaseDomain)
+		if err == nil && !complete {
+			printPangolinInitialSetupAccess(output, profile.BaseDomain, secrets.PangolinSetupToken)
+			return nil
+		}
+	}
 	if secrets.PangolinAdminPassword == "" {
 		return errors.New("the saved profile does not have Pangolin administrator credentials; run its proxy stage")
 	}
+	printPangolinAdminCredentials(output, profile, secrets)
+	return nil
+}
+
+func printPangolinAdminCredentials(output io.Writer, profile Profile, secrets ProfileSecrets) {
 	fmt.Fprintf(output, "Pangolin URL: https://pangolin.%s\n", profile.BaseDomain)
 	fmt.Fprintf(output, "Username: %s\n", firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail))
 	fmt.Fprintf(output, "Password: %s\n", secrets.PangolinAdminPassword)
-	return nil
+}
+
+func printPangolinInitialSetupAccess(output io.Writer, baseDomain, setupToken string) {
+	fmt.Fprintf(output, "Pangolin initial setup: https://pangolin.%s/auth/initial-setup\n", baseDomain)
+	fmt.Fprintf(output, "Setup token: %s\n", setupToken)
 }
