@@ -1,7 +1,6 @@
 package main
 
 import (
-	"aegisnode/resources"
 	"context"
 	"errors"
 	"flag"
@@ -9,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"servestead/resources"
 	"strings"
 )
 
@@ -30,7 +30,7 @@ func runNetwork(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	flags.SetOutput(stderr)
 	config := networkConfig{}
 	flags.StringVar(&config.Host, "host", "", "target VPS IPv4 address or hostname")
-	flags.StringVar(&config.SSHUser, "ssh-user", "aegisadmin", "administrative SSH user")
+	flags.StringVar(&config.SSHUser, "ssh-user", "servestead", "administrative SSH user")
 	flags.StringVar(&config.PrivateKeyPath, "private-key", "", "path to the administrative private key")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -103,7 +103,7 @@ func networkTasks(config networkConfig) []Task {
 	}
 	tasks = append(tasks,
 		Task{Name: "Write Docker daemon config", Apply: remoteWriteFileCommand("/etc/docker/daemon.json", dockerDaemonConfig(), "root", "root", 0644)},
-		Task{Name: "Enable IPv4 forwarding", Apply: remoteWriteFileCommand("/etc/sysctl.d/98-aegisnode-forwarding.conf", "net.ipv4.ip_forward = 1\n", "root", "root", 0644)},
+		Task{Name: "Enable IPv4 forwarding", Apply: remoteWriteFileCommand("/etc/sysctl.d/98-servestead-forwarding.conf", "net.ipv4.ip_forward = 1\n", "root", "root", 0644)},
 		Task{Name: "Apply IPv4 forwarding", Apply: commandScript("sysctl --system")},
 		Task{Name: "Configure UFW masquerade translations", Apply: ufwMasqueradeCommand()},
 		Task{Name: "Configure UFW default policy and routes", Apply: ufwPolicyCommand(sshPort)},
@@ -146,7 +146,7 @@ func ufwMasqueradeCommand() string {
 	return commandScript(
 		`egress_interface="$(ip -4 route show default 0.0.0.0/0 | awk '{print $5; exit}')"`,
 		`test -n "$egress_interface"`,
-		installUFWMasqueradeBlockCommand("AegisNode UFW MASQUERADE TRANSLATIONS", "172.17.0.0/16", "172.18.0.0/16"),
+		installUFWMasqueradeBlockCommand("Servestead UFW MASQUERADE TRANSLATIONS", "172.17.0.0/16", "172.18.0.0/16"),
 	)
 }
 

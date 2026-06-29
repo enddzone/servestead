@@ -12,26 +12,26 @@ import (
 	"time"
 )
 
-const usage = `AegisNode provisions and hardens Ubuntu VPS instances.
+const usage = `Servestead provisions and hardens Ubuntu VPS instances.
 
 Usage:
-  aegisnode setup
+  servestead setup
 
 Direct commands:
-  aegisnode keygen
-  aegisnode provision --provider <hetzner|digitalocean> --name <name> --ssh-key <provider-key>
-  aegisnode bootstrap --host <ipv4> --admin-public-key <path> --private-key <path>
-  aegisnode harden --host <ipv4> --private-key <path>
-  aegisnode network --host <ipv4> --private-key <path>
-  aegisnode proxy --host <ipv4> --private-key <path> --domain <domain> --email <email> --server-secret <secret>
-  aegisnode pangolin-token (--profile <id> | --ip <ipv4>)
-  aegisnode pangolin-credentials --profile <id>
-  aegisnode stack add --profile <id> --compose <path> [--publish <service:port:subdomain[:id]> ...] [--env-file <path>]
-  aegisnode stack env set --profile <id> --stack <name> --file <path>
-  aegisnode stack env remove --profile <id> --stack <name>
-  aegisnode doctor
+  servestead keygen
+  servestead provision --provider <hetzner|digitalocean> --name <name> --ssh-key <provider-key>
+  servestead bootstrap --host <ipv4> --admin-public-key <path> --private-key <path>
+  servestead harden --host <ipv4> --private-key <path>
+  servestead network --host <ipv4> --private-key <path>
+  servestead proxy --host <ipv4> --private-key <path> --domain <domain> --email <email> --server-secret <secret>
+  servestead pangolin-token (--profile <id> | --ip <ipv4>)
+  servestead pangolin-credentials --profile <id>
+  servestead stack add --profile <id> --compose <path> [--publish <service:port:subdomain[:id]> ...] [--env-file <path>]
+  servestead stack env set --profile <id> --stack <name> --file <path>
+  servestead stack env remove --profile <id> --stack <name>
+  servestead doctor
 
-Run "aegisnode <command> -help" for command-specific options.
+Run "servestead <command> -help" for command-specific options.
 `
 
 type getenvFunc func(string) string

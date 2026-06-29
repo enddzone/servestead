@@ -16,7 +16,7 @@ services:
     volumes:
       - {{ .ObservabilityStackDirectory }}/beszel_data:/beszel_data
     networks:
-      - {{ .AegisPublicNetwork }}
+      - {{ .ServesteadPublicNetwork }}
     labels:
 {{ range .BeszelLabels }}      - {{ . }}
 {{ end }}
@@ -37,7 +37,7 @@ services:
       - /sys:/host/sys:ro
       - /etc/os-release:/etc/os-release:ro
     networks:
-      - {{ .AegisPublicNetwork }}
+      - {{ .ServesteadPublicNetwork }}
 
   dozzle:
     image: {{ .DozzleImage }}
@@ -53,7 +53,7 @@ services:
     expose:
       - "8080"
     networks:
-      - {{ .AegisPublicNetwork }}
+      - {{ .ServesteadPublicNetwork }}
     labels:
 {{ range .DozzleLabels }}      - {{ . }}
 {{ end }}
@@ -76,7 +76,7 @@ services:
     volumes:
       - {{ .ObservabilityStackDirectory }}/dockhand_data:/app/data
     networks:
-      - {{ .AegisPublicNetwork }}
+      - {{ .ServesteadPublicNetwork }}
       - aegis-dockhand
     labels:
       - dockhand.update=false
@@ -110,7 +110,7 @@ services:
       - dockhand.notify=false
 
 networks:
-  {{ .AegisPublicNetwork }}:
+  {{ .ServesteadPublicNetwork }}:
     external: true
   aegis-dockhand:
     internal: true

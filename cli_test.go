@@ -12,7 +12,7 @@ func TestHelp(t *testing.T) {
 	if err := run(context.Background(), []string{"help"}, &stdout, &stderr, func(string) string { return "" }); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "aegisnode provision") || stderr.Len() != 0 {
+	if !strings.Contains(stdout.String(), "servestead provision") || stderr.Len() != 0 {
 		t.Fatalf("unexpected output: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }

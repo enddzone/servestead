@@ -56,15 +56,15 @@ func TestGenerateStackPangolinOverrideOwnsLabelsWithoutRewritingCompose(t *testi
 	}
 	for _, expected := range []string{
 		"ports: !reset []",
-		"- aegis-public",
+		"- servestead-public",
 		"dockhand.update=false",
 		"dockhand.notify=false",
-		"pangolin.public-resources.aegisnode-my-app-web.name=My App",
-		"pangolin.public-resources.aegisnode-my-app-web.full-domain=app.example.com",
-		"pangolin.public-resources.aegisnode-my-app-web.auth.sso-users[0]=admin@example.com",
-		"pangolin.public-resources.aegisnode-my-app-web.targets[0].hostname=web",
-		"pangolin.public-resources.aegisnode-my-app-web.targets[0].port=80",
-		"pangolin.public-resources.aegisnode-my-app-web.targets[0].healthcheck.path=/health",
+		"pangolin.public-resources.servestead-my-app-web.name=My App",
+		"pangolin.public-resources.servestead-my-app-web.full-domain=app.example.com",
+		"pangolin.public-resources.servestead-my-app-web.auth.sso-users[0]=admin@example.com",
+		"pangolin.public-resources.servestead-my-app-web.targets[0].hostname=web",
+		"pangolin.public-resources.servestead-my-app-web.targets[0].port=80",
+		"pangolin.public-resources.servestead-my-app-web.targets[0].healthcheck.path=/health",
 		"external: true",
 	} {
 		if !strings.Contains(override, expected) {
@@ -110,10 +110,10 @@ func TestGenerateStackPangolinOverrideGroupsMultipleResourcesByService(t *testin
 		t.Fatalf("web service should have one merged override entry:\n%s", override)
 	}
 	for _, expected := range []string{
-		"pangolin.public-resources.aegisnode-suite-site.full-domain=site.example.com",
-		"pangolin.public-resources.aegisnode-suite-admin.full-domain=admin.example.com",
-		"pangolin.public-resources.aegisnode-suite-api.full-domain=api.example.com",
-		"pangolin.public-resources.aegisnode-suite-admin.targets[0].port=8080",
+		"pangolin.public-resources.servestead-suite-site.full-domain=site.example.com",
+		"pangolin.public-resources.servestead-suite-admin.full-domain=admin.example.com",
+		"pangolin.public-resources.servestead-suite-api.full-domain=api.example.com",
+		"pangolin.public-resources.servestead-suite-admin.targets[0].port=8080",
 	} {
 		if !strings.Contains(override, expected) {
 			t.Fatalf("multi-resource override missing %q:\n%s", expected, override)
@@ -143,12 +143,12 @@ func TestPrivateStackGeneratesDockhandOnlyOverride(t *testing.T) {
 			t.Fatalf("private stack override missing %q:\n%s", expected, override)
 		}
 	}
-	if strings.Contains(override, "pangolin.public-resources") || strings.Contains(override, aegisPublicNetwork) {
+	if strings.Contains(override, "pangolin.public-resources") || strings.Contains(override, servesteadPublicNetwork) {
 		t.Fatalf("private stack override should not publish Pangolin resources:\n%s", override)
 	}
 	tasks := configuredStackTasks(observabilityConfig{}, configuredStack{
 		Name: "private", Override: override,
-	}, "aegisadmin")
+	}, "servestead")
 	for _, task := range tasks {
 		if strings.Contains(task.Name, "Pangolin") || strings.Contains(task.Apply, "docker stop aegis-newt") {
 			t.Fatalf("private stack unnecessarily reconciles Pangolin: %s", task.Name)
@@ -313,7 +313,7 @@ func TestStackEnvironmentIsStoredOutsideRepositoryAndSentOverStdin(t *testing.T)
 	stack := configuredStack{
 		Name: "site", Override: "services: {}\n", Environment: environment,
 	}
-	tasks := configuredStackTasks(observabilityConfig{}, stack, "aegisadmin")
+	tasks := configuredStackTasks(observabilityConfig{}, stack, "servestead")
 	var dataTask Task
 	var writeTask Task
 	joinedApply := ""
@@ -340,7 +340,7 @@ func TestStackEnvironmentIsStoredOutsideRepositoryAndSentOverStdin(t *testing.T)
 		strings.Contains(joinedApply, "secret-value") {
 		t.Fatal("environment value was not isolated to task stdin")
 	}
-	if !strings.Contains(joinedApply, "--env-file '/etc/aegisnode/stacks/site.env'") {
+	if !strings.Contains(joinedApply, "--env-file '/etc/servestead/stacks/site.env'") {
 		t.Fatalf("Compose commands do not use the managed environment:\n%s", joinedApply)
 	}
 }
@@ -455,7 +455,7 @@ func TestConfiguredStackTasksExplainValidationAndReconciliation(t *testing.T) {
 	tasks := configuredStackTasks(observabilityConfig{
 		RepositoryCommit: "commit", BaseDomain: "example.com",
 		AdminEmail: "admin@example.com", PangolinPassword: "password",
-	}, stack, "aegisadmin")
+	}, stack, "servestead")
 	names := make([]string, len(tasks))
 	for index, task := range tasks {
 		names[index] = task.Name
@@ -629,7 +629,7 @@ func TestStackRepositoryDiffStageAndCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"Untracked: stacks/site/compose.yaml", "services:", "aegisnode.yaml"} {
+	for _, expected := range []string{"Untracked: stacks/site/compose.yaml", "services:", "servestead.yaml"} {
 		if !strings.Contains(diff, expected) {
 			t.Fatalf("untracked diff missing %q:\n%s", expected, diff)
 		}
@@ -670,12 +670,12 @@ func TestStackRepositorySyncRemovesDeletedDeployments(t *testing.T) {
 	})
 	for _, expected := range []string{
 		".stack-*.deployment",
-		"/opt/aegisnode/generated/*.pangolin.yaml",
+		"/opt/servestead/generated/*.pangolin.yaml",
 		`desired=' kept '`,
 		`com.docker.compose.project="$project"`,
 		"docker rm -f",
-		`rm -f -- /opt/aegisnode/generated/"$name".pangolin.yaml`,
-		`'/etc/aegisnode/stacks'/"$name".env`,
+		`rm -f -- /opt/servestead/generated/"$name".pangolin.yaml`,
+		`'/etc/servestead/stacks'/"$name".env`,
 		`-X DELETE "$api/resource/$resource_id"`,
 		"docker start aegis-newt",
 	} {
@@ -712,7 +712,7 @@ func TestRunStackRepositorySyncIncludesCleanupAndCurrentStacks(t *testing.T) {
 	tasks := stackRepositoryReconcileTasks(observabilityConfig{
 		BaseDomain: "example.com", AdminEmail: "admin@example.com",
 		PangolinPassword: "password", RepositoryCommit: "commit", Stacks: []configuredStack{stack},
-	}, "aegisadmin")
+	}, "servestead")
 	if len(tasks) < 2 || tasks[0].Name != "Remove stacks deleted from committed configuration" {
 		t.Fatalf("sync does not begin with deleted-stack cleanup: %+v", tasks)
 	}
@@ -735,7 +735,7 @@ func TestDockhandGitStackReconciliationUsesCommittedGitOrigin(t *testing.T) {
 		RepositoryCommit: "abcdef1234567890",
 		Stacks:           []configuredStack{stack},
 	}
-	tasks := stackRepositoryReconcileTasks(config, "aegisadmin")
+	tasks := stackRepositoryReconcileTasks(config, "servestead")
 	names := strings.Join(taskNames(tasks), "\n")
 	joined := strings.Join(taskScripts(tasks), "\n")
 	for _, expected := range []string{
@@ -754,8 +754,8 @@ func TestDockhandGitStackReconciliationUsesCommittedGitOrigin(t *testing.T) {
 		`"name":"local-vps"`,
 		`"connectionType":"direct"`,
 		`"host":"dockhand-socket-proxy"`,
-		`"stackName":"aegisnode-site"`,
-		`"repoName":"aegisnode-site"`,
+		`"stackName":"servestead-site"`,
+		`"repoName":"servestead-site"`,
 		`"environmentId":0`,
 		`"url":"https://github.com/example/config.git"`,
 		`"branch":"main"`,

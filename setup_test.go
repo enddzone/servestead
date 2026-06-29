@@ -67,7 +67,7 @@ func TestRunSetupWithoutIPRequiresTerminal(t *testing.T) {
 }
 
 func TestSetupConfigFromInputs(t *testing.T) {
-	t.Setenv("AEGISNODE_TEST_HOME", "/tmp/aegis-home")
+	t.Setenv("SERVESTEAD_TEST_HOME", "/tmp/aegis-home")
 	model := setupModel{
 		mode:   setupModeBootstrapHarden,
 		inputs: setupInputs(setupModeBootstrapHarden),
@@ -75,8 +75,8 @@ func TestSetupConfigFromInputs(t *testing.T) {
 	values := []string{
 		"203.0.113.10",
 		"root",
-		"aegisadmin",
-		"$AEGISNODE_TEST_HOME/id_ed25519",
+		"servestead",
+		"$SERVESTEAD_TEST_HOME/id_ed25519",
 	}
 	for index, value := range values {
 		model.inputs[index].SetValue(value)
@@ -86,7 +86,7 @@ func TestSetupConfigFromInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Host != "203.0.113.10" || config.InitialSSHUser != "root" || config.AdminUser != "aegisadmin" {
+	if config.Host != "203.0.113.10" || config.InitialSSHUser != "root" || config.AdminUser != "servestead" {
 		t.Fatalf("unexpected config: %+v", config)
 	}
 	if config.AdminPublicKeyPath != "/tmp/aegis-home/id_ed25519.pub" || config.PrivateKeyPath != "/tmp/aegis-home/id_ed25519" {
@@ -95,12 +95,12 @@ func TestSetupConfigFromInputs(t *testing.T) {
 }
 
 func TestSetupProviderKeyConfigFromInputs(t *testing.T) {
-	t.Setenv("AEGISNODE_TEST_HOME", "/tmp/aegis-home")
+	t.Setenv("SERVESTEAD_TEST_HOME", "/tmp/aegis-home")
 	model := setupModel{
 		mode:   setupModeProviderKey,
 		inputs: setupInputs(setupModeProviderKey),
 	}
-	model.inputs[0].SetValue("$AEGISNODE_TEST_HOME/provider")
+	model.inputs[0].SetValue("$SERVESTEAD_TEST_HOME/provider")
 	model.inputs[1].SetValue("provider-comment")
 
 	config, err := model.configFromInputs()
@@ -117,7 +117,7 @@ func TestSetupPlanSummaryGivesGuidance(t *testing.T) {
 		Mode:               setupModeBootstrapHarden,
 		Host:               "203.0.113.10",
 		InitialSSHUser:     "root",
-		AdminUser:          "aegisadmin",
+		AdminUser:          "servestead",
 		PrivateKeyPath:     "/tmp/aegis-key",
 		AdminPublicKeyPath: "/tmp/aegis-key.pub",
 	})
@@ -130,15 +130,15 @@ func TestSetupPlanSummaryGivesGuidance(t *testing.T) {
 }
 
 func TestSetupNetworkConfigFromInputs(t *testing.T) {
-	t.Setenv("AEGISNODE_TEST_HOME", "/tmp/aegis-home")
+	t.Setenv("SERVESTEAD_TEST_HOME", "/tmp/aegis-home")
 	model := setupModel{
 		mode:   setupModeNetwork,
 		inputs: setupInputs(setupModeNetwork),
 	}
 	values := []string{
 		"203.0.113.10",
-		"aegisadmin",
-		"$AEGISNODE_TEST_HOME/id_ed25519",
+		"servestead",
+		"$SERVESTEAD_TEST_HOME/id_ed25519",
 	}
 	for index, value := range values {
 		model.inputs[index].SetValue(value)
@@ -148,7 +148,7 @@ func TestSetupNetworkConfigFromInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Host != "203.0.113.10" || config.AdminUser != "aegisadmin" || config.PrivateKeyPath != "/tmp/aegis-home/id_ed25519" {
+	if config.Host != "203.0.113.10" || config.AdminUser != "servestead" || config.PrivateKeyPath != "/tmp/aegis-home/id_ed25519" {
 		t.Fatalf("unexpected config: %+v", config)
 	}
 }
@@ -165,15 +165,15 @@ func TestSetupOptionsIncludeProxyMode(t *testing.T) {
 }
 
 func TestSetupProxyConfigFromInputs(t *testing.T) {
-	t.Setenv("AEGISNODE_TEST_HOME", "/tmp/aegis-home")
+	t.Setenv("SERVESTEAD_TEST_HOME", "/tmp/aegis-home")
 	model := setupModel{
 		mode:   setupModeProxy,
 		inputs: setupInputs(setupModeProxy),
 	}
 	values := []string{
 		"203.0.113.10",
-		"aegisadmin",
-		"$AEGISNODE_TEST_HOME/id_ed25519",
+		"servestead",
+		"$SERVESTEAD_TEST_HOME/id_ed25519",
 		"example.com",
 		"admin@example.com",
 	}
@@ -185,7 +185,7 @@ func TestSetupProxyConfigFromInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Host != "203.0.113.10" || config.AdminUser != "aegisadmin" || config.PrivateKeyPath != "/tmp/aegis-home/id_ed25519" {
+	if config.Host != "203.0.113.10" || config.AdminUser != "servestead" || config.PrivateKeyPath != "/tmp/aegis-home/id_ed25519" {
 		t.Fatalf("unexpected SSH config: %+v", config)
 	}
 	if config.BaseDomain != "example.com" || config.LetsEncryptEmail != "admin@example.com" || config.ServerSecret == "" || config.PangolinSetupToken == "" {
@@ -200,7 +200,7 @@ func TestSetupPlanSummaryIncludesProxyGuidance(t *testing.T) {
 	summary := setupPlanSummary(setupConfig{
 		Mode:             setupModeProxy,
 		Host:             "203.0.113.10",
-		AdminUser:        "aegisadmin",
+		AdminUser:        "servestead",
 		PrivateKeyPath:   "/tmp/aegis-key",
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
@@ -237,7 +237,7 @@ func TestRunSetupPlanRunsProxyMode(t *testing.T) {
 	err := runSetupPlan(context.Background(), setupConfig{
 		Mode:             setupModeProxy,
 		Host:             "203.0.113.10",
-		AdminUser:        "aegisadmin",
+		AdminUser:        "servestead",
 		PrivateKeyPath:   privateKey,
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
@@ -246,7 +246,7 @@ func TestRunSetupPlanRunsProxyMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(client.commands) != len(proxyTasks(proxyConfig{SSHUser: "aegisadmin", BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com", ServerSecret: "secret"})) {
+	if len(client.commands) != len(proxyTasks(proxyConfig{SSHUser: "servestead", BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com", ServerSecret: "secret"})) {
 		t.Fatalf("unexpected proxy command count: %d", len(client.commands))
 	}
 	if !strings.Contains(stdout.String(), "Step 1/1: deploy Pangolin and reverse proxy stack.") {
@@ -298,7 +298,7 @@ func TestPrepareCompletedLegacyProfileDoesNotInventUndeployedSetupToken(t *testi
 	profile, err := store.Create(Profile{
 		IP:               "203.0.113.10",
 		InitialSSHUser:   "root",
-		AdminUser:        "aegisadmin",
+		AdminUser:        "servestead",
 		PrivateKeyPath:   "/tmp/aegis-key",
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
@@ -341,7 +341,7 @@ func TestPrepareFailedProxyUsesExplicitPangolinPasswordOverride(t *testing.T) {
 	t.Setenv("PANGOLIN_ADMIN_PASSWORD", "existing-admin-password")
 	store := newFileProfileStore(t.TempDir())
 	profile, err := store.Create(Profile{
-		IP: "203.0.113.10", AdminUser: "aegisadmin", PrivateKeyPath: "/tmp/aegis-key",
+		IP: "203.0.113.10", AdminUser: "servestead", PrivateKeyPath: "/tmp/aegis-key",
 		BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com",
 	})
 	if err != nil {
@@ -459,7 +459,7 @@ func TestProfileSetupModelResumesSelectedProfile(t *testing.T) {
 			Name:             "production",
 			IP:               "203.0.113.10",
 			InitialSSHUser:   "root",
-			AdminUser:        "aegisadmin",
+			AdminUser:        "servestead",
 			PrivateKeyPath:   "/tmp/aegis-key",
 			BaseDomain:       "example.com",
 			LetsEncryptEmail: "admin@example.com",
@@ -926,7 +926,7 @@ func TestProfileSetupModelCollectsNewProfileInputs(t *testing.T) {
 	}
 	model.advanced[0].SetValue("production")
 	model.advanced[1].SetValue("ubuntu")
-	model.advanced[2].SetValue("aegisadmin")
+	model.advanced[2].SetValue("servestead")
 
 	options, err := model.optionsFromInputs()
 	if err != nil {
@@ -935,7 +935,7 @@ func TestProfileSetupModelCollectsNewProfileInputs(t *testing.T) {
 	if options.ProfileID != "" || options.IP != "203.0.113.10" || options.Name != "production" {
 		t.Fatalf("unexpected new profile options: %+v", options)
 	}
-	if options.InitialSSHUser != "ubuntu" || options.AdminUser != "aegisadmin" {
+	if options.InitialSSHUser != "ubuntu" || options.AdminUser != "servestead" {
 		t.Fatalf("unexpected advanced users: %+v", options)
 	}
 }
@@ -1017,7 +1017,7 @@ func TestProfileSetupModelFreshUsesAdminAsInitialUser(t *testing.T) {
 			Name:             "production",
 			IP:               "203.0.113.10",
 			InitialSSHUser:   "root",
-			AdminUser:        "aegisnode",
+			AdminUser:        "servestead",
 			PrivateKeyPath:   "/tmp/aegis-key",
 			BaseDomain:       "example.com",
 			LetsEncryptEmail: "admin@example.com",
@@ -1048,7 +1048,7 @@ func TestProfileSetupModelFreshUsesAdminAsInitialUser(t *testing.T) {
 	if !options.Fresh || options.ProfileID != "profile-1" {
 		t.Fatalf("fresh setup should keep source profile id for seeding: %+v", options)
 	}
-	if options.InitialSSHUser != "aegisnode" || options.AdminUser != "aegisnode" {
+	if options.InitialSSHUser != "servestead" || options.AdminUser != "servestead" {
 		t.Fatalf("fresh setup should use admin user for existing server login: %+v", options)
 	}
 }
@@ -1123,7 +1123,7 @@ func TestPrepareFreshProfileSeedsBootstrapFromExistingProfile(t *testing.T) {
 		Name:             "source",
 		IP:               "203.0.113.10",
 		InitialSSHUser:   "root",
-		AdminUser:        "aegisnode",
+		AdminUser:        "servestead",
 		PrivateKeyPath:   "/tmp/aegis-key",
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
@@ -1162,7 +1162,7 @@ func TestPrepareFreshProfileSeedsBootstrapFromExistingProfile(t *testing.T) {
 	if profile.ID == source.ID {
 		t.Fatalf("fresh setup reused source profile id: %+v", profile)
 	}
-	if config.InitialSSHUser != "aegisnode" || config.AdminUser != "aegisnode" {
+	if config.InitialSSHUser != "servestead" || config.AdminUser != "servestead" {
 		t.Fatalf("fresh setup did not inherit admin login: %+v", config)
 	}
 	if !completedSetupStages(state)["bootstrap"] {
@@ -1177,7 +1177,7 @@ func TestPrepareFreshProfileKeepsInitialUserWhenBootstrapNotComplete(t *testing.
 		Name:             "source",
 		IP:               "203.0.113.10",
 		InitialSSHUser:   "root",
-		AdminUser:        "aegisnode",
+		AdminUser:        "servestead",
 		PrivateKeyPath:   "/tmp/aegis-key",
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
@@ -1198,7 +1198,7 @@ func TestPrepareFreshProfileKeepsInitialUserWhenBootstrapNotComplete(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.InitialSSHUser != "root" || config.AdminUser != "aegisnode" {
+	if config.InitialSSHUser != "root" || config.AdminUser != "servestead" {
 		t.Fatalf("fresh setup should keep initial user until bootstrap is complete: %+v", config)
 	}
 	if completedSetupStages(state)["bootstrap"] {
@@ -1328,7 +1328,7 @@ func TestProfileRunModelRendersTaskProgressAndLogs(t *testing.T) {
 		setupConfig{
 			Host:               "203.0.113.10",
 			InitialSSHUser:     "root",
-			AdminUser:          "aegisadmin",
+			AdminUser:          "servestead",
 			PrivateKeyPath:     "/tmp/aegis-key",
 			AdminPublicKeyPath: "/tmp/aegis-key.pub",
 			BaseDomain:         "example.com",
@@ -1347,7 +1347,7 @@ func TestProfileRunModelRendersTaskProgressAndLogs(t *testing.T) {
 
 	view := model.View()
 	for _, expected := range []string{
-		"AegisNode setup run",
+		"Servestead setup run",
 		"production (203.0.113.10)",
 		"Tasks:",
 		"Current: Harden - Validate sysctl keys",
@@ -1364,10 +1364,10 @@ func TestProfileRunFailureRemainsInTUIOnEscape(t *testing.T) {
 	runErr := errors.New("uncommitted changes under stacks/ block deployment")
 	model := newProfileRunFailureModel(
 		Profile{Name: "production", IP: "203.0.113.10"},
-		setupConfig{Host: "203.0.113.10", ConfigRepositoryPath: "/tmp/aegisnode-config"},
+		setupConfig{Host: "203.0.113.10", ConfigRepositoryPath: "/tmp/servestead-config"},
 		nil,
 		"stacks",
-		"Preparing configuration repository: /tmp/aegisnode-config\n",
+		"Preparing configuration repository: /tmp/servestead-config\n",
 		runErr,
 		true,
 	)
@@ -1378,7 +1378,7 @@ func TestProfileRunFailureRemainsInTUIOnEscape(t *testing.T) {
 	for _, expected := range []string{
 		"Failed",
 		"Sync stacks",
-		"Preparing configuration repository: /tmp/aegisnode-config",
+		"Preparing configuration repository: /tmp/servestead-config",
 		runErr.Error(),
 		"stopped before remote execution",
 	} {
@@ -1433,7 +1433,7 @@ func TestProfileSetupModelSelectsSingleStageRun(t *testing.T) {
 			ID:             "profile-1",
 			Name:           "production",
 			IP:             "203.0.113.10",
-			AdminUser:      "aegisadmin",
+			AdminUser:      "servestead",
 			PrivateKeyPath: "/tmp/aegis-key",
 		},
 		State: ProfileState{
@@ -1515,7 +1515,7 @@ func TestPlatformStageRunsNetworkProxyAndObservability(t *testing.T) {
 		return clients[2], nil
 	}
 	config := setupConfig{
-		Host: "203.0.113.10", AdminUser: "aegisadmin", PrivateKeyPath: "/tmp/key",
+		Host: "203.0.113.10", AdminUser: "servestead", PrivateKeyPath: "/tmp/key",
 		BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com",
 		ServerSecret: "secret", PangolinSetupToken: "00000000000000000000000000000000",
 		PangolinAdminEmail: "admin@example.com",
@@ -1538,7 +1538,7 @@ func TestStackRepositoryStageRunsWhenAllStacksWereDeleted(t *testing.T) {
 		return client, nil
 	}
 	config := setupConfig{
-		Host: "203.0.113.10", AdminUser: "aegisadmin", PrivateKeyPath: "/tmp/key",
+		Host: "203.0.113.10", AdminUser: "servestead", PrivateKeyPath: "/tmp/key",
 		BaseDomain: "example.com", PangolinAdminEmail: "admin@example.com",
 	}
 	if err := runSetupStage(context.Background(), Profile{IP: config.Host}, config, "run-1", "stacks", nil, io.Discard, io.Discard); err != nil {
@@ -1564,7 +1564,7 @@ func TestSuccessfulStackRepositorySyncRecordsCommit(t *testing.T) {
 	}
 	store := newFileProfileStore(filepath.Join(directory, "profiles"))
 	profile, err := store.Create(Profile{
-		IP: "203.0.113.10", AdminUser: "aegisadmin", PrivateKeyPath: privateKey,
+		IP: "203.0.113.10", AdminUser: "servestead", PrivateKeyPath: privateKey,
 		BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com",
 		PangolinAdminEmail:   "admin@example.com",
 		ConfigRepositoryPath: filepath.Join(directory, "repository"),
@@ -1602,7 +1602,7 @@ func TestProfileSetupModelDashboardUsesVForReview(t *testing.T) {
 			Name:             "production",
 			IP:               "203.0.113.10",
 			InitialSSHUser:   "root",
-			AdminUser:        "aegisadmin",
+			AdminUser:        "servestead",
 			PrivateKeyPath:   "/tmp/aegis-key",
 			BaseDomain:       "example.com",
 			LetsEncryptEmail: "admin@example.com",
@@ -1665,7 +1665,7 @@ func TestPrepareProfileStageSetupDoesNotRequireProxyFieldsForHarden(t *testing.T
 		ID:             "profile-1",
 		Name:           "production",
 		IP:             "203.0.113.10",
-		AdminUser:      "aegisadmin",
+		AdminUser:      "servestead",
 		PrivateKeyPath: "/tmp/aegis-key",
 	})
 	if err != nil {
@@ -1692,7 +1692,7 @@ func TestRunProfileSetupStagePlanRerunsCompletedHardenStage(t *testing.T) {
 	}
 	client := &recordingRemoteClient{}
 	newHardeningRemoteClient = func(_ context.Context, config hardeningConfig, _, _ io.Writer) (remoteClient, error) {
-		if config.Host != "203.0.113.10" || config.SSHUser != "aegisadmin" || config.PrivateKeyPath != privateKey {
+		if config.Host != "203.0.113.10" || config.SSHUser != "servestead" || config.PrivateKeyPath != privateKey {
 			t.Fatalf("unexpected hardening config: %+v", config)
 		}
 		return client, nil
@@ -1703,7 +1703,7 @@ func TestRunProfileSetupStagePlanRerunsCompletedHardenStage(t *testing.T) {
 		ID:             "profile-1",
 		Name:           "production",
 		IP:             "203.0.113.10",
-		AdminUser:      "aegisadmin",
+		AdminUser:      "servestead",
 		PrivateKeyPath: privateKey,
 	})
 	if err != nil {

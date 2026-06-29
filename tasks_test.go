@@ -27,7 +27,7 @@ func taskNames(tasks []Task) []string {
 func TestRunTasksPrintsTaskNamesAndUsesPrivileges(t *testing.T) {
 	client := &recordingRemoteClient{}
 	var progress bytes.Buffer
-	err := runTasks(context.Background(), client, "aegisadmin", []Task{
+	err := runTasks(context.Background(), client, "servestead", []Task{
 		{Name: "Example task", Apply: "true"},
 	}, &progress)
 	if err != nil {

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"text/template"
 
-	"aegisnode/resources"
+	"servestead/resources"
 )
 
 func mustReadResource(resourcePath string) string {

@@ -25,27 +25,27 @@ func TestObservabilityComposeUsesPinnedReadOnlyServicesAndPangolinLabels(t *test
 		"TRUSTED_AUTH_HEADER: \"Remote-Email\"",
 		"DOCKER_HOST: \"tcp://socket-proxy:2375\"",
 		"DOCKER_HOST: \"tcp://dockhand-socket-proxy:2375\"",
-		"HOST_DATA_DIR: \"/opt/aegisnode/stacks/observability/dockhand_data\"",
+		"HOST_DATA_DIR: \"/opt/servestead/stacks/observability/dockhand_data\"",
 		"\"127.0.0.1:3003:3000\"",
 		"DOZZLE_AUTH_PROVIDER: \"forward-proxy\"",
 		"DOZZLE_ENABLE_ACTIONS: \"false\"",
 		"DOZZLE_ENABLE_SHELL: \"false\"",
-		"pangolin.public-resources.aegisnode-beszel.full-domain=beszel.example.com",
-		"pangolin.public-resources.aegisnode-dozzle.full-domain=dozzle.example.com",
-		"pangolin.public-resources.aegisnode-dockhand.full-domain=dockhand.example.com",
-		"pangolin.public-resources.aegisnode-beszel.auth.sso-users[0]=admin@example.com",
-		"pangolin.public-resources.aegisnode-beszel.targets[0].hostname=beszel",
-		"pangolin.public-resources.aegisnode-beszel.targets[0].healthcheck.enabled=true",
-		"pangolin.public-resources.aegisnode-beszel.targets[0].healthcheck.hostname=beszel",
-		"pangolin.public-resources.aegisnode-beszel.targets[0].healthcheck.port=8090",
-		"pangolin.public-resources.aegisnode-beszel.targets[0].healthcheck.scheme=http",
-		"pangolin.public-resources.aegisnode-beszel.targets[0].healthcheck.path=/",
-		"pangolin.public-resources.aegisnode-dozzle.targets[0].healthcheck.enabled=true",
-		"pangolin.public-resources.aegisnode-dozzle.targets[0].healthcheck.hostname=dozzle",
-		"pangolin.public-resources.aegisnode-dozzle.targets[0].healthcheck.port=8080",
-		"pangolin.public-resources.aegisnode-dozzle.targets[0].healthcheck.scheme=http",
-		"pangolin.public-resources.aegisnode-dozzle.targets[0].healthcheck.path=/healthcheck",
-		"pangolin.public-resources.aegisnode-dockhand.targets[0].healthcheck.path=/api/auth/session",
+		"pangolin.public-resources.servestead-beszel.full-domain=beszel.example.com",
+		"pangolin.public-resources.servestead-dozzle.full-domain=dozzle.example.com",
+		"pangolin.public-resources.servestead-dockhand.full-domain=dockhand.example.com",
+		"pangolin.public-resources.servestead-beszel.auth.sso-users[0]=admin@example.com",
+		"pangolin.public-resources.servestead-beszel.targets[0].hostname=beszel",
+		"pangolin.public-resources.servestead-beszel.targets[0].healthcheck.enabled=true",
+		"pangolin.public-resources.servestead-beszel.targets[0].healthcheck.hostname=beszel",
+		"pangolin.public-resources.servestead-beszel.targets[0].healthcheck.port=8090",
+		"pangolin.public-resources.servestead-beszel.targets[0].healthcheck.scheme=http",
+		"pangolin.public-resources.servestead-beszel.targets[0].healthcheck.path=/",
+		"pangolin.public-resources.servestead-dozzle.targets[0].healthcheck.enabled=true",
+		"pangolin.public-resources.servestead-dozzle.targets[0].healthcheck.hostname=dozzle",
+		"pangolin.public-resources.servestead-dozzle.targets[0].healthcheck.port=8080",
+		"pangolin.public-resources.servestead-dozzle.targets[0].healthcheck.scheme=http",
+		"pangolin.public-resources.servestead-dozzle.targets[0].healthcheck.path=/healthcheck",
+		"pangolin.public-resources.servestead-dockhand.targets[0].healthcheck.path=/api/auth/session",
 		"POST: \"1\"",
 		"EXEC: \"1\"",
 		"dockhand.hidden=true",
@@ -92,8 +92,8 @@ func TestRenderedComposeFilesPassDockerComposeValidation(t *testing.T) {
 }
 
 func TestPinnedObservabilityImagesHavePublishedManifests(t *testing.T) {
-	if os.Getenv("AEGISNODE_VERIFY_IMAGE_MANIFESTS") != "1" {
-		t.Skip("set AEGISNODE_VERIFY_IMAGE_MANIFESTS=1 to query the container registry")
+	if os.Getenv("SERVESTEAD_VERIFY_IMAGE_MANIFESTS") != "1" {
+		t.Skip("set SERVESTEAD_VERIFY_IMAGE_MANIFESTS=1 to query the container registry")
 	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker CLI is not installed")
@@ -125,19 +125,19 @@ func TestBeszelConfigPreconfiguresLocalSystem(t *testing.T) {
 func TestObservabilityTasksValidateAndVerifyStack(t *testing.T) {
 	joined := strings.Join(taskScripts(observabilityTasks(observabilityConfig{
 		Host:             "203.0.113.10",
-		SSHUser:          "aegisadmin",
+		SSHUser:          "servestead",
 		AdminEmail:       "admin@example.com",
 		PangolinPassword: "pangolin-password",
 		BaseDomain:       "example.com",
 	})), "\n")
 	for _, expected := range []string{
-		"docker compose -f '/opt/aegisnode/stacks/observability/docker-compose.yml' config --quiet",
-		"/opt/aegisnode/stacks/observability/beszel_data/id_ed25519",
-		"/opt/aegisnode/stacks/observability/agent_keys/id_ed25519.pub",
+		"docker compose -f '/opt/servestead/stacks/observability/docker-compose.yml' config --quiet",
+		"/opt/servestead/stacks/observability/beszel_data/id_ed25519",
+		"/opt/servestead/stacks/observability/agent_keys/id_ed25519.pub",
 		"docker stop aegis-newt",
 		"down --remove-orphans",
 		`nice_id`,
-		`aegisnode-dockhand`,
+		`servestead-dockhand`,
 		`DELETE "$api/resource/$resource_id"`,
 		"docker start aegis-newt",
 		`targets[0].get("hcEnabled") is True`,
@@ -159,7 +159,7 @@ func TestObservabilityTasksValidateAndVerifyStack(t *testing.T) {
 	}
 	for _, task := range observabilityTasks(observabilityConfig{
 		Host:             "203.0.113.10",
-		SSHUser:          "aegisadmin",
+		SSHUser:          "servestead",
 		AdminEmail:       "admin@example.com",
 		PangolinPassword: "pangolin-password",
 		BaseDomain:       "example.com",

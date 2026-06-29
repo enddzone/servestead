@@ -100,13 +100,13 @@ type preflightCheck struct {
 }
 
 const setupUsage = `Usage of setup:
-  aegisnode setup [--ip <ipv4-or-hostname>]
+  servestead setup [--ip <ipv4-or-hostname>]
 
 Launches guided setup. With --ip, setup creates or selects a saved profile, collects all full-run values before remote execution, then runs bootstrap, hardening, Docker networking, and reverse proxy deployment end to end.
 `
 
 const doctorUsage = `Usage of doctor:
-  aegisnode doctor [--admin-public-key <path>] [--private-key <path>]
+  servestead doctor [--admin-public-key <path>] [--private-key <path>]
 
 Runs local preflight checks for built-in SSH/key support and optional key files without contacting a server.
 `
@@ -516,7 +516,7 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 	delegate := list.NewDefaultDelegate()
 	delegate.SetHeight(2)
 	profileList := list.New(items, delegate, 82, 14)
-	profileList.Title = "AegisNode profiles"
+	profileList.Title = "Servestead profiles"
 	profileList.SetShowStatusBar(false)
 	profileList.SetFilteringEnabled(false)
 	profileList.DisableQuitKeybindings()
@@ -525,7 +525,7 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 		profileListItem{
 			kind:        "create",
 			title:       "Create a new local repository",
-			description: "AegisNode creates and commits the scaffold after confirmation, before any SSH commands run.",
+			description: "Servestead creates and commits the scaffold after confirmation, before any SSH commands run.",
 		},
 		profileListItem{
 			kind:        "existing",
@@ -594,7 +594,7 @@ func newStackFilePicker(directory string, allowedTypes []string, showHidden bool
 func setupProfileInputs(options setupCLIOptions) []textinput.Model {
 	return newSetupInputs([]setupInputField{
 		{label: "Server IP or hostname", placeholder: "203.0.113.10", value: options.IP},
-		{label: "AegisNode private key", placeholder: defaultKeygenConfig().Path, value: firstNonEmpty(options.PrivateKeyPath, defaultKeygenConfig().Path)},
+		{label: "Servestead private key", placeholder: defaultKeygenConfig().Path, value: firstNonEmpty(options.PrivateKeyPath, defaultKeygenConfig().Path)},
 		{label: "Base domain", placeholder: "example.com", value: options.BaseDomain},
 		{label: "Let's Encrypt email", placeholder: "admin@example.com", value: options.LetsEncryptEmail},
 	})
@@ -604,7 +604,7 @@ func setupAdvancedInputs(options setupCLIOptions) []textinput.Model {
 	return newSetupInputs([]setupInputField{
 		{label: "Profile name", placeholder: "production-vps", value: options.Name},
 		{label: "Initial SSH user", value: firstNonEmpty(options.InitialSSHUser, "root")},
-		{label: "Admin SSH user", value: firstNonEmpty(options.AdminUser, "aegisadmin")},
+		{label: "Admin SSH user", value: firstNonEmpty(options.AdminUser, "servestead")},
 		{label: "Pangolin admin email", placeholder: "defaults to Let's Encrypt email", value: options.PangolinAdminEmail},
 		{label: "Pangolin admin password", placeholder: "generated for fresh installs", value: options.PangolinAdminPassword, secret: true},
 	})
@@ -612,7 +612,7 @@ func setupAdvancedInputs(options setupCLIOptions) []textinput.Model {
 
 func setupRepositoryInputs(options setupCLIOptions) []textinput.Model {
 	return newSetupInputs([]setupInputField{
-		{label: "Local checkout path", placeholder: "/path/to/aegisnode-config", value: options.ConfigRepositoryPath},
+		{label: "Local checkout path", placeholder: "/path/to/servestead-config", value: options.ConfigRepositoryPath},
 		{label: "GitHub HTTPS URL", placeholder: "https://github.com/owner/repository.git", value: options.GitHubRepositoryURL},
 	})
 }
@@ -2450,7 +2450,7 @@ func (model *profileSetupModel) refreshPlanPreview() {
 		Mode:               setupModeFullRun,
 		Host:               options.IP,
 		InitialSSHUser:     firstNonEmpty(options.InitialSSHUser, "root"),
-		AdminUser:          firstNonEmpty(options.AdminUser, "aegisadmin"),
+		AdminUser:          firstNonEmpty(options.AdminUser, "servestead"),
 		PrivateKeyPath:     expandUserPath(firstNonEmpty(options.PrivateKeyPath, defaultKeygenConfig().Path)),
 		AdminPublicKeyPath: publicKeyPath(expandUserPath(firstNonEmpty(options.PrivateKeyPath, defaultKeygenConfig().Path))),
 		BaseDomain:         options.BaseDomain,
@@ -2476,7 +2476,7 @@ func (model profileSetupModel) optionsFromInputs() (setupCLIOptions, error) {
 		LetsEncryptEmail:      value(model.inputs, 3),
 		Name:                  value(model.advanced, 0),
 		InitialSSHUser:        firstNonEmpty(value(model.advanced, 1), "root"),
-		AdminUser:             firstNonEmpty(value(model.advanced, 2), "aegisadmin"),
+		AdminUser:             firstNonEmpty(value(model.advanced, 2), "servestead"),
 		PangolinAdminEmail:    value(model.advanced, 3),
 		PangolinAdminPassword: value(model.advanced, 4),
 		Fresh:                 model.fresh,
@@ -2552,7 +2552,7 @@ func (model profileSetupModel) selectedDashboardStage() (string, error) {
 
 func (model profileSetupModel) View() string {
 	var builder strings.Builder
-	builder.WriteString(setupTitleStyle.Render("AegisNode setup"))
+	builder.WriteString(setupTitleStyle.Render("Servestead setup"))
 	builder.WriteString("\n")
 	builder.WriteString(setupHelpStyle.Render("Profile-aware setup manages the server platform and standalone application stacks."))
 	builder.WriteString("\n\n")
@@ -2981,7 +2981,7 @@ func (model profileSetupModel) reviewView() string {
 		path := firstNonEmpty(strings.TrimSpace(model.repositoryInputs[0].Value()), "the profile default path")
 		builder.WriteString(fmt.Sprintf("Repository action: clone %s into %s.\n", strings.TrimSpace(model.repositoryInputs[1].Value()), path))
 	}
-	builder.WriteString("After confirmation, AegisNode prepares the repository first. SSH execution starts only after repository preparation succeeds.\n")
+	builder.WriteString("After confirmation, Servestead prepares the repository first. SSH execution starts only after repository preparation succeeds.\n")
 	return builder.String()
 }
 
@@ -3232,7 +3232,7 @@ type fullRunModel struct {
 
 func newFullRunModel(config setupConfig) fullRunModel {
 	inputs := newSetupInputs([]setupInputField{
-		{label: "AegisNode private key", placeholder: defaultKeygenConfig().Path, value: firstNonEmpty(config.PrivateKeyPath, defaultKeygenConfig().Path)},
+		{label: "Servestead private key", placeholder: defaultKeygenConfig().Path, value: firstNonEmpty(config.PrivateKeyPath, defaultKeygenConfig().Path)},
 		{label: "Base domain", placeholder: "example.com", value: config.BaseDomain},
 		{label: "Let's Encrypt email", placeholder: "admin@example.com", value: config.LetsEncryptEmail},
 	})
@@ -3287,7 +3287,7 @@ func (model fullRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (model fullRunModel) View() string {
 	var builder strings.Builder
-	builder.WriteString(setupTitleStyle.Render("AegisNode full setup"))
+	builder.WriteString(setupTitleStyle.Render("Servestead full setup"))
 	builder.WriteString("\n\n")
 	builder.WriteString(fmt.Sprintf("Profile target: %s\n", model.config.Host))
 	builder.WriteString("Enter the values needed before the full setup run starts.\n\n")
@@ -3420,7 +3420,7 @@ func prepareProfileStageSetup(options setupCLIOptions, store ProfileStore, stage
 		Mode:                 setupModeForStage(stage),
 		Host:                 profile.IP,
 		InitialSSHUser:       firstNonEmpty(profile.InitialSSHUser, "root"),
-		AdminUser:            firstNonEmpty(profile.AdminUser, "aegisadmin"),
+		AdminUser:            firstNonEmpty(profile.AdminUser, "servestead"),
 		PrivateKeyPath:       expandUserPath(firstNonEmpty(profile.PrivateKeyPath, defaultKeygenConfig().Path)),
 		AdminPublicKeyPath:   publicKeyPath(expandUserPath(firstNonEmpty(profile.PrivateKeyPath, defaultKeygenConfig().Path))),
 		BaseDomain:           profile.BaseDomain,
@@ -3587,7 +3587,7 @@ func freshProfileSource(options setupCLIOptions, matches []ProfileSummary, store
 
 func inheritFreshSetupOptions(options setupCLIOptions, source Profile, sourceState ProfileState) setupCLIOptions {
 	options.IP = firstNonEmpty(options.IP, source.IP)
-	options.AdminUser = firstNonEmpty(options.AdminUser, source.AdminUser, "aegisadmin")
+	options.AdminUser = firstNonEmpty(options.AdminUser, source.AdminUser, "servestead")
 	if completedSetupStages(sourceState)["bootstrap"] {
 		options.InitialSSHUser = firstNonEmpty(options.InitialSSHUser, options.AdminUser, source.AdminUser, source.InitialSSHUser, "root")
 	} else {
@@ -3625,7 +3625,7 @@ func createSetupProfile(options setupCLIOptions, store ProfileStore, seedState P
 		Name:                 firstNonEmpty(options.Name, options.IP),
 		IP:                   options.IP,
 		InitialSSHUser:       firstNonEmpty(options.InitialSSHUser, "root"),
-		AdminUser:            firstNonEmpty(options.AdminUser, "aegisadmin"),
+		AdminUser:            firstNonEmpty(options.AdminUser, "servestead"),
 		PrivateKeyPath:       expandUserPath(firstNonEmpty(options.PrivateKeyPath, defaultKeygenConfig().Path)),
 		BaseDomain:           options.BaseDomain,
 		LetsEncryptEmail:     options.LetsEncryptEmail,
@@ -3656,7 +3656,7 @@ func applySetupOptionsToProfile(profile *Profile, options setupCLIOptions) {
 		profile.Name = options.Name
 	}
 	profile.InitialSSHUser = firstNonEmpty(options.InitialSSHUser, profile.InitialSSHUser, "root")
-	profile.AdminUser = firstNonEmpty(options.AdminUser, profile.AdminUser, "aegisadmin")
+	profile.AdminUser = firstNonEmpty(options.AdminUser, profile.AdminUser, "servestead")
 	profile.PrivateKeyPath = expandUserPath(firstNonEmpty(options.PrivateKeyPath, profile.PrivateKeyPath, defaultKeygenConfig().Path))
 	profile.BaseDomain = firstNonEmpty(options.BaseDomain, profile.BaseDomain)
 	profile.LetsEncryptEmail = firstNonEmpty(options.LetsEncryptEmail, profile.LetsEncryptEmail)
@@ -3746,7 +3746,7 @@ func runProfileSetupPlan(ctx context.Context, store ProfileStore, profile Profil
 	fmt.Fprintf(stdout, "\nProxy URL: https://pangolin.%s\n", config.BaseDomain)
 	fmt.Fprintf(stdout, "Beszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\nDockhand URL: https://dockhand.%s\n", config.BaseDomain, config.BaseDomain, config.BaseDomain)
 	fmt.Fprintln(stdout, requiredDNSGuidance(config.BaseDomain, config.Host))
-	fmt.Fprintf(stdout, "Retrieve Pangolin login with: aegisnode pangolin-credentials --profile %s\n", config.ProfileID)
+	fmt.Fprintf(stdout, "Retrieve Pangolin login with: servestead pangolin-credentials --profile %s\n", config.ProfileID)
 	return nil
 }
 
@@ -3815,7 +3815,7 @@ func runProfileSetupPlanWithRunView(ctx context.Context, store ProfileStore, pro
 	fmt.Fprintf(stdout, "\nProxy URL: https://pangolin.%s\n", config.BaseDomain)
 	fmt.Fprintf(stdout, "Beszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\nDockhand URL: https://dockhand.%s\n", config.BaseDomain, config.BaseDomain, config.BaseDomain)
 	fmt.Fprintln(stdout, requiredDNSGuidance(config.BaseDomain, config.Host))
-	fmt.Fprintf(stdout, "Retrieve Pangolin login with: aegisnode pangolin-credentials --profile %s\n", config.ProfileID)
+	fmt.Fprintf(stdout, "Retrieve Pangolin login with: servestead pangolin-credentials --profile %s\n", config.ProfileID)
 	return nil
 }
 
@@ -4279,7 +4279,7 @@ func printStageCompletionGuidance(stdout io.Writer, config setupConfig, stage st
 	case "proxy":
 		fmt.Fprintf(stdout, "\nProxy URL: https://pangolin.%s\n", config.BaseDomain)
 		fmt.Fprintln(stdout, requiredDNSGuidance(config.BaseDomain, config.Host))
-		fmt.Fprintf(stdout, "Retrieve Pangolin login with: aegisnode pangolin-credentials --profile %s\n", config.ProfileID)
+		fmt.Fprintf(stdout, "Retrieve Pangolin login with: servestead pangolin-credentials --profile %s\n", config.ProfileID)
 	case "observability":
 		fmt.Fprintf(stdout, "\nBeszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\nDockhand URL: https://dockhand.%s\n", config.BaseDomain, config.BaseDomain, config.BaseDomain)
 	case "platform":
@@ -4776,7 +4776,7 @@ func (model *profileRunModel) appendRunLog(line string) {
 
 func (model profileRunModel) View() string {
 	var builder strings.Builder
-	builder.WriteString(setupTitleStyle.Render("AegisNode setup run"))
+	builder.WriteString(setupTitleStyle.Render("Servestead setup run"))
 	builder.WriteString("\n")
 	builder.WriteString(setupHelpStyle.Render(fmt.Sprintf("%s (%s)", firstNonEmpty(model.profile.Name, model.profile.IP), model.profile.IP)))
 	builder.WriteString("\n\n")
@@ -5295,7 +5295,7 @@ func (model setupModel) updateConfirm(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (model setupModel) View() string {
 	var builder strings.Builder
-	builder.WriteString(setupTitleStyle.Render("AegisNode setup"))
+	builder.WriteString(setupTitleStyle.Render("Servestead setup"))
 	builder.WriteString("\n\n")
 
 	switch model.step {
@@ -5317,11 +5317,11 @@ func (model setupModel) View() string {
 		builder.WriteString(setupHelpStyle.Render(setupModeOptions()[int(model.mode)].Description))
 		builder.WriteString("\n\n")
 		if model.mode == setupModeProviderKey {
-			builder.WriteString("AegisNode will write the private key and matching .pub file, then print the public key for Hetzner or DigitalOcean.")
+			builder.WriteString("Servestead will write the private key and matching .pub file, then print the public key for Hetzner or DigitalOcean.")
 		} else if model.mode == setupModeProxy {
-			builder.WriteString("Enter the target host, domain, and Let's Encrypt email. AegisNode generates the Pangolin server secret.")
+			builder.WriteString("Enter the target host, domain, and Let's Encrypt email. Servestead generates the Pangolin server secret.")
 		} else {
-			builder.WriteString("Enter the target host and confirm the SSH key. AegisNode uses the matching .pub file for the admin account.")
+			builder.WriteString("Enter the target host and confirm the SSH key. Servestead uses the matching .pub file for the admin account.")
 		}
 		builder.WriteString("\n\n")
 		for _, input := range model.inputs {
@@ -5340,9 +5340,9 @@ func (model setupModel) View() string {
 		builder.WriteString(setupPlanSummary(model.config))
 		builder.WriteString("\n")
 		if model.mode == setupModeProviderKey {
-			builder.WriteString("AegisNode will create an unencrypted local ED25519 keypair for non-interactive SSH automation. It will not contact your cloud provider; you will copy the printed public key into the provider UI.\n")
+			builder.WriteString("Servestead will create an unencrypted local ED25519 keypair for non-interactive SSH automation. It will not contact your cloud provider; you will copy the printed public key into the provider UI.\n")
 		} else {
-			builder.WriteString("Before remote changes, AegisNode will check built-in SSH/key support and key files. If a required check fails, it stops before contacting the server.\n")
+			builder.WriteString("Before remote changes, Servestead will check built-in SSH/key support and key files. If a required check fails, it stops before contacting the server.\n")
 		}
 		builder.WriteString("\n")
 		builder.WriteString(setupHelpStyle.Render("r runs it. e edits. Esc goes back. q quits."))
@@ -5358,8 +5358,8 @@ type setupModeOption struct {
 func setupModeOptions() []setupModeOption {
 	return []setupModeOption{
 		{
-			Label:       "Prepare the AegisNode SSH key",
-			Description: "Generate the ED25519 keypair used for provider login and later aegisadmin access.",
+			Label:       "Prepare the Servestead SSH key",
+			Description: "Generate the ED25519 keypair used for provider login and later servestead access.",
 		},
 		{
 			Label:       "Set up an existing Ubuntu VPS",
@@ -5399,12 +5399,12 @@ func setupInputs(mode setupMode) []textinput.Model {
 	if mode == setupModeBootstrapHarden {
 		fields = append(fields,
 			setupInputField{label: "Initial SSH user", value: "root"},
-			setupInputField{label: "Admin user", value: "aegisadmin"},
+			setupInputField{label: "Admin user", value: "servestead"},
 		)
 	} else {
-		fields = append(fields, setupInputField{label: "Admin SSH user", value: "aegisadmin"})
+		fields = append(fields, setupInputField{label: "Admin SSH user", value: "servestead"})
 	}
-	fields = append(fields, setupInputField{label: "AegisNode private key", placeholder: defaultKeygenConfig().Path, value: defaultKeygenConfig().Path})
+	fields = append(fields, setupInputField{label: "Servestead private key", placeholder: defaultKeygenConfig().Path, value: defaultKeygenConfig().Path})
 	if mode == setupModeProxy {
 		fields = append(fields,
 			setupInputField{label: "Base domain", placeholder: "example.com"},
@@ -5457,7 +5457,7 @@ func (model setupModel) configFromInputs() (setupConfig, error) {
 			return setupConfig{}, errors.New("host is required")
 		}
 		config.InitialSSHUser = firstNonEmpty(value(1), "root")
-		config.AdminUser = firstNonEmpty(value(2), "aegisadmin")
+		config.AdminUser = firstNonEmpty(value(2), "servestead")
 		config.PrivateKeyPath = expandUserPath(value(3))
 		config.AdminPublicKeyPath = publicKeyPath(config.PrivateKeyPath)
 		if config.PrivateKeyPath == "" {
@@ -5470,7 +5470,7 @@ func (model setupModel) configFromInputs() (setupConfig, error) {
 		if config.Host == "" {
 			return setupConfig{}, errors.New("host is required")
 		}
-		config.AdminUser = firstNonEmpty(value(1), "aegisadmin")
+		config.AdminUser = firstNonEmpty(value(1), "servestead")
 		config.PrivateKeyPath = expandUserPath(value(2))
 		if config.PrivateKeyPath == "" {
 			return setupConfig{}, errors.New("private key path is required")
@@ -5482,7 +5482,7 @@ func (model setupModel) configFromInputs() (setupConfig, error) {
 		if config.Host == "" {
 			return setupConfig{}, errors.New("host is required")
 		}
-		config.AdminUser = firstNonEmpty(value(1), "aegisadmin")
+		config.AdminUser = firstNonEmpty(value(1), "servestead")
 		config.PrivateKeyPath = expandUserPath(value(2))
 		if config.PrivateKeyPath == "" {
 			return setupConfig{}, errors.New("private key path is required")
@@ -5494,7 +5494,7 @@ func (model setupModel) configFromInputs() (setupConfig, error) {
 		if config.Host == "" {
 			return setupConfig{}, errors.New("host is required")
 		}
-		config.AdminUser = firstNonEmpty(value(1), "aegisadmin")
+		config.AdminUser = firstNonEmpty(value(1), "servestead")
 		config.PrivateKeyPath = expandUserPath(value(2))
 		config.BaseDomain = value(3)
 		config.LetsEncryptEmail = value(4)
@@ -5553,7 +5553,7 @@ func setupPlanSummary(config setupConfig) string {
 	switch config.Mode {
 	case setupModeProviderKey:
 		return fmt.Sprintf(
-			"- Generate the AegisNode ED25519 keypair at %s.\n- Print the public key and provider registration guidance.\n",
+			"- Generate the Servestead ED25519 keypair at %s.\n- Print the public key and provider registration guidance.\n",
 			config.ProviderKeyPath,
 		)
 	case setupModeDoctor:

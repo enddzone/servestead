@@ -22,8 +22,8 @@ The interactive HTML checklist uses browser-local storage. `ux_overhaul_plan.htm
 
 Implemented backend pieces from `ux_overhaul_plan.html`:
 
-- `aegisnode setup --ip <host>` creates or reuses a saved profile and runs bootstrap, harden, network, and proxy as one full setup plan.
-- Profiles are stored under `filepath.Join(os.UserConfigDir(), "aegisnode")`.
+- `servestead setup --ip <host>` creates or reuses a saved profile and runs bootstrap, harden, network, and proxy as one full setup plan.
+- Profiles are stored under `filepath.Join(os.UserConfigDir(), "servestead")`.
 - Profile data is split into `profile.json`, `state.json`, `secrets.json`, and per-run JSONL logs.
 - Profile directories use `0700`; JSON files and secrets use `0600`; JSON saves are atomic.
 - Corrupt JSON load errors include the affected file path and do not delete data.
@@ -42,7 +42,7 @@ Backend verification:
 
 UI/dashboard follow-up implementation:
 
-- `aegisnode setup` without `--ip` now opens a profile-first TUI instead of the legacy mode-first menu.
+- `servestead setup` without `--ip` now opens a profile-first TUI instead of the legacy mode-first menu.
 - The new TUI lists saved profiles, opens a dashboard backed by `ProfileState`, collects required full-run values up front, exposes advanced SSH/profile fields, supports fresh profile creation, and renders a final plan review before remote execution starts.
 - Saved profiles can be deleted from the dashboard with confirmation. Deletion removes only local profile files, secrets, state, and run logs.
 - Fresh profile creation from an existing bootstrapped profile seeds bootstrap as complete and uses the saved admin user for remaining stages, avoiding root login on already-hardened servers.
@@ -66,7 +66,7 @@ Verification completed on 2026-06-23:
 
 - `go test -race ./...`
 - `go vet ./...`
-- `go build -o /tmp/aegisnode .`
+- `go build -o /tmp/servestead .`
 - CLI help smoke test
 - Provider calls tested against local HTTP servers; no billable cloud resource was created.
 - Native bootstrap command generation and privilege wrapping tested.
@@ -89,7 +89,7 @@ Verification completed on 2026-06-25:
 - Hardening applies pending package upgrades, locks the root password, writes an sshd drop-in to disable root/password login, validates sshd config, and reloads SSH.
 - CrowdSec repository configuration uses an explicit apt keyring and source-list entry instead of a shell-piped installer script.
 - CrowdSec installs the matching firewall bouncer for nftables or iptables so decisions are enforced locally.
-- Automated verification: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `go build -o /tmp/aegisnode .`.
+- Automated verification: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `go build -o /tmp/servestead .`.
 
 ### Phase 2.5 — Complete
 
@@ -102,7 +102,7 @@ Verification completed on 2026-06-25:
 
 - Added `setup` for the guided TUI.
 - Added `doctor` for direct local preflight checks.
-- Added `keygen` and a matching TUI path to generate the AegisNode ED25519 key used for provider login and later administrative access.
+- Added `keygen` and a matching TUI path to generate the Servestead ED25519 key used for provider login and later administrative access.
 - Simplified setup key prompts so the TUI asks for one private key path and derives the matching `.pub` path automatically.
 - The TUI explains each path without exposing implementation phase labels, confirms the selected plan, and reports that preflight checks stop execution before remote changes when required local prerequisites fail.
 
@@ -116,9 +116,9 @@ Verification completed on 2026-06-25:
 
 - Added the `network` command with native remote Docker/UFW steps separate from `harden`.
 - Docker is installed from Docker's official Ubuntu apt repository using a keyring-backed deb822 source file.
-- The network runner writes `/etc/docker/daemon.json` with Docker bridge firewall/NAT support enabled, ensures the administrative SSH user has passwordless sudo and Docker group membership, enables IPv4 forwarding, replaces only the AegisNode-managed UFW NAT block, preserves SSH access on the configured SSH port, denies incoming and routed traffic by default, allows HTTP/HTTPS ingress, allows routed traffic from Docker bridge CIDRs, enables UFW, and restarts Docker.
+- The network runner writes `/etc/docker/daemon.json` with Docker bridge firewall/NAT support enabled, ensures the administrative SSH user has passwordless sudo and Docker group membership, enables IPv4 forwarding, replaces only the Servestead-managed UFW NAT block, preserves SSH access on the configured SSH port, denies incoming and routed traffic by default, allows HTTP/HTTPS ingress, allows routed traffic from Docker bridge CIDRs, enables UFW, and restarts Docker.
 - Added a guided setup path for Docker networking and UFW without adding the step to baseline hardening.
-- Automated verification: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `go build -o /tmp/aegisnode .`.
+- Automated verification: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `go build -o /tmp/servestead .`.
 
 ### Phase 4 — Complete
 
@@ -131,7 +131,7 @@ Verification completed on 2026-06-26:
 - Added the `proxy` command with native remote deployment steps separate from `network`.
 - Added a guided setup path for the proxy deployment with domain, Let's Encrypt email, and masked server secret prompts.
 - The proxy runner validates domain, email, password, SSH user, and private key inputs before connecting.
-- The deployment writes `/opt/aegisnode/proxy/docker-compose.yml`, Pangolin application config, and Traefik config files, prepares persistent Pangolin and Traefik data directories, opens TCP/80, TCP/443, UDP/51820, and UDP/21820 in UFW, pulls and starts the Compose stack, and verifies Traefik, Pangolin, and Gerbil are running.
+- The deployment writes `/opt/servestead/proxy/docker-compose.yml`, Pangolin application config, and Traefik config files, prepares persistent Pangolin and Traefik data directories, opens TCP/80, TCP/443, UDP/51820, and UDP/21820 in UFW, pulls and starts the Compose stack, and verifies Traefik, Pangolin, and Gerbil are running.
 - Dashboard routing sends UI traffic to Pangolin port 3002 and API traffic under `/api/v1` to Pangolin port 3000.
 - The generated Compose file follows Pangolin's manual community layout with Gerbil enabled, uses Traefik file/http providers, and avoids Docker provider socket access.
 - Actual DNS propagation and Let's Encrypt issuance are live-environment checks and are not performed by automated tests.

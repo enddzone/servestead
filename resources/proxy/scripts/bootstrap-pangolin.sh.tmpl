@@ -32,10 +32,10 @@ cookie_file="$(mktemp)"
 trap 'rm -f "$cookie_file"' EXIT
 pangolin_request 'administrator login' -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data {{ shellQuote .LoginPayload }} >/dev/null
 orgs="$(curl -fsS -b "$cookie_file" "$api/orgs")"
-if ! printf '%s' "$orgs" | grep -Eq '"orgId"[[:space:]]*:[[:space:]]*"aegisnode"'; then
-  pangolin_request 'organization creation' -b "$cookie_file" -X PUT "$api/org" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data '{"orgId":"aegisnode","name":"AegisNode","subnet":"100.89.0.0/16","utilitySubnet":"100.88.0.0/16"}' >/dev/null
+if ! printf '%s' "$orgs" | grep -Eq '"orgId"[[:space:]]*:[[:space:]]*"servestead"'; then
+  pangolin_request 'organization creation' -b "$cookie_file" -X PUT "$api/org" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data '{"orgId":"servestead","name":"Servestead","subnet":"100.89.0.0/16","utilitySubnet":"100.88.0.0/16"}' >/dev/null
 fi
-sites="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/sites?pageSize=100")"
+sites="$(curl -fsS -b "$cookie_file" "$api/org/servestead/sites?pageSize=100")"
 if ! printf '%s' "$sites" | grep -Eq '"niceId"[[:space:]]*:[[:space:]]*"local-vps"'; then
-  pangolin_request 'Newt site creation' -b "$cookie_file" -X PUT "$api/org/aegisnode/site" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data {{ shellQuote .SitePayload }} >/dev/null
+  pangolin_request 'Newt site creation' -b "$cookie_file" -X PUT "$api/org/servestead/site" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data {{ shellQuote .SitePayload }} >/dev/null
 fi

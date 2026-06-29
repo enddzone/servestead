@@ -1,7 +1,6 @@
 package main
 
 import (
-	"aegisnode/resources"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,12 +9,13 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"servestead/resources"
 	"strings"
 )
 
-const proxyStackDirectory = "/opt/aegisnode/proxy"
+const proxyStackDirectory = "/opt/servestead/proxy"
 const proxyDockerSubnet = "172.30.0.0/24"
-const aegisPublicNetwork = "aegis-public"
+const servesteadPublicNetwork = "servestead-public"
 
 const (
 	pangolinImage    = "docker.io/fosrl/pangolin:1.19.4"
@@ -53,7 +53,7 @@ func runProxy(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	flags.SetOutput(stderr)
 	config := proxyConfig{}
 	flags.StringVar(&config.Host, "host", "", "target VPS IPv4 address or hostname")
-	flags.StringVar(&config.SSHUser, "ssh-user", "aegisadmin", "administrative SSH user")
+	flags.StringVar(&config.SSHUser, "ssh-user", "servestead", "administrative SSH user")
 	flags.StringVar(&config.PrivateKeyPath, "private-key", "", "path to the administrative private key")
 	flags.StringVar(&config.BaseDomain, "domain", "", "base domain for Pangolin, for example example.com")
 	flags.StringVar(&config.LetsEncryptEmail, "email", "", "Let's Encrypt account email")
@@ -158,12 +158,12 @@ func proxyTasks(config proxyConfig) []Task {
 		)},
 		{Name: "Validate Docker bridge firewall support", Apply: commandScript(
 			`if [ -f /etc/docker/daemon.json ] && grep -Eq '"iptables"[[:space:]]*:[[:space:]]*false' /etc/docker/daemon.json; then`,
-			`  echo 'Docker bridge firewall/NAT is disabled; rerun "aegisnode network" before deploying proxy.' >&2`,
+			`  echo 'Docker bridge firewall/NAT is disabled; rerun "servestead network" before deploying proxy.' >&2`,
 			`  exit 1`,
 			`fi`,
 		)},
 		{Name: "Prepare proxy stack directories", Apply: commandScript(
-			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote("/opt/aegisnode"),
+			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote("/opt/servestead"),
 			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote(proxyStackDirectory),
 			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote(proxyStackDirectory+"/config"),
 			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote(proxyStackDirectory+"/config/db"),
@@ -172,7 +172,7 @@ func proxyTasks(config proxyConfig) []Task {
 			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote(proxyStackDirectory+"/config/traefik/logs"),
 		)},
 		{Name: "Create shared application network", Apply: commandScript(
-			"docker network inspect " + shellQuote(aegisPublicNetwork) + " >/dev/null 2>&1 || docker network create " + shellQuote(aegisPublicNetwork),
+			"docker network inspect " + shellQuote(servesteadPublicNetwork) + " >/dev/null 2>&1 || docker network create " + shellQuote(servesteadPublicNetwork),
 		)},
 		{Name: "Write Pangolin application config", Apply: remoteWriteFileCommand(proxyStackDirectory+"/config/config.yml", pangolinConfigFile(config), "root", stackGroup, 0640)},
 		{Name: "Write Traefik static config", Apply: remoteWriteFileCommand(proxyStackDirectory+"/config/traefik/traefik_config.yml", traefikStaticConfigFile(config), "root", stackGroup, 0640)},
@@ -182,7 +182,7 @@ func proxyTasks(config proxyConfig) []Task {
 			`public_interface="$(ip -4 route show default 0.0.0.0/0 | awk '{print $5; exit}')"`,
 			`test -n "$public_interface"`,
 			`egress_interface="$public_interface"`,
-			installUFWMasqueradeBlockCommand("AegisNode UFW MASQUERADE TRANSLATIONS", "172.17.0.0/16", "172.18.0.0/16", proxyDockerSubnet),
+			installUFWMasqueradeBlockCommand("Servestead UFW MASQUERADE TRANSLATIONS", "172.17.0.0/16", "172.18.0.0/16", proxyDockerSubnet),
 			"ufw allow 80/tcp",
 			"ufw allow 443/tcp",
 			"ufw route allow from "+shellQuote(proxyDockerSubnet)+" to any",
@@ -209,24 +209,24 @@ func proxyTasks(config proxyConfig) []Task {
 func pangolinComposeFile(config proxyConfig) string {
 	return mustRenderResourceTemplate(resources.ProxyCompose, struct {
 		proxyConfig
-		AegisPublicNetwork string
-		GerbilImage        string
-		NewtImage          string
-		PangolinEndpoint   string
-		PangolinImage      string
-		ProxyDockerSubnet  string
-		SocketProxyImage   string
-		TraefikImage       string
+		ServesteadPublicNetwork string
+		GerbilImage             string
+		NewtImage               string
+		PangolinEndpoint        string
+		PangolinImage           string
+		ProxyDockerSubnet       string
+		SocketProxyImage        string
+		TraefikImage            string
 	}{
-		proxyConfig:        config,
-		AegisPublicNetwork: aegisPublicNetwork,
-		GerbilImage:        gerbilImage,
-		NewtImage:          newtImage,
-		PangolinEndpoint:   "https://pangolin." + config.BaseDomain,
-		PangolinImage:      pangolinImage,
-		ProxyDockerSubnet:  proxyDockerSubnet,
-		SocketProxyImage:   socketProxyImage,
-		TraefikImage:       traefikImage,
+		proxyConfig:             config,
+		ServesteadPublicNetwork: servesteadPublicNetwork,
+		GerbilImage:             gerbilImage,
+		NewtImage:               newtImage,
+		PangolinEndpoint:        "https://pangolin." + config.BaseDomain,
+		PangolinImage:           pangolinImage,
+		ProxyDockerSubnet:       proxyDockerSubnet,
+		SocketProxyImage:        socketProxyImage,
+		TraefikImage:            traefikImage,
 	})
 }
 

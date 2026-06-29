@@ -164,7 +164,7 @@ func (secrets *ProfileSecrets) EnsureComposeWiringSecrets() error {
 		if err != nil {
 			return err
 		}
-		privateBlock, err := ssh.MarshalPrivateKey(privateKey, "aegisnode-beszel")
+		privateBlock, err := ssh.MarshalPrivateKey(privateKey, "servestead-beszel")
 		if err != nil {
 			return err
 		}
@@ -244,7 +244,7 @@ func newDefaultProfileStore() (ProfileStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve user config directory: %w", err)
 	}
-	return &fileProfileStore{root: filepath.Join(configDirectory, "aegisnode"), defaultRoot: true}, nil
+	return &fileProfileStore{root: filepath.Join(configDirectory, "servestead"), defaultRoot: true}, nil
 }
 
 func newFileProfileStore(root string) *fileProfileStore {
@@ -311,7 +311,7 @@ func (store *fileProfileStore) Create(profile Profile) (Profile, error) {
 		profile.InitialSSHUser = "root"
 	}
 	if profile.AdminUser == "" {
-		profile.AdminUser = "aegisadmin"
+		profile.AdminUser = "servestead"
 	}
 	if profile.CreatedAt.IsZero() {
 		profile.CreatedAt = now

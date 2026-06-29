@@ -23,7 +23,7 @@ func TestProfileStoreCreatesPrivateProfileFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profile.ID == "" || profile.InitialSSHUser != "root" || profile.AdminUser != "aegisadmin" {
+	if profile.ID == "" || profile.InitialSSHUser != "root" || profile.AdminUser != "servestead" {
 		t.Fatalf("unexpected profile defaults: %+v", profile)
 	}
 

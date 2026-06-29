@@ -1,4 +1,4 @@
-module aegisnode
+module servestead
 
 go 1.24.2
 

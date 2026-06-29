@@ -36,7 +36,7 @@ func TestHardeningCommandsContainBaseline(t *testing.T) {
 		"apt-get -o DPkg::Lock::Timeout=300 full-upgrade -y",
 		"apt-get -o DPkg::Lock::Timeout=300 autoremove -y",
 		"apt-get -o DPkg::Lock::Timeout=300 install -y 'apt-transport-https' 'ca-certificates' 'curl' 'gnupg' 'iptables' 'unattended-upgrades'",
-		"/etc/ssh/sshd_config.d/99-aegisnode-hardening.conf",
+		"/etc/ssh/sshd_config.d/99-servestead-hardening.conf",
 		`ram_gib="$(( (mem_kib + 1048575) / 1048576 ))"`,
 		`if [ "$ram_gib" -lt 2 ]; then swap_gib="$((ram_gib * 2))"; elif [ "$ram_gib" -le 8 ]; then swap_gib="$ram_gib"; else swap_gib=4; fi`,
 		`swapon --show=NAME --noheadings --raw`,
@@ -85,7 +85,7 @@ func TestHardeningCommandsContainBaseline(t *testing.T) {
 
 func TestRunHardeningStepsUsesPrivilegedCommands(t *testing.T) {
 	client := &recordingRemoteClient{}
-	config := hardeningConfig{SSHUser: "aegisadmin"}
+	config := hardeningConfig{SSHUser: "servestead"}
 	if err := runHardeningSteps(context.Background(), client, config, nil); err != nil {
 		t.Fatal(err)
 	}

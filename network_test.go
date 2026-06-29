@@ -8,7 +8,7 @@ import (
 )
 
 func TestNetworkCommandsContainPhase3Baseline(t *testing.T) {
-	tasks := networkTasks(networkConfig{SSHUser: "aegisadmin", SSHPort: "2222"})
+	tasks := networkTasks(networkConfig{SSHUser: "servestead", SSHPort: "2222"})
 	joined := strings.Join(taskScripts(tasks), "\n")
 	assertTaskNames(t, taskNames(tasks), []string{
 		"Validate supported Ubuntu release",
@@ -31,15 +31,15 @@ func TestNetworkCommandsContainPhase3Baseline(t *testing.T) {
 		"apt-get -o DPkg::Lock::Timeout=300 update",
 		"apt-get -o DPkg::Lock::Timeout=300 remove -y \"$package\"",
 		"DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin",
-		"usermod --append --groups sudo 'aegisadmin'",
-		"visudo -cf '/etc/sudoers.d/aegisadmin.aegisnode.tmp'",
+		"usermod --append --groups sudo 'servestead'",
+		"visudo -cf '/etc/sudoers.d/servestead.servestead.tmp'",
 		"getent group docker >/dev/null || groupadd docker",
-		"usermod --append --groups docker 'aegisadmin'",
+		"usermod --append --groups docker 'servestead'",
 		"/etc/apt/sources.list.d/docker.sources",
 		"docker-ce docker-ce-cli containerd.io docker-compose-plugin",
 		"/etc/docker/daemon.json",
-		"/etc/sysctl.d/98-aegisnode-forwarding.conf",
-		"# START AegisNode UFW MASQUERADE TRANSLATIONS",
+		"/etc/sysctl.d/98-servestead-forwarding.conf",
+		"# START Servestead UFW MASQUERADE TRANSLATIONS",
 		"-A POSTROUTING -s 172.17.0.0/16 -o ${egress_interface} -j MASQUERADE",
 		"-A POSTROUTING -s 172.18.0.0/16 -o ${egress_interface} -j MASQUERADE",
 		"ufw allow in proto tcp to any port '2222'",
@@ -70,7 +70,7 @@ func TestNetworkCommandsContainPhase3Baseline(t *testing.T) {
 
 func TestRunNetworkStepsUsesPrivilegedCommands(t *testing.T) {
 	client := &recordingRemoteClient{}
-	config := networkConfig{SSHUser: "aegisadmin"}
+	config := networkConfig{SSHUser: "servestead"}
 	if err := runNetworkSteps(context.Background(), client, config, nil); err != nil {
 		t.Fatal(err)
 	}

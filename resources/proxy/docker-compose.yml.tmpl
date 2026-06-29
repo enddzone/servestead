@@ -71,7 +71,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
-      - {{ .AegisPublicNetwork }}
+      - {{ .ServesteadPublicNetwork }}
 
   newt:
     image: {{ .NewtImage }}
@@ -86,7 +86,7 @@ services:
       DOCKER_SOCKET: "tcp://socket-proxy:2375"
       DOCKER_ENFORCE_NETWORK_VALIDATION: "true"
     networks:
-      - {{ .AegisPublicNetwork }}
+      - {{ .ServesteadPublicNetwork }}
 
 networks:
   default:
@@ -95,5 +95,5 @@ networks:
     ipam:
       config:
         - subnet: {{ .ProxyDockerSubnet }}
-  {{ .AegisPublicNetwork }}:
+  {{ .ServesteadPublicNetwork }}:
     external: true

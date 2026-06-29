@@ -41,12 +41,12 @@ func TestGenerateProviderKeypairWritesOpenSSHKeysAndPrintsGuidance(t *testing.T)
 		t.Fatalf("unexpected public key type: %s", parsedPublicKey.Type())
 	}
 	for _, expected := range []string{
-		"AegisNode SSH keypair ready.",
+		"Servestead SSH keypair ready.",
 		"ssh-ed25519 ",
 		"aegis-test",
 		"Hetzner Cloud",
 		"DigitalOcean",
-		"aegisnode provision",
+		"servestead provision",
 	} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("output missing %q:\n%s", expected, stdout.String())
@@ -67,9 +67,9 @@ func TestGenerateProviderKeypairRefusesOverwriteWithoutForce(t *testing.T) {
 	}
 }
 
-func TestDefaultKeygenConfigUsesAegisNodeKeyName(t *testing.T) {
+func TestDefaultKeygenConfigUsesServesteadKeyName(t *testing.T) {
 	config := defaultKeygenConfig()
-	if !strings.Contains(config.Path, defaultAegisNodeKeyName) {
+	if !strings.Contains(config.Path, defaultServesteadKeyName) {
 		t.Fatalf("default path does not include provider key name: %q", config.Path)
 	}
 	if config.Comment == "" {

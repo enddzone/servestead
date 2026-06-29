@@ -1,13 +1,13 @@
 package main
 
 import (
-	"aegisnode/resources"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"servestead/resources"
 	"strings"
 )
 
@@ -28,7 +28,7 @@ func runHarden(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	flags.SetOutput(stderr)
 	config := hardeningConfig{}
 	flags.StringVar(&config.Host, "host", "", "target VPS IPv4 address or hostname")
-	flags.StringVar(&config.SSHUser, "ssh-user", "aegisadmin", "administrative SSH user")
+	flags.StringVar(&config.SSHUser, "ssh-user", "servestead", "administrative SSH user")
 	flags.StringVar(&config.PrivateKeyPath, "private-key", "", "path to the administrative private key")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -78,7 +78,7 @@ func hardeningTasks() []Task {
 			aptInstallCommand("apt-transport-https", "ca-certificates", "curl", "gnupg", "iptables", "unattended-upgrades"),
 		)},
 		{Name: "Configure swap", Apply: configureSwapCommand()},
-		{Name: "Write sshd hardening config", Apply: remoteWriteFileCommand("/etc/ssh/sshd_config.d/99-aegisnode-hardening.conf", sshdHardeningConfig(), "root", "root", 0644)},
+		{Name: "Write sshd hardening config", Apply: remoteWriteFileCommand("/etc/ssh/sshd_config.d/99-servestead-hardening.conf", sshdHardeningConfig(), "root", "root", 0644)},
 		{Name: "Validate and reload SSH", Apply: sshHardeningCommand()},
 		{Name: "Write sysctl hardening config", Apply: remoteWriteFileCommand("/etc/sysctl.d/99-vps-hardening.conf", sysctlContent, "root", "root", 0644)},
 		{Name: "Reload sysctl settings", Apply: commandScript("sysctl --system")},
@@ -157,7 +157,7 @@ func sysctlSettings() []sysctlSetting {
 }
 
 func sysctlConfigLines() []string {
-	lines := []string{"# Managed by AegisNode."}
+	lines := []string{"# Managed by Servestead."}
 	for _, setting := range sysctlSettings() {
 		lines = append(lines, setting.Name+" = "+setting.Value)
 	}
