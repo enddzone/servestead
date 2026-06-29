@@ -1,7 +1,6 @@
 package main
 
 import (
-	"aegisnode/resources"
 	"bytes"
 	"context"
 	"errors"
@@ -12,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"servestead/resources"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,7 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const stackMetadataFilename = "aegisnode.yaml"
+const stackMetadataFilename = "servestead.yaml"
 
 var stackSlugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 var environmentKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -375,7 +375,7 @@ func pushStackRepository(ctx context.Context, repositoryPath string) error {
 
 func runStack(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New(`usage: aegisnode stack <add|env>`)
+		return errors.New(`usage: servestead stack <add|env>`)
 	}
 	switch args[0] {
 	case "add":
@@ -401,7 +401,7 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	flags.SetOutput(stderr)
 	options := stackAddOptions{}
 	var publications stackPublishFlags
-	flags.StringVar(&options.ProfileID, "profile", "", "saved AegisNode profile ID")
+	flags.StringVar(&options.ProfileID, "profile", "", "saved Servestead profile ID")
 	flags.StringVar(&options.Compose, "compose", "", "Docker Compose file to add")
 	flags.StringVar(&options.Name, "name", "", "stack name used in the repository")
 	flags.Var(&publications, "publish", "public route service:port:subdomain[:id] (repeatable)")
@@ -546,17 +546,17 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	for _, resource := range metadata.PublicResources {
 		fmt.Fprintf(stdout, "Public resource: https://%s.%s -> %s:%d\n", resource.Subdomain, profile.BaseDomain, resource.Service, resource.Port)
 	}
-	fmt.Fprintln(stdout, "Review the imported Compose file for literal secrets; AegisNode does not move application-specific secrets out of Git.")
+	fmt.Fprintln(stdout, "Review the imported Compose file for literal secrets; Servestead does not move application-specific secrets out of Git.")
 	for _, resource := range metadata.PublicResources {
 		if servicePublishesPorts(services, resource.Service) {
-			fmt.Fprintf(stdout, "AegisNode will suppress %s's direct host port bindings in its generated deployment override.\n", resource.Service)
+			fmt.Fprintf(stdout, "Servestead will suppress %s's direct host port bindings in its generated deployment override.\n", resource.Service)
 		}
 	}
-	fmt.Fprintln(stdout, "AegisNode will generate and validate these deployment labels:")
+	fmt.Fprintln(stdout, "Servestead will generate and validate these deployment labels:")
 	for _, label := range pangolinLabelsFromOverride(override) {
 		fmt.Fprintf(stdout, "  %s\n", label)
 	}
-	fmt.Fprintln(stdout, "\nReview the complete configuration change, then commit it once. AegisNode deploys committed configuration only:")
+	fmt.Fprintln(stdout, "\nReview the complete configuration change, then commit it once. Servestead deploys committed configuration only:")
 	fmt.Fprintf(stdout, "  git -C %s add stacks\n", shellQuote(revision.Path))
 	fmt.Fprintf(stdout, "  git -C %s commit -m %s\n", shellQuote(revision.Path), shellQuote("Add "+options.Name+" stack"))
 	fmt.Fprintln(stdout, "Then open the profile dashboard, press s, select this stack, and press r to deploy it independently.")
@@ -565,13 +565,13 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 
 func runStackEnvironment(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 || (args[0] != "set" && args[0] != "remove") {
-		return errors.New(`usage: aegisnode stack env <set|remove> --profile <id> --stack <name> [--file <path>]`)
+		return errors.New(`usage: servestead stack env <set|remove> --profile <id> --stack <name> [--file <path>]`)
 	}
 	action := args[0]
 	flags := flag.NewFlagSet("stack env "+action, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	var profileID, stackName, path string
-	flags.StringVar(&profileID, "profile", "", "saved AegisNode profile ID")
+	flags.StringVar(&profileID, "profile", "", "saved Servestead profile ID")
 	flags.StringVar(&stackName, "stack", "", "stack name")
 	flags.StringVar(&path, "file", "", "environment file")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -871,7 +871,7 @@ func generateStackPangolinOverride(stackName string, metadata stackMetadata, ser
 			if resource.SSO && firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail) == "" {
 				return "", fmt.Errorf("resource %q enables SSO but the profile has no Pangolin administrator email", resource.ID)
 			}
-			prefix := "pangolin.public-resources.aegisnode-" + stackName + "-" + resource.ID
+			prefix := "pangolin.public-resources.servestead-" + stackName + "-" + resource.ID
 			labels := []string{
 				prefix + ".name=" + resource.Name,
 				prefix + ".protocol=" + resource.Protocol,
@@ -898,13 +898,13 @@ func generateStackPangolinOverride(stackName string, metadata stackMetadata, ser
 		overrideServices = append(overrideServices, overrideService)
 	}
 	return mustRenderResourceTemplate(resources.StackPangolinOverride, struct {
-		AegisPublicNetwork string
-		HasPublicResources bool
-		Services           []stackOverrideService
+		ServesteadPublicNetwork string
+		HasPublicResources      bool
+		Services                []stackOverrideService
 	}{
-		AegisPublicNetwork: aegisPublicNetwork,
-		HasPublicResources: len(metadata.PublicResources) > 0,
-		Services:           overrideServices,
+		ServesteadPublicNetwork: servesteadPublicNetwork,
+		HasPublicResources:      len(metadata.PublicResources) > 0,
+		Services:                overrideServices,
 	}), nil
 }
 
@@ -930,7 +930,7 @@ func validateConfiguredStackSet(stacks []configuredStack) error {
 				return fmt.Errorf("stack %s subdomain %q conflicts with %s", stack.Name, resource.Subdomain, owner)
 			}
 			domains[resource.Subdomain] = stack.Name
-			resourceID := "aegisnode-" + stack.Name + "-" + resource.ID
+			resourceID := "servestead-" + stack.Name + "-" + resource.ID
 			if owner, exists := resourceIDs[resourceID]; exists {
 				return fmt.Errorf("stack %s resource ID %q conflicts with stack %s", stack.Name, resourceID, owner)
 			}

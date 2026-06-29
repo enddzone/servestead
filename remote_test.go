@@ -40,9 +40,9 @@ func TestSSHHostPortDefaultsAndParsesPorts(t *testing.T) {
 func TestRemoteWriteFileCommandEncodesContent(t *testing.T) {
 	command := remoteWriteFileCommand("/etc/example.conf", "value with ' quote\n", "root", "root", 0644)
 	for _, expected := range []string{
-		"base64 -d > '/etc/example.conf.aegisnode.tmp'",
-		"chown 'root:root' '/etc/example.conf.aegisnode.tmp'",
-		"chmod '0644' '/etc/example.conf.aegisnode.tmp'",
+		"base64 -d > '/etc/example.conf.servestead.tmp'",
+		"chown 'root:root' '/etc/example.conf.servestead.tmp'",
+		"chmod '0644' '/etc/example.conf.servestead.tmp'",
 		"dmFsdWUgd2l0aCAnIHF1b3RlCg==",
 	} {
 		if !strings.Contains(command, expected) {

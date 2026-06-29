@@ -16,7 +16,7 @@ func TestDefaultConfigRepositoryPathUsesXDGConfigHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(path, filepath.Join("aegisnode", "repositories", "profile-1")) {
+	if !strings.HasSuffix(path, filepath.Join("servestead", "repositories", "profile-1")) {
 		t.Fatalf("unexpected repository path: %s", path)
 	}
 }
@@ -36,7 +36,7 @@ func TestPrepareConfigRepositoryInitializesAndDeploysExactCommit(t *testing.T) {
 		t.Fatalf("unexpected revision: %+v", revision)
 	}
 	author := gitOutput(t, repository, "show", "-s", "--format=%an <%ae>")
-	if strings.TrimSpace(author) != "AegisNode <aegisnode@localhost>" {
+	if strings.TrimSpace(author) != "Servestead <servestead@localhost>" {
 		t.Fatalf("unexpected scaffold author: %s", author)
 	}
 
@@ -165,24 +165,24 @@ func legacyManagedObservabilityCompose() string {
   beszel:
     image: docker.io/henrygd/beszel:0.18.7
     networks:
-      - aegis-public
+      - servestead-public
     labels:
-      - pangolin.public-resources.aegisnode-beszel.name=Beszel
+      - pangolin.public-resources.servestead-beszel.name=Beszel
 
   beszel-agent:
     image: docker.io/henrygd/beszel-agent:0.18.7
     networks:
-      - aegis-public
+      - servestead-public
 
   dozzle:
     image: docker.io/amir20/dozzle:v10.6.6
     networks:
-      - aegis-public
+      - servestead-public
     labels:
-      - pangolin.public-resources.aegisnode-dozzle.name=Dozzle
+      - pangolin.public-resources.servestead-dozzle.name=Dozzle
 
 networks:
-  aegis-public:
+  servestead-public:
     external: true
 `
 }

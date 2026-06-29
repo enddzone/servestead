@@ -16,7 +16,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-const defaultAegisNodeKeyName = "aegisnode_ed25519"
+const defaultServesteadKeyName = "servestead_ed25519"
 
 type keygenConfig struct {
 	Path    string
@@ -25,9 +25,9 @@ type keygenConfig struct {
 }
 
 const keygenUsage = `Usage of keygen:
-  aegisnode keygen [--path <private-key-path>] [--comment <label>] [--force]
+  servestead keygen [--path <private-key-path>] [--comment <label>] [--force]
 
-Generates the default ED25519 SSH keypair for cloud-provider server creation and later AegisNode admin access, then prints the public key for provider registration.
+Generates the default ED25519 SSH keypair for cloud-provider server creation and later Servestead admin access, then prints the public key for provider registration.
 `
 
 func runKeygen(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -52,8 +52,8 @@ func runKeygen(ctx context.Context, args []string, stdout, stderr io.Writer) err
 
 func defaultKeygenConfig() keygenConfig {
 	return keygenConfig{
-		Path:    filepath.Join("$HOME", ".ssh", defaultAegisNodeKeyName),
-		Comment: "aegisnode-key",
+		Path:    filepath.Join("$HOME", ".ssh", defaultServesteadKeyName),
+		Comment: "servestead-key",
 	}
 }
 
@@ -64,7 +64,7 @@ func generateProviderKeypair(ctx context.Context, config keygenConfig, stdout, s
 		return errors.New("--path is required")
 	}
 	if config.Comment == "" {
-		config.Comment = "aegisnode-key"
+		config.Comment = "servestead-key"
 	}
 
 	publicPath := config.Path + ".pub"
@@ -121,20 +121,20 @@ func bytesTrimRightNewline(value []byte) []byte {
 
 func printProviderKeyGuidance(stdout io.Writer, privatePath, publicPath, publicKey string) {
 	fmt.Fprintln(stdout)
-	fmt.Fprintln(stdout, "AegisNode SSH keypair ready.")
+	fmt.Fprintln(stdout, "Servestead SSH keypair ready.")
 	fmt.Fprintf(stdout, "Private key: %s\n", privatePath)
 	fmt.Fprintf(stdout, "Public key:  %s\n", publicPath)
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "Copy this public key into your VPS provider before provisioning:")
 	fmt.Fprintln(stdout, publicKey)
 	fmt.Fprintln(stdout)
-	fmt.Fprintln(stdout, "This helper creates an unencrypted private key so AegisNode and OpenSSH can use it non-interactively. Keep the private key file local and protected.")
+	fmt.Fprintln(stdout, "This helper creates an unencrypted private key so Servestead and OpenSSH can use it non-interactively. Keep the private key file local and protected.")
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "Provider guidance:")
-	fmt.Fprintln(stdout, "- Hetzner Cloud: Project -> Security -> SSH Keys -> Add SSH key. Use the key name or ID with `aegisnode provision --ssh-key`.")
-	fmt.Fprintln(stdout, "- DigitalOcean: Settings -> Security -> SSH Keys -> Add SSH Key. Use the key fingerprint or ID with `aegisnode provision --ssh-key`.")
+	fmt.Fprintln(stdout, "- Hetzner Cloud: Project -> Security -> SSH Keys -> Add SSH key. Use the key name or ID with `servestead provision --ssh-key`.")
+	fmt.Fprintln(stdout, "- DigitalOcean: Settings -> Security -> SSH Keys -> Add SSH Key. Use the key fingerprint or ID with `servestead provision --ssh-key`.")
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "After the provider accepts the key:")
-	fmt.Fprintln(stdout, "1. Run `aegisnode provision --provider <hetzner|digitalocean> --name <name> --ssh-key <provider-key>`.")
-	fmt.Fprintf(stdout, "2. Use `%s` as the private key when running `aegisnode setup` or logging in manually.\n", privatePath)
+	fmt.Fprintln(stdout, "1. Run `servestead provision --provider <hetzner|digitalocean> --name <name> --ssh-key <provider-key>`.")
+	fmt.Fprintf(stdout, "2. Use `%s` as the private key when running `servestead setup` or logging in manually.\n", privatePath)
 }

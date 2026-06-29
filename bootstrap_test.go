@@ -7,7 +7,7 @@ import (
 )
 
 func TestBootstrapCommandsConfigureAdminAccess(t *testing.T) {
-	config := bootstrapConfig{SSHUser: "root", AdminUser: "aegisadmin"}
+	config := bootstrapConfig{SSHUser: "root", AdminUser: "servestead"}
 	tasks := bootstrapTasks(config, `ssh-ed25519 AAAAkey admin's key`)
 	joined := strings.Join(taskScripts(tasks), "\n")
 	assertTaskNames(t, taskNames(tasks), []string{
@@ -19,10 +19,10 @@ func TestBootstrapCommandsConfigureAdminAccess(t *testing.T) {
 	})
 	for _, expected := range []string{
 		"apt-get -o DPkg::Lock::Timeout=300 install -y 'curl' 'git' 'gnupg2' 'sudo'",
-		"groupadd 'aegisadmin'",
-		"useradd --create-home --shell /bin/bash --gid 'aegisadmin' --groups sudo 'aegisadmin'",
-		"visudo -cf '/etc/sudoers.d/aegisadmin.aegisnode.tmp'",
-		"/home/aegisadmin/.ssh/authorized_keys",
+		"groupadd 'servestead'",
+		"useradd --create-home --shell /bin/bash --gid 'servestead' --groups sudo 'servestead'",
+		"visudo -cf '/etc/sudoers.d/servestead.servestead.tmp'",
+		"/home/servestead/.ssh/authorized_keys",
 		"c3NoLWVkMjU1MTkgQUFBQWtleSBhZG1pbidzIGtleQo=",
 	} {
 		if !strings.Contains(joined, expected) {
@@ -33,7 +33,7 @@ func TestBootstrapCommandsConfigureAdminAccess(t *testing.T) {
 
 func TestRunBootstrapStepsUsesPrivilegedCommands(t *testing.T) {
 	client := &recordingRemoteClient{}
-	config := bootstrapConfig{SSHUser: "aegisadmin", AdminUser: "aegisadmin"}
+	config := bootstrapConfig{SSHUser: "servestead", AdminUser: "servestead"}
 	if err := runBootstrapSteps(context.Background(), client, config, "ssh-ed25519 AAAATEST user@example", nil); err != nil {
 		t.Fatal(err)
 	}

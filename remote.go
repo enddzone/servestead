@@ -184,13 +184,13 @@ func appendKnownHost(path, hostname string, key ssh.PublicKey) error {
 
 func remoteWriteFileCommand(path, content, owner, group string, mode os.FileMode) string {
 	encoded := base64.StdEncoding.EncodeToString([]byte(content))
-	temporaryPath := path + ".aegisnode.tmp"
+	temporaryPath := path + ".servestead.tmp"
 	return strings.Join([]string{
 		"set -e",
 		"mkdir -p " + shellQuote(filepath.Dir(path)),
-		"base64 -d > " + shellQuote(temporaryPath) + " <<'AEGISNODE_FILE'",
+		"base64 -d > " + shellQuote(temporaryPath) + " <<'SERVESTEAD_FILE'",
 		encoded,
-		"AEGISNODE_FILE",
+		"SERVESTEAD_FILE",
 		"chown " + shellQuote(owner+":"+group) + " " + shellQuote(temporaryPath),
 		"chmod " + shellQuote(fileModeDigits(mode)) + " " + shellQuote(temporaryPath),
 		"mv " + shellQuote(temporaryPath) + " " + shellQuote(path),

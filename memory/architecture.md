@@ -2,7 +2,7 @@
 
 ## Commands
 
-`aegisnode provision` creates one VPS and waits until its public IPv4 address is available. It does not bootstrap or harden automatically. This separation ensures that a successfully created, billable instance is clearly reported even if later remote configuration fails.
+`servestead provision` creates one VPS and waits until its public IPv4 address is available. It does not bootstrap or harden automatically. This separation ensures that a successfully created, billable instance is clearly reported even if later remote configuration fails.
 
 Supported providers and defaults:
 
@@ -13,7 +13,7 @@ Supported providers and defaults:
 
 All defaults can be overridden by CLI flags. The cloud SSH key must already exist at the provider and is supplied by ID, name, or fingerprint as supported by that provider. Tokens are environment-only to avoid exposure in command arguments.
 
-`aegisnode bootstrap` uses the native Go SSH runner to connect to the target and execute the admin setup commands. It creates `aegisadmin` by default, locks password authentication for that account, grants passwordless sudo, and installs an ED25519 authorized key.
+`servestead bootstrap` uses the native Go SSH runner to connect to the target and execute the admin setup commands. It creates `servestead` by default, locks password authentication for that account, grants passwordless sudo, and installs an ED25519 authorized key.
 
 ## Security boundaries
 

@@ -4,7 +4,7 @@ trap 'rm -f "$cookie_file"' EXIT
 {{ range .PangolinLoginCommands }}{{ . }}
 {{ end -}}
 for attempt in $(seq 1 30); do
-  resources="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/resources?pageSize=100")"
+  resources="$(curl -fsS -b "$cookie_file" "$api/org/servestead/resources?pageSize=100")"
   if resource_ids="$(printf '%s' "$resources" | python3 -c {{ shellQuote .VerifyResources }} {{ shellQuote .Specs }})"; then
     healthchecks_enabled=1
     for resource_id in $resource_ids; do

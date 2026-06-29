@@ -1,6 +1,6 @@
 # Project Memory
 
-This directory contains durable implementation context for future AegisNode work.
+This directory contains durable implementation context for future Servestead work.
 
 - `progress.md` tracks the blueprint checklist and verification status.
 - `architecture.md` records Phase 1 behavior, decisions, prerequisites, and security boundaries.

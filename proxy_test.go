@@ -12,7 +12,7 @@ import (
 
 func TestProxyCommandsDeployPhase4Stack(t *testing.T) {
 	config := proxyConfig{
-		SSHUser:          "aegisadmin",
+		SSHUser:          "servestead",
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
 		ServerSecret:     "secret password",
@@ -36,17 +36,17 @@ func TestProxyCommandsDeployPhase4Stack(t *testing.T) {
 	for _, expected := range []string{
 		"docker compose version >/dev/null",
 		"grep -Eq '\"iptables\"[[:space:]]*:[[:space:]]*false' /etc/docker/daemon.json",
-		"rerun \"aegisnode network\" before deploying proxy",
-		"install -d -m 0750 -o root -g 'aegisadmin' '/opt/aegisnode'",
-		"install -d -m 0750 -o root -g 'aegisadmin' '/opt/aegisnode/proxy'",
-		"/opt/aegisnode/proxy/config/letsencrypt",
-		"/opt/aegisnode/proxy/config/traefik/logs",
-		"chown 'root:aegisadmin' '/opt/aegisnode/proxy/config/config.yml.aegisnode.tmp'",
-		"chown 'root:aegisadmin' '/opt/aegisnode/proxy/config/traefik/traefik_config.yml.aegisnode.tmp'",
-		"chown 'root:aegisadmin' '/opt/aegisnode/proxy/config/traefik/dynamic_config.yml.aegisnode.tmp'",
-		"chmod '0640' '/opt/aegisnode/proxy/docker-compose.yml.aegisnode.tmp'",
-		"/opt/aegisnode/proxy/docker-compose.yml",
-		"# START AegisNode UFW MASQUERADE TRANSLATIONS",
+		"rerun \"servestead network\" before deploying proxy",
+		"install -d -m 0750 -o root -g 'servestead' '/opt/servestead'",
+		"install -d -m 0750 -o root -g 'servestead' '/opt/servestead/proxy'",
+		"/opt/servestead/proxy/config/letsencrypt",
+		"/opt/servestead/proxy/config/traefik/logs",
+		"chown 'root:servestead' '/opt/servestead/proxy/config/config.yml.servestead.tmp'",
+		"chown 'root:servestead' '/opt/servestead/proxy/config/traefik/traefik_config.yml.servestead.tmp'",
+		"chown 'root:servestead' '/opt/servestead/proxy/config/traefik/dynamic_config.yml.servestead.tmp'",
+		"chmod '0640' '/opt/servestead/proxy/docker-compose.yml.servestead.tmp'",
+		"/opt/servestead/proxy/docker-compose.yml",
+		"# START Servestead UFW MASQUERADE TRANSLATIONS",
 		"-A POSTROUTING -s 172.17.0.0/16 -o ${egress_interface} -j MASQUERADE",
 		"-A POSTROUTING -s 172.18.0.0/16 -o ${egress_interface} -j MASQUERADE",
 		"-A POSTROUTING -s 172.30.0.0/24 -o ${egress_interface} -j MASQUERADE",
@@ -55,10 +55,10 @@ func TestProxyCommandsDeployPhase4Stack(t *testing.T) {
 		"ufw allow 443/tcp",
 		"ufw allow in on \"$public_interface\" to any port 51820 proto udp comment 'Pangolin Tunnel Entrance'",
 		"ufw allow in on \"$public_interface\" to any port 21820 proto udp comment 'Pangolin Session Tunnel Entrance'",
-		"docker compose -f '/opt/aegisnode/proxy/docker-compose.yml' pull",
-		"docker compose -f '/opt/aegisnode/proxy/docker-compose.yml' down --remove-orphans || true",
-		"docker compose -f '/opt/aegisnode/proxy/docker-compose.yml' up -d --remove-orphans",
-		"docker compose -f '/opt/aegisnode/proxy/docker-compose.yml' ps --services --status running",
+		"docker compose -f '/opt/servestead/proxy/docker-compose.yml' pull",
+		"docker compose -f '/opt/servestead/proxy/docker-compose.yml' down --remove-orphans || true",
+		"docker compose -f '/opt/servestead/proxy/docker-compose.yml' up -d --remove-orphans",
+		"docker compose -f '/opt/servestead/proxy/docker-compose.yml' ps --services --status running",
 		"for service in pangolin gerbil traefik socket-proxy newt; do",
 	} {
 		if !strings.Contains(joined, expected) {
@@ -174,7 +174,7 @@ func TestPangolinBootstrapUsesCSRFProtectedIdempotentAPI(t *testing.T) {
 		"/auth/set-server-admin",
 		"X-CSRF-Token: x-csrf-protection",
 		"/auth/login",
-		`"orgId":"aegisnode"`,
+		`"orgId":"servestead"`,
 		`"niceId":"local-vps"`,
 		`"newtId":"newtidentifier1"`,
 	} {
@@ -187,7 +187,7 @@ func TestPangolinBootstrapUsesCSRFProtectedIdempotentAPI(t *testing.T) {
 func TestRunProxyStepsUsesPrivilegedCommands(t *testing.T) {
 	client := &recordingRemoteClient{}
 	config := proxyConfig{
-		SSHUser:          "aegisadmin",
+		SSHUser:          "servestead",
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
 		ServerSecret:     "secret",
@@ -239,7 +239,7 @@ func TestRunProxyUsesRemoteClientAndPrintsDNSGuidance(t *testing.T) {
 			t.Fatalf("proxy output missing %q:\n%s", expected, stdout.String())
 		}
 	}
-	if len(client.commands) != len(proxyTasks(proxyConfig{SSHUser: "aegisadmin", BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com", ServerSecret: "secret"})) {
+	if len(client.commands) != len(proxyTasks(proxyConfig{SSHUser: "servestead", BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com", ServerSecret: "secret"})) {
 		t.Fatalf("unexpected command count: %d", len(client.commands))
 	}
 }
@@ -247,7 +247,7 @@ func TestRunProxyUsesRemoteClientAndPrintsDNSGuidance(t *testing.T) {
 func TestValidateProxyConfigRejectsInvalidSetupToken(t *testing.T) {
 	err := validateProxyConfig(proxyConfig{
 		Host:             "203.0.113.10",
-		SSHUser:          "aegisadmin",
+		SSHUser:          "servestead",
 		PrivateKeyPath:   "/tmp/key",
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
@@ -270,7 +270,7 @@ func TestProxyRequiresAllDeploymentInputs(t *testing.T) {
 func TestValidateProxyConfigRejectsInvalidDomain(t *testing.T) {
 	err := validateProxyConfig(proxyConfig{
 		Host:             "203.0.113.10",
-		SSHUser:          "aegisadmin",
+		SSHUser:          "servestead",
 		PrivateKeyPath:   "/tmp/key",
 		BaseDomain:       "https://example.com",
 		LetsEncryptEmail: "admin@example.com",

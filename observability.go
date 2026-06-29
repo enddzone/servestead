@@ -1,22 +1,22 @@
 package main
 
 import (
-	"aegisnode/resources"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"path/filepath"
+	"servestead/resources"
 	"sort"
 	"strings"
 )
 
-const observabilityStackDirectory = "/opt/aegisnode/stacks/observability"
-const observabilityRepositoryDirectory = "/opt/aegisnode/repository"
-const observabilityEnvironmentPath = "/etc/aegisnode/observability.env"
+const observabilityStackDirectory = "/opt/servestead/stacks/observability"
+const observabilityRepositoryDirectory = "/opt/servestead/repository"
+const observabilityEnvironmentPath = "/etc/servestead/observability.env"
 const applicationDataDirectory = "/data"
-const stackEnvironmentDirectory = "/etc/aegisnode/stacks"
+const stackEnvironmentDirectory = "/etc/servestead/stacks"
 
 const (
 	beszelImage      = "docker.io/henrygd/beszel:0.18.7"
@@ -71,12 +71,12 @@ func observabilityTasks(config observabilityConfig) []Task {
 	group := firstNonEmpty(config.SSHUser, "root")
 	tasks := []Task{
 		{Name: "Prepare observability directories", Apply: commandScript(
-			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote("/opt/aegisnode/stacks"),
+			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote("/opt/servestead/stacks"),
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory),
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory+"/beszel_data"),
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory+"/agent_keys"),
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory+"/dockhand_data"),
-			"install -d -m 0750 -o root -g "+shellQuote(group)+" /etc/aegisnode",
+			"install -d -m 0750 -o root -g "+shellQuote(group)+" /etc/servestead",
 		)},
 		{Name: "Write Beszel system configuration", Apply: remoteWriteFileCommand(observabilityStackDirectory+"/beszel_data/config.yml", beszelConfigFile(config), "root", group, 0600)},
 		{Name: "Write Beszel Hub private key", Apply: remoteWriteFileCommand(observabilityStackDirectory+"/beszel_data/id_ed25519", config.HubPrivateKey, "root", group, 0600)},
@@ -128,11 +128,11 @@ func observabilityTasks(config observabilityConfig) []Task {
 
 func configuredStackTasks(config observabilityConfig, stack configuredStack, group string) []Task {
 	composePath := observabilityRepositoryDirectory + "/stacks/" + stack.Name + "/compose.yaml"
-	overridePath := "/opt/aegisnode/generated/" + stack.Name + ".pangolin.yaml"
+	overridePath := "/opt/servestead/generated/" + stack.Name + ".pangolin.yaml"
 	deploymentPath := observabilityRepositoryDirectory + ".stack-" + stack.Name + ".deployment"
 	environmentPath := stackEnvironmentDirectory + "/" + stack.Name + ".env"
 	composeCommand := "docker compose --env-file " + shellQuote(environmentPath) +
-		" -p " + shellQuote("aegisnode-"+stack.Name) +
+		" -p " + shellQuote("servestead-"+stack.Name) +
 		" -f " + shellQuote(composePath) + " -f " + shellQuote(overridePath)
 
 	tasks := []Task{}
@@ -167,7 +167,7 @@ func configuredStackTasks(config observabilityConfig, stack configuredStack, gro
 		stackDataDirectoryTask(stack),
 		stackEnvironmentTask(stack, environmentPath),
 		Task{Name: "Generate " + stack.Name + " deployment override", Apply: commandScript(
-			"install -d -m 0750 -o root -g "+shellQuote(group)+" /opt/aegisnode/generated",
+			"install -d -m 0750 -o root -g "+shellQuote(group)+" /opt/servestead/generated",
 			remoteWriteFileCommand(overridePath, stack.Override, "root", group, 0640),
 		)},
 	)
@@ -225,7 +225,7 @@ func stackDataDirectoryTask(stack configuredStack) Task {
 func stackEnvironmentTask(stack configuredStack, path string) Task {
 	script := commandScript(
 		"install -d -m 0700 -o root -g root "+shellQuote(stackEnvironmentDirectory),
-		"temporary="+shellQuote(path+".aegisnode.tmp"),
+		"temporary="+shellQuote(path+".servestead.tmp"),
 		"cat > \"$temporary\"",
 		"chown root:root \"$temporary\"",
 		"chmod 0600 \"$temporary\"",
@@ -270,16 +270,16 @@ resources=json.load(sys.stdin)["data"]["resources"]
 names=sys.argv[1:]
 for resource in resources:
  nice_id=resource.get("niceId","")
- if any(nice_id.startswith("aegisnode-"+name+"-") for name in names):
+ if any(nice_id.startswith("servestead-"+name+"-") for name in names):
   print(resource["resourceId"])`
 	commands := []string{
 		"desired=" + shellQuote(desired),
 		"removed=''",
-		"for candidate in " + shellQuote(observabilityRepositoryDirectory) + ".stack-*.deployment /opt/aegisnode/generated/*.pangolin.yaml; do",
+		"for candidate in " + shellQuote(observabilityRepositoryDirectory) + ".stack-*.deployment /opt/servestead/generated/*.pangolin.yaml; do",
 		"  [ -e \"$candidate\" ] || continue",
 		"  case \"$candidate\" in",
 		"    " + shellQuote(observabilityRepositoryDirectory) + ".stack-*.deployment) name=\"${candidate#" + observabilityRepositoryDirectory + ".stack-}\"; name=\"${name%.deployment}\" ;;",
-		"    /opt/aegisnode/generated/*.pangolin.yaml) name=\"${candidate#/opt/aegisnode/generated/}\"; name=\"${name%.pangolin.yaml}\" ;;",
+		"    /opt/servestead/generated/*.pangolin.yaml) name=\"${candidate#/opt/servestead/generated/}\"; name=\"${name%.pangolin.yaml}\" ;;",
 		"  esac",
 		"  case \"$name\" in ''|*[!a-z0-9-]*) continue ;; esac",
 		"  case \"$desired\" in *\" $name \"*) continue ;; esac",
@@ -292,20 +292,20 @@ for resource in resources:
 		"trap cleanup_removed_stacks EXIT",
 		"docker stop aegis-newt >/dev/null 2>&1 || true",
 		"for name in $removed; do",
-		"  project=\"aegisnode-$name\"",
+		"  project=\"servestead-$name\"",
 		"  containers=\"$(docker ps -aq --filter label=com.docker.compose.project=\"$project\")\"",
 		"  [ -z \"$containers\" ] || docker rm -f $containers",
 		"  networks=\"$(docker network ls -q --filter label=com.docker.compose.project=\"$project\")\"",
 		"  [ -z \"$networks\" ] || docker network rm $networks",
 		"  rm -rf -- " + shellQuote(observabilityRepositoryDirectory) + "/stacks/\"$name\"",
-		"  rm -f -- /opt/aegisnode/generated/\"$name\".pangolin.yaml " + shellQuote(observabilityRepositoryDirectory) + ".stack-\"$name\".deployment",
+		"  rm -f -- /opt/servestead/generated/\"$name\".pangolin.yaml " + shellQuote(observabilityRepositoryDirectory) + ".stack-\"$name\".deployment",
 		"  rm -f -- " + shellQuote(stackEnvironmentDirectory) + "/\"$name\".env",
 		"done",
 		`api='http://127.0.0.1:3000/api/v1'`,
 	}
 	commands = append(commands, pangolinLoginCommand(loginPayload)...)
 	commands = append(commands,
-		`resources="$(curl -fsS -b "$cookie_file" "$api/org/aegisnode/resources?pageSize=100")"`,
+		`resources="$(curl -fsS -b "$cookie_file" "$api/org/servestead/resources?pageSize=100")"`,
 		`delete_ids="$(printf '%s' "$resources" | python3 -c `+shellQuote(selectResources)+` $removed)"`,
 		`for resource_id in $delete_ids; do`,
 		`  curl -fsS -b "$cookie_file" -X DELETE "$api/resource/$resource_id" -H 'X-CSRF-Token: x-csrf-protection' >/dev/null`,
@@ -332,7 +332,7 @@ func removedDockhandGitStackCleanupTask(config observabilityConfig) Task {
 desired=set(json.loads(sys.argv[1]))
 for stack in json.load(sys.stdin):
  name=stack.get("stackName","")
- if name.startswith("aegisnode-") and name not in desired:
+ if name.startswith("servestead-") and name not in desired:
   print(stack["id"])`
 	commands := dockhandEnvironmentCommandPrelude("")
 	commands = append(commands,
@@ -423,7 +423,7 @@ print(str(data.get("commit") or ""))`
 		`sync_commit="$(printf '%s' "$sync_result" | python3 -c `+shellQuote(extractCommit)+`)"`,
 		`case "$sync_commit" in`,
 		`  `+commitPrefix+`*) echo `+shellQuote("Dockhand Git stack "+stack.Name+" synced to "+commitPrefix+".")+` ;;`,
-		`  *) echo `+shellQuote("Dockhand Git stack "+stack.Name+" synced, but did not report the committed AegisNode revision "+commitPrefix+".")+` >&2 ;;`,
+		`  *) echo `+shellQuote("Dockhand Git stack "+stack.Name+" synced, but did not report the committed Servestead revision "+commitPrefix+".")+` >&2 ;;`,
 		`esac`,
 	)
 	return commandScript(commands...)
@@ -441,7 +441,7 @@ sys.exit(0 if isinstance(containers,list) and len(containers)>0 else 1)`
 		`set +e; dockhand_wait_available; dockhand_status=$?; set -e`,
 		`case "$dockhand_status" in`,
 		`  0) ;;`,
-		`  2) echo 'Dockhand authentication is enabled and AegisNode has no Dockhand API session; skipping Dockhand environment setup.' >&2; exit 0 ;;`,
+		`  2) echo 'Dockhand authentication is enabled and Servestead has no Dockhand API session; skipping Dockhand environment setup.' >&2; exit 0 ;;`,
 		`  *) echo 'Dockhand API did not become available after deployment.' >&2; exit 1 ;;`,
 		`esac`,
 		`dockhand_environment_id="$(dockhand_ensure_environment)" || { echo 'Dockhand local Docker environment could not be created or updated.' >&2; exit 1; }`,
@@ -509,7 +509,7 @@ func dockhandEnvironmentPayload(publicIP string) string {
 		publicIPValue = jsonString(strings.TrimSpace(publicIP))
 	}
 	return fmt.Sprintf(
-		`{"name":%s,"connectionType":"direct","host":%s,"port":%d,"protocol":"http","tlsSkipVerify":false,"icon":"server","collectActivity":true,"collectMetrics":true,"highlightChanges":true,"labels":["aegisnode"],"publicIp":%s}`,
+		`{"name":%s,"connectionType":"direct","host":%s,"port":%d,"protocol":"http","tlsSkipVerify":false,"icon":"server","collectActivity":true,"collectMetrics":true,"highlightChanges":true,"labels":["servestead"],"publicIp":%s}`,
 		jsonString(dockhandEnvironmentName),
 		jsonString(dockhandEnvironmentHost),
 		dockhandEnvironmentPort,
@@ -549,7 +549,7 @@ func dockhandCommandPrelude() []string {
 		`dockhand_available() {`,
 		`  session="$(curl -fsS "$dockhand_api/auth/session" 2>/dev/null)" || return 1`,
 		`  if printf '%s' "$session" | grep -Eq '"authEnabled"[[:space:]]*:[[:space:]]*true' && ! printf '%s' "$session" | grep -Eq '"authenticated"[[:space:]]*:[[:space:]]*true'; then`,
-		`    echo 'Dockhand authentication is enabled and AegisNode has no Dockhand API session; skipping Dockhand API reconciliation.' >&2`,
+		`    echo 'Dockhand authentication is enabled and Servestead has no Dockhand API session; skipping Dockhand API reconciliation.' >&2`,
 		`    return 2`,
 		`  fi`,
 		`  return 0`,
@@ -567,7 +567,7 @@ func dockhandCommandPrelude() []string {
 }
 
 func dockhandGitStackName(stackName string) string {
-	return "aegisnode-" + stackName
+	return "servestead-" + stackName
 }
 
 func stackResourceVerifyCommand(config observabilityConfig, stack configuredStack) string {
@@ -575,7 +575,7 @@ func stackResourceVerifyCommand(config observabilityConfig, stack configuredStac
 	for _, resource := range stack.Resources {
 		specs = append(specs, fmt.Sprintf(
 			`{"nice_id":%s,"domain":%s}`,
-			jsonString("aegisnode-"+stack.Name+"-"+resource.ID),
+			jsonString("servestead-"+stack.Name+"-"+resource.ID),
 			jsonString(resource.Subdomain+"."+config.BaseDomain),
 		))
 	}
@@ -624,7 +624,7 @@ func observabilityRepositoryTask(config observabilityConfig, group string) Task 
 	deploymentPath := observabilityRepositoryDirectory + ".deployment"
 	verifySnapshot := commandScript(
 		"if [ -e "+shellQuote(observabilityRepositoryDirectory)+" ] && [ ! -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+" ] && [ ! -f "+shellQuote(deploymentPath)+" ]; then",
-		"  echo 'remote configuration directory is not managed by AegisNode' >&2",
+		"  echo 'remote configuration directory is not managed by Servestead' >&2",
 		"  exit 1",
 		"fi",
 		"if [ -f "+shellQuote(deploymentPath)+" ] && [ ! -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+" ]; then",
@@ -645,13 +645,13 @@ func observabilityRepositoryTask(config observabilityConfig, group string) Task 
 	}
 
 	script := commandScript(
-		"IFS= read -r AEGISNODE_GITHUB_TOKEN || true",
-		"export AEGISNODE_GITHUB_TOKEN",
+		"IFS= read -r SERVESTEAD_GITHUB_TOKEN || true",
+		"export SERVESTEAD_GITHUB_TOKEN",
 		"askpass=\"$(mktemp)\"",
 		"checkout=\"$(mktemp -d)\"",
-		"cleanup_git_credentials() { rm -f \"$askpass\"; rm -rf \"$checkout\"; unset AEGISNODE_GITHUB_TOKEN; }",
+		"cleanup_git_credentials() { rm -f \"$askpass\"; rm -rf \"$checkout\"; unset SERVESTEAD_GITHUB_TOKEN; }",
 		"trap cleanup_git_credentials EXIT",
-		"printf '%s\\n' '#!/bin/sh' 'case \"$1\" in *Username*) printf \"%s\\\\n\" x-access-token;; *) printf \"%s\\\\n\" \"$AEGISNODE_GITHUB_TOKEN\";; esac' >\"$askpass\"",
+		"printf '%s\\n' '#!/bin/sh' 'case \"$1\" in *Username*) printf \"%s\\\\n\" x-access-token;; *) printf \"%s\\\\n\" \"$SERVESTEAD_GITHUB_TOKEN\";; esac' >\"$askpass\"",
 		"chmod 0700 \"$askpass\"",
 		"export GIT_ASKPASS=\"$askpass\" GIT_TERMINAL_PROMPT=0",
 		verifySnapshot,
@@ -684,7 +684,7 @@ func beszelConfigFile(config observabilityConfig) string {
 func observabilityComposeFile(config observabilityConfig) string {
 	return mustRenderResourceTemplate(resources.ObservabilityCompose, struct {
 		observabilityConfig
-		AegisPublicNetwork          string
+		ServesteadPublicNetwork     string
 		BeszelAgentImage            string
 		BeszelImage                 string
 		BeszelLabels                []string
@@ -698,16 +698,16 @@ func observabilityComposeFile(config observabilityConfig) string {
 		SocketProxyImage            string
 	}{
 		observabilityConfig:         config,
-		AegisPublicNetwork:          aegisPublicNetwork,
+		ServesteadPublicNetwork:     servesteadPublicNetwork,
 		BeszelAgentImage:            beszelAgentImage,
 		BeszelImage:                 beszelImage,
-		BeszelLabels:                observabilityComposeLabels(config, "aegisnode-beszel", "Beszel", "beszel", 8090, "/"),
+		BeszelLabels:                observabilityComposeLabels(config, "servestead-beszel", "Beszel", "beszel", 8090, "/"),
 		BeszelURL:                   "https://beszel." + config.BaseDomain,
 		DockhandDataDirectory:       observabilityStackDirectory + "/dockhand_data",
 		DockhandImage:               dockhandImage,
-		DockhandLabels:              observabilityComposeLabels(config, "aegisnode-dockhand", "Dockhand", "dockhand", 3000, "/api/auth/session"),
+		DockhandLabels:              observabilityComposeLabels(config, "servestead-dockhand", "Dockhand", "dockhand", 3000, "/api/auth/session"),
 		DozzleImage:                 dozzleImage,
-		DozzleLabels:                observabilityComposeLabels(config, "aegisnode-dozzle", "Dozzle", "dozzle", 8080, "/healthcheck"),
+		DozzleLabels:                observabilityComposeLabels(config, "servestead-dozzle", "Dozzle", "dozzle", 8080, "/healthcheck"),
 		ObservabilityStackDirectory: observabilityStackDirectory,
 		SocketProxyImage:            socketProxyImage,
 	})
@@ -794,7 +794,7 @@ sys.exit(0 if ok else 1)`
 
 func observabilityResourceSpecs(baseDomain string) string {
 	return fmt.Sprintf(
-		`[{"name":"Beszel","domain":%s,"nice_id":"aegisnode-beszel"},{"name":"Dozzle","domain":%s,"nice_id":"aegisnode-dozzle"},{"name":"Dockhand","domain":%s,"nice_id":"aegisnode-dockhand"}]`,
+		`[{"name":"Beszel","domain":%s,"nice_id":"servestead-beszel"},{"name":"Dozzle","domain":%s,"nice_id":"servestead-dozzle"},{"name":"Dockhand","domain":%s,"nice_id":"servestead-dockhand"}]`,
 		jsonString("beszel."+baseDomain), jsonString("dozzle."+baseDomain), jsonString("dockhand."+baseDomain),
 	)
 }

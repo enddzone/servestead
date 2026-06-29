@@ -40,7 +40,7 @@ func defaultConfigRepositoryPath(profileID string) (string, error) {
 		}
 		configDirectory = filepath.Join(homeDirectory, ".config")
 	}
-	return filepath.Join(configDirectory, "aegisnode", "repositories", profileID), nil
+	return filepath.Join(configDirectory, "servestead", "repositories", profileID), nil
 }
 
 func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Profile, state ProfileState, config setupConfig) (Profile, setupConfig, error) {
@@ -69,7 +69,7 @@ func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Pr
 		ctx,
 		path,
 		config.GitHubRepositoryURL,
-		os.Getenv("AEGISNODE_GITHUB_TOKEN"),
+		os.Getenv("SERVESTEAD_GITHUB_TOKEN"),
 		profile.ID,
 		scaffold,
 	)
@@ -87,7 +87,7 @@ func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Pr
 	config.ConfigRepositoryOrigin = revision.Origin
 	config.ConfigRepositoryCompose = revision.Compose
 	config.ConfigRepositorySHA256 = revision.ComposeSHA
-	config.GitHubToken = os.Getenv("AEGISNODE_GITHUB_TOKEN")
+	config.GitHubToken = os.Getenv("SERVESTEAD_GITHUB_TOKEN")
 	secrets, err := store.LoadSecrets(profile.ID)
 	if err != nil {
 		return profile, config, err
@@ -173,18 +173,18 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 	}
 	if scaffoldChanged {
 		if existed {
-			return configRepositoryRevision{}, fmt.Errorf("%w: updated %s; review, commit, and rerun AegisNode", errRepositoryReviewRequired, composePath)
+			return configRepositoryRevision{}, fmt.Errorf("%w: updated %s; review, commit, and rerun Servestead", errRepositoryReviewRequired, composePath)
 		}
 		env := []string{
-			"GIT_AUTHOR_NAME=AegisNode",
-			"GIT_AUTHOR_EMAIL=aegisnode@localhost",
-			"GIT_COMMITTER_NAME=AegisNode",
-			"GIT_COMMITTER_EMAIL=aegisnode@localhost",
+			"GIT_AUTHOR_NAME=Servestead",
+			"GIT_AUTHOR_EMAIL=servestead@localhost",
+			"GIT_COMMITTER_NAME=Servestead",
+			"GIT_COMMITTER_EMAIL=servestead@localhost",
 		}
 		if _, err := runGit(ctx, path, env, "add", "--", observabilityComposeRepositoryPath); err != nil {
 			return configRepositoryRevision{}, err
 		}
-		if _, err := runGit(ctx, path, env, "commit", "-m", "Initialize AegisNode configuration"); err != nil {
+		if _, err := runGit(ctx, path, env, "commit", "-m", "Initialize Servestead configuration"); err != nil {
 			return configRepositoryRevision{}, err
 		}
 	}
@@ -352,8 +352,8 @@ func isManagedObservabilityCompose(data []byte) bool {
 		}
 	}
 	for serviceName, prefix := range map[string]string{
-		"beszel": "pangolin.public-resources.aegisnode-beszel.",
-		"dozzle": "pangolin.public-resources.aegisnode-dozzle.",
+		"beszel": "pangolin.public-resources.servestead-beszel.",
+		"dozzle": "pangolin.public-resources.servestead-dozzle.",
 	} {
 		managed := false
 		for _, label := range document.Services[serviceName].Labels {
@@ -398,7 +398,7 @@ func loadCommittedStacks(ctx context.Context, repositoryPath string) ([]reposito
 		}
 		metadataContent, err := runGit(ctx, repositoryPath, nil, "show", "HEAD:"+base+stackMetadataFilename)
 		if err != nil {
-			return nil, fmt.Errorf("stack %s is not configured; run aegisnode stack add --profile <id> --compose %s", name, filepath.Join(repositoryPath, filepath.FromSlash(base+"compose.yaml")))
+			return nil, fmt.Errorf("stack %s is not configured; run servestead stack add --profile <id> --compose %s", name, filepath.Join(repositoryPath, filepath.FromSlash(base+"compose.yaml")))
 		}
 		var metadata stackMetadata
 		if err := yaml.Unmarshal([]byte(metadataContent), &metadata); err != nil {
@@ -463,19 +463,19 @@ func runGit(ctx context.Context, directory string, extraEnv []string, arguments 
 
 func cloneGitHubRepository(ctx context.Context, repositoryURL, destination, token string) error {
 	if token == "" {
-		token = os.Getenv("AEGISNODE_GITHUB_TOKEN")
+		token = os.Getenv("SERVESTEAD_GITHUB_TOKEN")
 	}
 	parent := filepath.Dir(destination)
 	if err := os.MkdirAll(parent, 0700); err != nil {
 		return err
 	}
-	askpassDirectory, err := os.MkdirTemp("", "aegisnode-git-askpass-")
+	askpassDirectory, err := os.MkdirTemp("", "servestead-git-askpass-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(askpassDirectory)
 	askpassPath := filepath.Join(askpassDirectory, "askpass")
-	askpass := "#!/bin/sh\ncase \"$1\" in *Username*) printf '%s\\n' x-access-token;; *) printf '%s\\n' \"$AEGISNODE_GITHUB_TOKEN\";; esac\n"
+	askpass := "#!/bin/sh\ncase \"$1\" in *Username*) printf '%s\\n' x-access-token;; *) printf '%s\\n' \"$SERVESTEAD_GITHUB_TOKEN\";; esac\n"
 	if err := os.WriteFile(askpassPath, []byte(askpass), 0700); err != nil {
 		return err
 	}
@@ -483,7 +483,7 @@ func cloneGitHubRepository(ctx context.Context, repositoryURL, destination, toke
 	command.Env = append(os.Environ(),
 		"GIT_ASKPASS="+askpassPath,
 		"GIT_TERMINAL_PROMPT=0",
-		"AEGISNODE_GITHUB_TOKEN="+token,
+		"SERVESTEAD_GITHUB_TOKEN="+token,
 	)
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
@@ -532,37 +532,37 @@ func validateObservabilityCompose(data []byte) error {
 		if (serviceName == "beszel" || serviceName == "dozzle") && len(service.Ports) != 0 {
 			return fmt.Errorf("%s is incompatible: service %q must not publish host ports", observabilityComposeRepositoryPath, serviceName)
 		}
-		if serviceName != "dockhand-socket-proxy" && !containsString(service.Networks, aegisPublicNetwork) {
-			return fmt.Errorf("%s is incompatible: service %q must use the %s network", observabilityComposeRepositoryPath, serviceName, aegisPublicNetwork)
+		if serviceName != "dockhand-socket-proxy" && !containsString(service.Networks, servesteadPublicNetwork) {
+			return fmt.Errorf("%s is incompatible: service %q must use the %s network", observabilityComposeRepositoryPath, serviceName, servesteadPublicNetwork)
 		}
 	}
-	if !document.Networks[aegisPublicNetwork].External {
-		return fmt.Errorf("%s is incompatible: network %q must be external", observabilityComposeRepositoryPath, aegisPublicNetwork)
+	if !document.Networks[servesteadPublicNetwork].External {
+		return fmt.Errorf("%s is incompatible: network %q must be external", observabilityComposeRepositoryPath, servesteadPublicNetwork)
 	}
 	requiredLabels := map[string][]string{
 		"beszel": {
-			"pangolin.public-resources.aegisnode-beszel.name=Beszel",
-			"pangolin.public-resources.aegisnode-beszel.protocol=http",
-			"pangolin.public-resources.aegisnode-beszel.auth.sso-enabled=true",
-			"pangolin.public-resources.aegisnode-beszel.targets[0].hostname=beszel",
-			"pangolin.public-resources.aegisnode-beszel.targets[0].port=8090",
-			"pangolin.public-resources.aegisnode-beszel.targets[0].method=http",
+			"pangolin.public-resources.servestead-beszel.name=Beszel",
+			"pangolin.public-resources.servestead-beszel.protocol=http",
+			"pangolin.public-resources.servestead-beszel.auth.sso-enabled=true",
+			"pangolin.public-resources.servestead-beszel.targets[0].hostname=beszel",
+			"pangolin.public-resources.servestead-beszel.targets[0].port=8090",
+			"pangolin.public-resources.servestead-beszel.targets[0].method=http",
 		},
 		"dozzle": {
-			"pangolin.public-resources.aegisnode-dozzle.name=Dozzle",
-			"pangolin.public-resources.aegisnode-dozzle.protocol=http",
-			"pangolin.public-resources.aegisnode-dozzle.auth.sso-enabled=true",
-			"pangolin.public-resources.aegisnode-dozzle.targets[0].hostname=dozzle",
-			"pangolin.public-resources.aegisnode-dozzle.targets[0].port=8080",
-			"pangolin.public-resources.aegisnode-dozzle.targets[0].method=http",
+			"pangolin.public-resources.servestead-dozzle.name=Dozzle",
+			"pangolin.public-resources.servestead-dozzle.protocol=http",
+			"pangolin.public-resources.servestead-dozzle.auth.sso-enabled=true",
+			"pangolin.public-resources.servestead-dozzle.targets[0].hostname=dozzle",
+			"pangolin.public-resources.servestead-dozzle.targets[0].port=8080",
+			"pangolin.public-resources.servestead-dozzle.targets[0].method=http",
 		},
 		"dockhand": {
-			"pangolin.public-resources.aegisnode-dockhand.name=Dockhand",
-			"pangolin.public-resources.aegisnode-dockhand.protocol=http",
-			"pangolin.public-resources.aegisnode-dockhand.auth.sso-enabled=true",
-			"pangolin.public-resources.aegisnode-dockhand.targets[0].hostname=dockhand",
-			"pangolin.public-resources.aegisnode-dockhand.targets[0].port=3000",
-			"pangolin.public-resources.aegisnode-dockhand.targets[0].method=http",
+			"pangolin.public-resources.servestead-dockhand.name=Dockhand",
+			"pangolin.public-resources.servestead-dockhand.protocol=http",
+			"pangolin.public-resources.servestead-dockhand.auth.sso-enabled=true",
+			"pangolin.public-resources.servestead-dockhand.targets[0].hostname=dockhand",
+			"pangolin.public-resources.servestead-dockhand.targets[0].port=3000",
+			"pangolin.public-resources.servestead-dockhand.targets[0].method=http",
 		},
 	}
 	for serviceName, required := range requiredLabels {
@@ -572,7 +572,7 @@ func validateObservabilityCompose(data []byte) error {
 				return fmt.Errorf("%s is incompatible: required label %q is missing", observabilityComposeRepositoryPath, label)
 			}
 		}
-		prefix := "pangolin.public-resources.aegisnode-" + serviceName + ".full-domain="
+		prefix := "pangolin.public-resources.servestead-" + serviceName + ".full-domain="
 		if !containsPrefix(labels, prefix) {
 			return fmt.Errorf("%s is incompatible: required label %q is missing", observabilityComposeRepositoryPath, prefix+"<hostname>")
 		}

@@ -1,13 +1,13 @@
 package main
 
 import (
-	"aegisnode/resources"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"servestead/resources"
 	"strings"
 )
 
@@ -31,7 +31,7 @@ func runBootstrap(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	config := bootstrapConfig{}
 	flags.StringVar(&config.Host, "host", "", "target VPS IPv4 address or hostname")
 	flags.StringVar(&config.SSHUser, "ssh-user", "root", "initial SSH user")
-	flags.StringVar(&config.AdminUser, "admin-user", "aegisadmin", "administrative user to create")
+	flags.StringVar(&config.AdminUser, "admin-user", "servestead", "administrative user to create")
 	flags.StringVar(&config.AdminPublicKeyPath, "admin-public-key", "", "path to the admin ED25519 public key")
 	flags.StringVar(&config.PrivateKeyPath, "private-key", "", "path to the private key used for initial SSH access")
 	if err := flags.Parse(args); err != nil {
@@ -108,7 +108,7 @@ func bootstrapTasks(config bootstrapConfig, adminPublicKey string) []Task {
 
 func sudoersCommand(adminUser string) string {
 	path := "/etc/sudoers.d/" + adminUser
-	temporaryPath := path + ".aegisnode.tmp"
+	temporaryPath := path + ".servestead.tmp"
 	content := adminUser + " ALL=(ALL) NOPASSWD:ALL\n"
 	return mustRenderResourceTemplate(resources.BootstrapSudoersScript, struct {
 		Content       string
