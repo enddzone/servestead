@@ -224,7 +224,6 @@ func TestRunProxyUsesRemoteClientAndPrintsDNSGuidance(t *testing.T) {
 		"--domain", "example.com",
 		"--email", "admin@example.com",
 		"--server-secret", "secret",
-		"--setup-token", "0123456789abcdefghijklmnopqrstuv",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatal(err)
@@ -254,7 +253,7 @@ func TestValidateProxyConfigRejectsInvalidSetupToken(t *testing.T) {
 		ServerSecret:     "secret",
 		SetupToken:       "not-valid",
 	})
-	if err == nil || err.Error() != "--setup-token must contain exactly 32 lowercase letters or digits" {
+	if err == nil || err.Error() != "Pangolin setup token must contain exactly 32 lowercase letters or digits" {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

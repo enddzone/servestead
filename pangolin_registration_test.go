@@ -52,13 +52,14 @@ func TestPangolinInitialSetupCompleteRejectsMissingState(t *testing.T) {
 	}
 }
 
-func TestProfileDashboardHighlightsIncompletePangolinAndRevealsToken(t *testing.T) {
+func TestProfileDashboardHighlightsIncompletePangolinAndRevealsCredentials(t *testing.T) {
 	choice := profileChoice{
 		Profile: Profile{
-			ID:         "production",
-			Name:       "production",
-			IP:         "203.0.113.10",
-			BaseDomain: "example.com",
+			ID:                 "production",
+			Name:               "production",
+			IP:                 "203.0.113.10",
+			BaseDomain:         "example.com",
+			PangolinAdminEmail: "owner@example.com",
 		},
 		State: ProfileState{
 			ActiveRunID: "run-1",
@@ -71,7 +72,7 @@ func TestProfileDashboardHighlightsIncompletePangolinAndRevealsToken(t *testing.
 				},
 			},
 		},
-		Secrets: ProfileSecrets{PangolinSetupToken: "0123456789abcdefghijklmnopqrstuv"},
+		Secrets: ProfileSecrets{PangolinAdminPassword: "current-password"},
 	}
 	model := newProfileSetupModel([]profileChoice{choice})
 	model.selectedIndex = 0
@@ -83,36 +84,40 @@ func TestProfileDashboardHighlightsIncompletePangolinAndRevealsToken(t *testing.
 	view := model.View()
 	for _, expected := range []string{
 		"ACTION REQUIRED: Pangolin initial admin registration is incomplete.",
-		"Press t to reveal the saved setup token",
+		"Press p to reveal the saved Pangolin admin username and password.",
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("dashboard missing %q:\n%s", expected, view)
 		}
 	}
-	if strings.Contains(view, choice.Secrets.PangolinSetupToken) {
-		t.Fatalf("dashboard exposed setup token before reveal:\n%s", view)
+	if strings.Contains(view, choice.Secrets.PangolinAdminPassword) {
+		t.Fatalf("dashboard exposed Pangolin password before reveal:\n%s", view)
 	}
 
-	updated, _ = model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	updated, _ = model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
 	view = updated.(profileSetupModel).View()
 	for _, expected := range []string{
-		"https://pangolin.example.com/auth/initial-setup",
-		choice.Secrets.PangolinSetupToken,
+		"Pangolin URL: https://pangolin.example.com",
+		"Username: owner@example.com",
+		"Password: current-password",
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("revealed dashboard missing %q:\n%s", expected, view)
 		}
 	}
+	if strings.Contains(view, "setup token") || strings.Contains(view, "initial-setup") {
+		t.Fatalf("dashboard exposed obsolete setup-token guidance:\n%s", view)
+	}
 }
 
-func TestLoadProfileChoicesIncludesSavedPangolinToken(t *testing.T) {
+func TestLoadProfileChoicesIncludesSavedPangolinCredentials(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
 	profile, err := store.Create(Profile{ID: "production", IP: "203.0.113.10"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SaveSecrets(profile.ID, ProfileSecrets{
-		PangolinSetupToken: "0123456789abcdefghijklmnopqrstuv",
+		PangolinAdminPassword: "current-password",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -121,8 +126,8 @@ func TestLoadProfileChoicesIncludesSavedPangolinToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(choices) != 1 || choices[0].Secrets.PangolinSetupToken != "0123456789abcdefghijklmnopqrstuv" {
-		t.Fatalf("saved setup token was not loaded into TUI choice: %+v", choices)
+	if len(choices) != 1 || choices[0].Secrets.PangolinAdminPassword != "current-password" {
+		t.Fatalf("saved Pangolin credentials were not loaded into TUI choice: %+v", choices)
 	}
 }
 

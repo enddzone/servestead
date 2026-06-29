@@ -428,7 +428,7 @@ type profileSetupModel struct {
 	singleStage              string
 	pangolinStatus           pangolinRegistrationStatus
 	pangolinError            string
-	showSetupToken           bool
+	showPangolinCredentials  bool
 	fresh                    bool
 	inputs                   []textinput.Model
 	advanced                 []textinput.Model
@@ -997,9 +997,9 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 	case "x", "X":
 		model.err = ""
 		model.screen = profileSetupScreenDeleteConfirm
-	case "t", "T":
-		if model.selectedProfileHasSetupToken() {
-			model.showSetupToken = !model.showSetupToken
+	case "p", "P":
+		if model.selectedProfileHasPangolinCredentials() {
+			model.showPangolinCredentials = !model.showPangolinCredentials
 		}
 	case "c", "C":
 		return model, model.checkPangolinRegistration()
@@ -2392,7 +2392,7 @@ func (model *profileSetupModel) storeFocusedInputs(inputs []textinput.Model, adv
 func (model *profileSetupModel) refreshDashboard() {
 	model.pangolinStatus = pangolinRegistrationUnknown
 	model.pangolinError = ""
-	model.showSetupToken = false
+	model.showPangolinCredentials = false
 	model.stacks = nil
 	model.stackGitStatus = ""
 	model.stackHead = ""
@@ -2434,10 +2434,13 @@ func (model *profileSetupModel) checkPangolinRegistration() tea.Cmd {
 	}
 }
 
-func (model profileSetupModel) selectedProfileHasSetupToken() bool {
-	return model.selectedIndex >= 0 &&
-		model.selectedIndex < len(model.profiles) &&
-		model.profiles[model.selectedIndex].Secrets.PangolinSetupToken != ""
+func (model profileSetupModel) selectedProfileHasPangolinCredentials() bool {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		return false
+	}
+	choice := model.profiles[model.selectedIndex]
+	return choice.Secrets.PangolinAdminPassword != "" &&
+		firstNonEmpty(choice.Profile.PangolinAdminEmail, choice.Profile.LetsEncryptEmail) != ""
 }
 
 func (model *profileSetupModel) refreshPlanPreview() {
@@ -2614,12 +2617,12 @@ func (model profileSetupModel) View() string {
 	}
 	builder.WriteString("\n\n")
 	builder.WriteString(model.help.View(profileSetupHelp{
-		screen:               model.screen,
-		hasProfile:           model.selectedIndex >= 0,
-		hasSetupToken:        model.selectedProfileHasSetupToken(),
-		stackComposeManual:   model.stackComposeManual,
-		stackEnvironmentMode: model.stackEnvironmentMode,
-		stackEditorFocus:     model.focus,
+		screen:                 model.screen,
+		hasProfile:             model.selectedIndex >= 0,
+		hasPangolinCredentials: model.selectedProfileHasPangolinCredentials(),
+		stackComposeManual:     model.stackComposeManual,
+		stackEnvironmentMode:   model.stackEnvironmentMode,
+		stackEditorFocus:       model.focus,
 	}))
 	return builder.String()
 }
@@ -2888,24 +2891,20 @@ func (model profileSetupModel) pangolinRegistrationView(choice profileChoice) st
 	if !proxyComplete {
 		return builder.String()
 	}
-	if choice.Secrets.PangolinSetupToken == "" {
-		if model.pangolinStatus == pangolinRegistrationIncomplete {
-			builder.WriteString("\n")
-			builder.WriteString(setupWarningStyle.Render("No saved token. Run Platform once to generate and deploy one."))
-		}
+	username := firstNonEmpty(choice.Profile.PangolinAdminEmail, choice.Profile.LetsEncryptEmail)
+	if choice.Secrets.PangolinAdminPassword == "" || username == "" {
+		builder.WriteString("\n")
+		builder.WriteString(setupWarningStyle.Render("No saved Pangolin administrator credentials. Enter the current email and password in Advanced setup before running Platform, Observability, or stacks."))
 		return builder.String()
 	}
-	if model.showSetupToken {
+	if model.showPangolinCredentials {
 		builder.WriteString("\n")
-		builder.WriteString(fmt.Sprintf("Initial setup URL: https://pangolin.%s/auth/initial-setup\n", choice.Profile.BaseDomain))
-		builder.WriteString(fmt.Sprintf("Setup token: %s", choice.Secrets.PangolinSetupToken))
-		if model.pangolinStatus == pangolinRegistrationComplete {
-			builder.WriteString("\n")
-			builder.WriteString(setupHelpStyle.Render("This one-time token is no longer valid after registration."))
-		}
+		builder.WriteString(fmt.Sprintf("Pangolin URL: https://pangolin.%s\n", choice.Profile.BaseDomain))
+		builder.WriteString(fmt.Sprintf("Username: %s\n", username))
+		builder.WriteString(fmt.Sprintf("Password: %s", choice.Secrets.PangolinAdminPassword))
 	} else {
 		builder.WriteString("\n")
-		builder.WriteString(setupHelpStyle.Render("Press t to reveal the saved setup token and initial-setup URL."))
+		builder.WriteString(setupHelpStyle.Render("Press p to reveal the saved Pangolin admin username and password."))
 	}
 	return builder.String()
 }
@@ -2999,12 +2998,12 @@ func (model profileSetupModel) deleteConfirmView() string {
 }
 
 type profileSetupHelp struct {
-	screen               profileSetupScreen
-	hasProfile           bool
-	hasSetupToken        bool
-	stackComposeManual   bool
-	stackEnvironmentMode stackEnvironmentMode
-	stackEditorFocus     int
+	screen                 profileSetupScreen
+	hasProfile             bool
+	hasPangolinCredentials bool
+	stackComposeManual     bool
+	stackEnvironmentMode   stackEnvironmentMode
+	stackEditorFocus       int
 }
 
 func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
@@ -3031,8 +3030,8 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 			bindings = append(bindings, key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "fresh")))
 			bindings = append(bindings, key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete")))
 		}
-		if helpMap.hasSetupToken {
-			bindings = append(bindings, key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "setup token")))
+		if helpMap.hasPangolinCredentials {
+			bindings = append(bindings, key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "credentials")))
 		}
 		return bindings
 	case profileSetupScreenIntake:
@@ -4703,11 +4702,7 @@ func (model *profileRunModel) applyTaskEvent(event TaskEvent) {
 		model.setStageCurrent(event.Stage, event.TaskName)
 		model.appendRunLog(fmt.Sprintf("%s: %s", profileRunStageLabel(event.Stage), event.TaskName))
 	case TaskLogLine:
-		prefix := profileRunStageLabel(event.Stage)
-		if event.Stream != "" {
-			prefix += " " + event.Stream
-		}
-		model.appendRunLog(fmt.Sprintf("%s: %s", prefix, event.Line))
+		model.appendRunLog(event.Line)
 	case TaskSucceeded:
 		model.completedTasks++
 		model.incrementStageCompleted(event.Stage)
@@ -5027,7 +5022,6 @@ func runSetupPlan(ctx context.Context, config setupConfig, stdout, stderr io.Wri
 			"--domain", config.BaseDomain,
 			"--email", config.LetsEncryptEmail,
 			"--server-secret", config.ServerSecret,
-			"--setup-token", config.PangolinSetupToken,
 		}, stdout, stderr)
 	case setupModeFullRun:
 		return errors.New("full setup requires a saved profile")

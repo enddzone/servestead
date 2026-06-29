@@ -12,7 +12,7 @@ fi
 case "$login_status" in
   2??) rm -f "$login_response" ;;
   401)
-    echo 'Pangolin rejected the saved administrator credentials. Run the same setup action once with PANGOLIN_ADMIN_PASSWORD set to the current Pangolin admin password, or enter it in Advanced setup.' >&2
+    echo 'Pangolin rejected the saved administrator credentials. Confirm the current Pangolin admin email and password in Advanced setup, or run the same setup action once with PANGOLIN_ADMIN_PASSWORD set to the current password.' >&2
     if [ -s "$login_response" ]; then cat "$login_response" >&2; echo >&2; fi
     rm -f "$login_response"
     exit 1
