@@ -21,6 +21,6 @@ The static site is written to `dist/`.
 
 ## GitHub Pages
 
-The repository workflow builds this site with `DOCS_BASE_PATH=/AegisNode`, which matches the public repository path `https://enddzone.github.io/AegisNode/`.
+The repository workflow builds this site with `DOCS_BASE_PATH=/` and `DOCS_SITE_URL=https://docs.servestead.com`, matching the configured GitHub Pages custom domain.
 
-If a custom domain is configured for GitHub Pages, update the docs workflow to set `DOCS_BASE_PATH=/` and `DOCS_SITE_URL=https://<custom-domain>`.
+If the custom domain is removed and the site is served from the repository project path instead, set `DOCS_BASE_PATH=/servestead` and `DOCS_SITE_URL=https://enddzone.github.io`.

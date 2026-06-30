@@ -2,7 +2,7 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
-const site = process.env.DOCS_SITE_URL ?? 'https://enddzone.github.io';
+const site = process.env.DOCS_SITE_URL ?? 'https://docs.servestead.com';
 const base = process.env.DOCS_BASE_PATH ?? '/';
 
 export default defineConfig({
@@ -17,11 +17,11 @@ export default defineConfig({
         {
           icon: 'github',
           label: 'GitHub',
-          href: 'https://github.com/enddzone/AegisNode',
+          href: 'https://github.com/enddzone/servestead',
         },
       ],
       editLink: {
-        baseUrl: 'https://github.com/enddzone/AegisNode/edit/main/docs/',
+        baseUrl: 'https://github.com/enddzone/servestead/edit/main/docs/',
       },
       sidebar: [
         {
