@@ -2323,6 +2323,7 @@ func (model *profileSetupModel) goBack() {
 		model.screen = profileSetupScreenPicker
 	case profileSetupScreenIntake:
 		if model.selectedIndex >= 0 {
+			model.singleStage = ""
 			model.screen = profileSetupScreenDashboard
 		} else {
 			model.screen = profileSetupScreenPicker
@@ -2387,6 +2388,7 @@ func (model *profileSetupModel) goBack() {
 		model.screen = profileSetupScreenCloudConfirm
 	case profileSetupScreenReview:
 		if model.selectedIndex >= 0 {
+			model.singleStage = ""
 			model.screen = profileSetupScreenDashboard
 		} else {
 			model.screen = profileSetupScreenIntake
@@ -3741,7 +3743,7 @@ func setupModeForStage(stage string) setupMode {
 	case "stacks":
 		return setupModeObservability
 	case "platform":
-		return setupModeFullRun
+		return setupModeProxy
 	default:
 		return setupModeFullRun
 	}

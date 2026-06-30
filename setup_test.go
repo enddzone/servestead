@@ -499,6 +499,19 @@ func TestPlatformStageWithMissingProfileValuesOpensIntake(t *testing.T) {
 	if result.focus != 2 || !strings.Contains(result.err, "domain") {
 		t.Fatalf("intake should focus the domain field with guidance: focus=%d err=%q", result.focus, result.err)
 	}
+
+	updated, command = result.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	result = updated.(profileSetupModel)
+	if command != nil || result.screen != profileSetupScreenDashboard || result.singleStage != "" {
+		t.Fatalf("leaving Platform intake should clear one-time stage: screen=%d stage=%q", result.screen, result.singleStage)
+	}
+	result.screen = profileSetupScreenReview
+	result.singleStage = "platform"
+	updated, command = result.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	result = updated.(profileSetupModel)
+	if command != nil || result.screen != profileSetupScreenDashboard || result.singleStage != "" {
+		t.Fatalf("leaving Platform review should clear one-time stage: screen=%d stage=%q", result.screen, result.singleStage)
+	}
 }
 
 func TestOptionsForSelectedProfileUsesEditedIntakeValues(t *testing.T) {
@@ -1857,12 +1870,17 @@ func TestPrepareProfileStageSetupDoesNotRequireProxyFieldsForHarden(t *testing.T
 
 func TestPrepareProfileStageSetupGeneratesPlatformSecrets(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
+	directory := t.TempDir()
+	privateKey := filepath.Join(directory, "id_ed25519")
+	if err := os.WriteFile(privateKey, []byte("private"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	profile, err := store.Create(Profile{
 		ID:               "profile-1",
 		Name:             "production",
 		IP:               "203.0.113.10",
 		AdminUser:        "servestead",
-		PrivateKeyPath:   "/tmp/aegis-key",
+		PrivateKeyPath:   privateKey,
 		BaseDomain:       "example.com",
 		LetsEncryptEmail: "admin@example.com",
 	})
@@ -1874,8 +1892,15 @@ func TestPrepareProfileStageSetupGeneratesPlatformSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if config.Mode != setupModeProxy {
+		t.Fatalf("platform stage should use proxy-style preflight mode, got %v", config.Mode)
+	}
 	if config.ServerSecret == "" || config.PangolinSetupToken == "" || config.PangolinAdminEmail != "admin@example.com" {
 		t.Fatalf("platform stage did not hydrate generated secrets: %+v", config)
+	}
+	var output bytes.Buffer
+	if err := runPreflight(config, &output); err != nil {
+		t.Fatalf("platform preflight should not require missing admin public key: %v\n%s", err, output.String())
 	}
 	secrets, err := store.LoadSecrets(profile.ID)
 	if err != nil {
