@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Servestead">
+  <rect width="64" height="64" rx="12" fill="#101318"/>
+  <path d="M12 32 32 14l20 18v18a4 4 0 0 1-4 4H16a4 4 0 0 1-4-4V32Z" fill="#f0b84f"/>
+  <path d="M21 54V35h22v19" fill="#101318"/>
+  <path d="M24 42h16M24 48h10" stroke="#f0b84f" stroke-width="4" stroke-linecap="round"/>
+</svg>
