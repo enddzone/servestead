@@ -1,0 +1,182 @@
+:root {
+  --sl-color-accent-low: #fff1cf;
+  --sl-color-accent: #9b6515;
+  --sl-color-accent-high: #3f2b0c;
+  --sl-color-green-low: #fff1cf;
+  --sl-color-green: #9b6515;
+  --sl-color-green-high: #3f2b0c;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #f7f3ea;
+  --sl-color-gray-2: #e6ded0;
+  --sl-color-gray-3: #b8ad9d;
+  --sl-color-gray-4: #7a7167;
+  --sl-color-gray-5: #4a4540;
+  --sl-color-gray-6: #28292c;
+  --sl-color-black: #101318;
+  --sl-font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --sl-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+:root[data-theme='dark'] {
+  --sl-color-accent-low: #3a2a12;
+  --sl-color-accent: #f0b84f;
+  --sl-color-accent-high: #fff1cf;
+  --sl-color-green-low: #3a2a12;
+  --sl-color-green: #f0b84f;
+  --sl-color-green-high: #fff1cf;
+  --sl-color-white: #f7f3ea;
+  --sl-color-gray-1: #e6ded0;
+  --sl-color-gray-2: #b8ad9d;
+  --sl-color-gray-3: #7a7167;
+  --sl-color-gray-4: #4a4540;
+  --sl-color-gray-5: #28292c;
+  --sl-color-gray-6: #171b22;
+  --sl-color-black: #0c0f13;
+}
+
+.hero {
+  border-bottom: 1px solid var(--sl-color-gray-5);
+  background:
+    linear-gradient(140deg, color-mix(in srgb, var(--sl-color-accent-low) 62%, transparent), transparent 55%),
+    linear-gradient(180deg, var(--sl-color-bg), color-mix(in srgb, var(--sl-color-accent-low) 35%, var(--sl-color-bg)) 100%);
+  gap: clamp(1.5rem, 4vw, 3.5rem);
+  padding: clamp(2rem, 5vw, 4rem) clamp(1.5rem, 5vw, 4rem);
+}
+
+.hero .tagline {
+  max-width: 58rem;
+  line-height: 1.45;
+}
+
+.hero > .hero-html {
+  margin-inline: 0;
+  width: 100%;
+}
+
+.hero > .stack {
+  gap: clamp(1.25rem, 2vw, 1.75rem);
+}
+
+.hero .copy {
+  gap: 0.85rem;
+}
+
+.hero h1 {
+  letter-spacing: 0;
+}
+
+.hero-terminal {
+  width: min(100%, 26rem);
+  overflow: hidden;
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.5rem;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--sl-color-gray-6) 72%, transparent), transparent),
+    var(--sl-color-black);
+  box-shadow: var(--sl-shadow-md);
+}
+
+.hero-terminal__bar {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  min-height: 2.1rem;
+  padding: 0 0.85rem;
+  border-bottom: 1px solid var(--sl-color-gray-5);
+  background: var(--sl-color-gray-6);
+}
+
+.hero-terminal__bar span {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--sl-color-gray-3);
+}
+
+.hero-terminal pre {
+  margin: 0;
+  padding: 1rem;
+  overflow-x: auto;
+  color: var(--sl-color-gray-2);
+  font-size: clamp(0.74rem, 1.45vw, 0.88rem);
+  line-height: 1.65;
+}
+
+.hero-terminal code {
+  font-family: var(--__sl-font-mono);
+}
+
+.hero-terminal__muted {
+  color: var(--sl-color-gray-3);
+}
+
+.hero-terminal__ok {
+  color: var(--sl-color-accent);
+  font-weight: 700;
+}
+
+@media (min-width: 50rem) {
+  .hero {
+    grid-template-columns: minmax(0, 1.2fr) minmax(17rem, 0.8fr);
+    padding-block: clamp(2.75rem, 6vw, 5.25rem);
+  }
+
+  .hero > .hero-html {
+    width: 100%;
+  }
+}
+
+@media (max-width: 49.99rem) {
+  .hero > .stack {
+    order: 1;
+  }
+
+  .hero > .hero-html {
+    order: 2;
+    margin-inline: auto;
+  }
+
+  .hero-terminal {
+    margin-inline: auto;
+  }
+}
+
+.sl-markdown-content .setup-path {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  margin-block: 1.5rem;
+}
+
+.sl-markdown-content .path-card {
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--sl-color-bg) 88%, var(--sl-color-accent-low));
+  padding: 1rem;
+}
+
+.sl-markdown-content .path-card h3 {
+  margin-top: 0;
+}
+
+.sl-markdown-content .checklist {
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.5rem;
+  padding: 1rem 1.25rem;
+  background: var(--sl-color-bg-nav);
+}
+
+.sl-markdown-content .checklist li + li {
+  margin-top: 0.45rem;
+}
+
+.sl-markdown-content .command-note {
+  border-left: 0.25rem solid var(--sl-color-accent);
+  border-radius: 0.25rem;
+  background: color-mix(in srgb, var(--sl-color-accent-low) 42%, transparent);
+  padding: 0.8rem 1rem;
+}
+
+.sl-markdown-content table {
+  font-size: 0.95rem;
+}

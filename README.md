@@ -16,6 +16,18 @@ Servestead, the Server Homestead, is a local Go CLI for turning a raw Ubuntu VPS
 go build -o bin/servestead .
 ```
 
+## Documentation site
+
+The docs site lives in `docs/` and is built with Astro Starlight:
+
+```sh
+cd docs
+npm install
+npm run dev
+```
+
+Use `npm run build` from `docs/` to verify the static GitHub Pages output locally.
+
 ## Provision a VPS
 
 Credentials are read from the environment so they do not appear in shell process listings.
