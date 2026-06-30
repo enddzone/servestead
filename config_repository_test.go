@@ -10,13 +10,21 @@ import (
 	"testing"
 )
 
+const (
+	configRepositoryTestProfileID  = "profile-1"
+	configRepositoryTestDomain     = "example.com"
+	configRepositoryTestAdminEmail = "admin@example.com"
+	configRepositoryTestGitEmail   = "test@example.com"
+	configRepositoryTestNoGit      = "git is not installed"
+)
+
 func TestDefaultConfigRepositoryPathUsesXDGConfigHome(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	path, err := defaultConfigRepositoryPath("profile-1")
+	path, err := defaultConfigRepositoryPath(configRepositoryTestProfileID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(path, filepath.Join("servestead", "repositories", "profile-1")) {
+	if !strings.HasSuffix(path, filepath.Join("servestead", "repositories", configRepositoryTestProfileID)) {
 		t.Fatalf("unexpected repository path: %s", path)
 	}
 }
@@ -25,10 +33,10 @@ func TestPrepareConfigRepositoryInitializesAndDeploysExactCommit(t *testing.T) {
 	requireGit(t)
 	repository := filepath.Join(t.TempDir(), "repository")
 	scaffold := observabilityComposeFile(observabilityConfig{
-		BaseDomain: "example.com",
-		AdminEmail: "admin@example.com",
+		BaseDomain: configRepositoryTestDomain,
+		AdminEmail: configRepositoryTestAdminEmail,
 	})
-	revision, err := prepareConfigRepository(context.Background(), repository, "", "", "profile-1", scaffold)
+	revision, err := prepareConfigRepository(context.Background(), repository, "", "", configRepositoryTestProfileID, scaffold)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,14 +51,14 @@ func TestPrepareConfigRepositoryInitializesAndDeploysExactCommit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repository, "notes.txt"), []byte("unrelated\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := prepareConfigRepository(context.Background(), repository, "", "", "profile-1", scaffold); err != nil {
+	if _, err := prepareConfigRepository(context.Background(), repository, "", "", configRepositoryTestProfileID, scaffold); err != nil {
 		t.Fatalf("unrelated working-tree change blocked deployment: %v", err)
 	}
 	composePath := filepath.Join(repository, filepath.FromSlash(observabilityComposeRepositoryPath))
 	if err := os.WriteFile(composePath, []byte(scaffold+"\n# edited\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := prepareConfigRepository(context.Background(), repository, "", "", "profile-1", scaffold); err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
+	if _, err := prepareConfigRepository(context.Background(), repository, "", "", configRepositoryTestProfileID, scaffold); err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
 		t.Fatalf("expected dirty Compose rejection, got %v", err)
 	}
 }
@@ -59,8 +67,8 @@ func TestPrepareSuppliedRepositoryScaffoldsThenRequiresReview(t *testing.T) {
 	requireGit(t)
 	repository := t.TempDir()
 	runGitCommand(t, repository, "init", "-b", "main")
-	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: "example.com", AdminEmail: "admin@example.com"})
-	_, err := prepareConfigRepository(context.Background(), repository, "", "", "profile-1", scaffold)
+	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: configRepositoryTestDomain, AdminEmail: configRepositoryTestAdminEmail})
+	_, err := prepareConfigRepository(context.Background(), repository, "", "", configRepositoryTestProfileID, scaffold)
 	if !errors.Is(err, errRepositoryReviewRequired) {
 		t.Fatalf("expected review-required error, got %v", err)
 	}
@@ -81,10 +89,10 @@ func TestPrepareConfigRepositoryRefreshesManagedObservabilityScaffoldForReview(t
 		t.Fatal(err)
 	}
 	runGitCommand(t, repository, "add", observabilityComposeRepositoryPath)
-	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Legacy observability")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email="+configRepositoryTestGitEmail, "commit", "-m", "Legacy observability")
 
-	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: "example.com", AdminEmail: "admin@example.com"})
-	_, err := prepareConfigRepository(context.Background(), repository, "", "", "profile-1", scaffold)
+	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: configRepositoryTestDomain, AdminEmail: configRepositoryTestAdminEmail})
+	_, err := prepareConfigRepository(context.Background(), repository, "", "", configRepositoryTestProfileID, scaffold)
 	if !errors.Is(err, errRepositoryReviewRequired) {
 		t.Fatalf("expected review-required error, got %v", err)
 	}
@@ -123,7 +131,7 @@ func TestResolveConfigRepositoryBranchRejectsAmbiguousDetachedCheckout(t *testin
 		t.Fatal(err)
 	}
 	runGitCommand(t, repository, "add", "README.md")
-	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Initial")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email="+configRepositoryTestGitEmail, "commit", "-m", "Initial")
 	runGitCommand(t, repository, "checkout", "--detach", "HEAD")
 
 	_, err := resolveConfigRepositoryBranch(context.Background(), repository, "  origin/feature\n  origin/main\n")
@@ -136,7 +144,7 @@ func TestEnsureConfigRepositoryScaffoldIsIdempotent(t *testing.T) {
 	requireGit(t)
 	repository := t.TempDir()
 	runGitCommand(t, repository, "init", "-b", "main")
-	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: "example.com", AdminEmail: "admin@example.com"})
+	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: configRepositoryTestDomain, AdminEmail: configRepositoryTestAdminEmail})
 	created, err := ensureConfigRepositoryScaffold(context.Background(), repository, scaffold)
 	if err != nil {
 		t.Fatal(err)
@@ -211,8 +219,8 @@ func TestValidateGitHubRepositoryURL(t *testing.T) {
 
 func TestObservabilityScaffoldContainsNoGeneratedSecrets(t *testing.T) {
 	config := observabilityConfig{
-		BaseDomain:    "example.com",
-		AdminEmail:    "admin@example.com",
+		BaseDomain:    configRepositoryTestDomain,
+		AdminEmail:    configRepositoryTestAdminEmail,
 		AdminPassword: "admin-secret",
 		SystemToken:   "system-secret",
 	}
@@ -232,14 +240,18 @@ func TestObservabilityScaffoldContainsNoGeneratedSecrets(t *testing.T) {
 
 func requireGit(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git is not installed")
+	if _, err := trustedGitExecutable(); err != nil {
+		t.Skip(configRepositoryTestNoGit)
 	}
 }
 
 func runGitCommand(t *testing.T, directory string, arguments ...string) {
 	t.Helper()
-	command := exec.Command("git", append([]string{"-C", directory}, arguments...)...)
+	gitPath, err := trustedGitExecutable()
+	if err != nil {
+		t.Skip(configRepositoryTestNoGit)
+	}
+	command := exec.Command(gitPath, append([]string{"-C", directory}, arguments...)...)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", arguments[0], err, output)
 	}
@@ -247,7 +259,11 @@ func runGitCommand(t *testing.T, directory string, arguments ...string) {
 
 func gitOutput(t *testing.T, directory string, arguments ...string) string {
 	t.Helper()
-	command := exec.Command("git", append([]string{"-C", directory}, arguments...)...)
+	gitPath, err := trustedGitExecutable()
+	if err != nil {
+		t.Skip(configRepositoryTestNoGit)
+	}
+	command := exec.Command(gitPath, append([]string{"-C", directory}, arguments...)...)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", arguments[0], err, output)

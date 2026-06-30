@@ -33,81 +33,49 @@ Run "servestead <command> -help" for command-specific options.
 `
 
 type getenvFunc func(string) string
+type cliHandler func() error
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv getenvFunc) error {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return errors.New("a command is required")
 	}
-
-	switch args[0] {
-	case "help", "-h", "--help":
+	if isHelpCommand(args[0]) {
 		fmt.Fprint(stdout, usage)
 		return nil
-	case "provision":
-		err := runProvision(ctx, args[1:], stdout, stderr, getenv)
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	case "bootstrap":
-		err := runBootstrap(ctx, args[1:], stdout, stderr)
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	case "harden":
-		err := runHarden(ctx, args[1:], stdout, stderr)
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	case "network":
-		err := runNetwork(ctx, args[1:], stdout, stderr)
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	case "proxy":
-		err := runProxy(ctx, args[1:], stdout, stderr)
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	case "pangolin-credentials":
-		err := runPangolinCredentials(args[1:], stdout, stderr)
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	case "keygen":
-		err := runKeygen(ctx, args[1:], stdout, stderr)
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	case "stack":
-		err := runStack(ctx, args[1:], stdout, stderr)
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	case "setup":
-		err := runSetup(ctx, args[1:], stdout, stderr)
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	case "doctor":
-		err := runDoctor(args[1:], stdout, stderr)
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	default:
+	}
+	handler, ok := cliHandlers(ctx, args[1:], stdout, stderr, getenv)[args[0]]
+	if !ok {
 		fmt.Fprint(stderr, usage)
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+	return ignoreFlagHelp(handler())
+}
+
+func isHelpCommand(command string) bool {
+	return command == "help" || command == "-h" || command == "--help"
+}
+
+func cliHandlers(ctx context.Context, args []string, stdout, stderr io.Writer, getenv getenvFunc) map[string]cliHandler {
+	return map[string]cliHandler{
+		"provision":            func() error { return runProvision(ctx, args, stdout, stderr, getenv) },
+		"bootstrap":            func() error { return runBootstrap(ctx, args, stdout, stderr) },
+		"harden":               func() error { return runHarden(ctx, args, stdout, stderr) },
+		"network":              func() error { return runNetwork(ctx, args, stdout, stderr) },
+		"proxy":                func() error { return runProxy(ctx, args, stdout, stderr) },
+		"pangolin-credentials": func() error { return runPangolinCredentials(args, stdout, stderr) },
+		"keygen":               func() error { return runKeygen(ctx, args, stdout, stderr) },
+		"stack":                func() error { return runStack(ctx, args, stdout, stderr) },
+		"setup":                func() error { return runSetup(ctx, args, stdout, stderr) },
+		"doctor":               func() error { return runDoctor(args, stdout, stderr) },
+	}
+}
+
+func ignoreFlagHelp(err error) error {
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
+	return err
 }
 
 func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer, getenv getenvFunc) error {

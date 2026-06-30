@@ -36,22 +36,11 @@ func runPangolinCredentials(args []string, stdout, stderr io.Writer) error {
 
 func printSavedPangolinCredentials(store ProfileStore, profileID, ip string, output io.Writer) error {
 	if profileID == "" {
-		matches, err := store.ResolveByIP(ip)
+		resolved, err := resolvePangolinCredentialProfileID(store, ip)
 		if err != nil {
 			return err
 		}
-		switch len(matches) {
-		case 0:
-			return fmt.Errorf("no saved profile found for %s", ip)
-		case 1:
-			profileID = matches[0].ID
-		default:
-			ids := make([]string, len(matches))
-			for i, match := range matches {
-				ids[i] = match.ID
-			}
-			return fmt.Errorf("multiple saved profiles found for %s; rerun with --profile and one of: %s", ip, strings.Join(ids, ", "))
-		}
+		profileID = resolved
 	}
 
 	profile, _, err := store.Load(profileID)
@@ -74,6 +63,25 @@ func printSavedPangolinCredentials(store ProfileStore, profileID, ip string, out
 	}
 	printPangolinAdminCredentials(output, profile, secrets)
 	return nil
+}
+
+func resolvePangolinCredentialProfileID(store ProfileStore, ip string) (string, error) {
+	matches, err := store.ResolveByIP(ip)
+	if err != nil {
+		return "", err
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("no saved profile found for %s", ip)
+	case 1:
+		return matches[0].ID, nil
+	default:
+		ids := make([]string, len(matches))
+		for i, match := range matches {
+			ids[i] = match.ID
+		}
+		return "", fmt.Errorf("multiple saved profiles found for %s; rerun with --profile and one of: %s", ip, strings.Join(ids, ", "))
+	}
 }
 
 func printPangolinAdminCredentials(output io.Writer, profile Profile, secrets ProfileSecrets) {

@@ -7,21 +7,30 @@ import (
 	"testing"
 )
 
+const (
+	pangolinCredentialsTestProfileID       = "production"
+	pangolinCredentialsTestHost            = "203.0.113.10"
+	pangolinCredentialsTestDomain          = "example.com"
+	pangolinCredentialsTestOwnerEmail      = "owner@example.com"
+	pangolinCredentialsTestSetupToken      = "0123456789abcdefghijklmnopqrstuv"
+	pangolinCredentialsTestCurrentPassword = "current-password"
+)
+
 func TestPrintSavedPangolinCredentialsResolvesProfileByIP(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
 	profile, err := store.Create(Profile{
-		ID:                 "production",
-		IP:                 "203.0.113.10",
-		BaseDomain:         "example.com",
+		ID:                 pangolinCredentialsTestProfileID,
+		IP:                 pangolinCredentialsTestHost,
+		BaseDomain:         pangolinCredentialsTestDomain,
 		LetsEncryptEmail:   "admin@example.com",
-		PangolinAdminEmail: "owner@example.com",
+		PangolinAdminEmail: pangolinCredentialsTestOwnerEmail,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SaveSecrets(profile.ID, ProfileSecrets{
 		ServerSecret:          "server-secret",
-		PangolinAdminPassword: "current-password",
+		PangolinAdminPassword: pangolinCredentialsTestCurrentPassword,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -31,9 +40,9 @@ func TestPrintSavedPangolinCredentialsResolvesProfileByIP(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
-		"Pangolin URL: https://pangolin.example.com",
-		"Username: owner@example.com",
-		"Password: current-password",
+		"Pangolin URL: https://pangolin." + pangolinCredentialsTestDomain,
+		"Username: " + pangolinCredentialsTestOwnerEmail,
+		"Password: " + pangolinCredentialsTestCurrentPassword,
 	} {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("output missing %q:\n%s", expected, output.String())
@@ -48,7 +57,7 @@ func TestPrintSavedPangolinCredentialsRevealsSetupTokenWhenRegistrationIncomplet
 	originalChecker := savedPangolinInitialSetupComplete
 	defer func() { savedPangolinInitialSetupComplete = originalChecker }()
 	savedPangolinInitialSetupComplete = func(_ context.Context, dashboardURL string) (bool, error) {
-		if dashboardURL != "https://pangolin.example.com" {
+		if dashboardURL != "https://pangolin."+pangolinCredentialsTestDomain {
 			t.Fatalf("unexpected dashboard URL: %s", dashboardURL)
 		}
 		return false, nil
@@ -56,19 +65,19 @@ func TestPrintSavedPangolinCredentialsRevealsSetupTokenWhenRegistrationIncomplet
 
 	store := newFileProfileStore(t.TempDir())
 	profile, err := store.Create(Profile{
-		ID:                 "production",
-		IP:                 "203.0.113.10",
-		BaseDomain:         "example.com",
+		ID:                 pangolinCredentialsTestProfileID,
+		IP:                 pangolinCredentialsTestHost,
+		BaseDomain:         pangolinCredentialsTestDomain,
 		LetsEncryptEmail:   "admin@example.com",
-		PangolinAdminEmail: "owner@example.com",
+		PangolinAdminEmail: pangolinCredentialsTestOwnerEmail,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SaveSecrets(profile.ID, ProfileSecrets{
 		ServerSecret:          "server-secret",
-		PangolinSetupToken:    "0123456789abcdefghijklmnopqrstuv",
-		PangolinAdminPassword: "current-password",
+		PangolinSetupToken:    pangolinCredentialsTestSetupToken,
+		PangolinAdminPassword: pangolinCredentialsTestCurrentPassword,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -78,14 +87,14 @@ func TestPrintSavedPangolinCredentialsRevealsSetupTokenWhenRegistrationIncomplet
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
-		"Pangolin initial setup: https://pangolin.example.com/auth/initial-setup",
-		"Setup token: 0123456789abcdefghijklmnopqrstuv",
+		"Pangolin initial setup: https://pangolin." + pangolinCredentialsTestDomain + "/auth/initial-setup",
+		"Setup token: " + pangolinCredentialsTestSetupToken,
 	} {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("output missing %q:\n%s", expected, output.String())
 		}
 	}
-	if strings.Contains(output.String(), "Password: current-password") {
+	if strings.Contains(output.String(), "Password: "+pangolinCredentialsTestCurrentPassword) {
 		t.Fatalf("incomplete registration output exposed admin password instead of setup token:\n%s", output.String())
 	}
 }
@@ -93,12 +102,12 @@ func TestPrintSavedPangolinCredentialsRevealsSetupTokenWhenRegistrationIncomplet
 func TestPrintSavedPangolinCredentialsRejectsAmbiguousIP(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
 	for _, id := range []string{"old-server", "new-server"} {
-		if _, err := store.Create(Profile{ID: id, IP: "203.0.113.10"}); err != nil {
+		if _, err := store.Create(Profile{ID: id, IP: pangolinCredentialsTestHost}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	err := printSavedPangolinCredentials(store, "", "203.0.113.10", &bytes.Buffer{})
+	err := printSavedPangolinCredentials(store, "", pangolinCredentialsTestHost, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "rerun with --profile") {
 		t.Fatalf("unexpected error: %v", err)
 	}

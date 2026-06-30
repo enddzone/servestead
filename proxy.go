@@ -9,13 +9,15 @@ import (
 	"io"
 	"os"
 	"regexp"
-	"servestead/resources"
 	"strings"
+
+	"servestead/resources"
 )
 
 const proxyStackDirectory = "/opt/servestead/proxy"
-const proxyDockerSubnet = "172.30.0.0/24"
 const servesteadPublicNetwork = "servestead-public"
+
+var proxyDockerSubnet = dockerCIDR(172, 30, 0, 0, 24)
 
 const (
 	pangolinImage    = "docker.io/fosrl/pangolin:1.19.4"
@@ -149,7 +151,9 @@ func runProxyStepsWithReporter(ctx context.Context, client remoteClient, config 
 
 func proxyTasks(config proxyConfig) []Task {
 	composePath := proxyStackDirectory + "/docker-compose.yml"
+	composeCommand := "docker compose -f " + shellQuote(composePath)
 	stackGroup := firstNonEmpty(config.SSHUser, "root")
+	masqueradeSubnets := append(append([]string{}, defaultDockerBridgeSubnets...), proxyDockerSubnet)
 	return []Task{
 		{Name: "Validate Docker Compose is available", Apply: commandScript(
 			"docker info >/dev/null",
@@ -162,13 +166,13 @@ func proxyTasks(config proxyConfig) []Task {
 			`fi`,
 		)},
 		{Name: "Prepare proxy stack directories", Apply: commandScript(
-			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote("/opt/servestead"),
-			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote(proxyStackDirectory),
-			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote(proxyStackDirectory+"/config"),
-			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote(proxyStackDirectory+"/config/db"),
-			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote(proxyStackDirectory+"/config/letsencrypt"),
-			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote(proxyStackDirectory+"/config/traefik"),
-			"install -d -m 0750 -o root -g "+shellQuote(stackGroup)+" "+shellQuote(proxyStackDirectory+"/config/traefik/logs"),
+			remoteInstallDirectoryCommand("/opt/servestead", "root", stackGroup, 0750),
+			remoteInstallDirectoryCommand(proxyStackDirectory, "root", stackGroup, 0750),
+			remoteInstallDirectoryCommand(proxyStackDirectory+"/config", "root", stackGroup, 0750),
+			remoteInstallDirectoryCommand(proxyStackDirectory+"/config/db", "root", stackGroup, 0750),
+			remoteInstallDirectoryCommand(proxyStackDirectory+"/config/letsencrypt", "root", stackGroup, 0750),
+			remoteInstallDirectoryCommand(proxyStackDirectory+"/config/traefik", "root", stackGroup, 0750),
+			remoteInstallDirectoryCommand(proxyStackDirectory+"/config/traefik/logs", "root", stackGroup, 0750),
 		)},
 		{Name: "Create shared application network", Apply: commandScript(
 			"docker network inspect " + shellQuote(servesteadPublicNetwork) + " >/dev/null 2>&1 || docker network create " + shellQuote(servesteadPublicNetwork),
@@ -181,7 +185,7 @@ func proxyTasks(config proxyConfig) []Task {
 			`public_interface="$(ip -4 route show default 0.0.0.0/0 | awk '{print $5; exit}')"`,
 			`test -n "$public_interface"`,
 			`egress_interface="$public_interface"`,
-			installUFWMasqueradeBlockCommand("Servestead UFW MASQUERADE TRANSLATIONS", "172.17.0.0/16", "172.18.0.0/16", proxyDockerSubnet),
+			installUFWMasqueradeBlockCommand("Servestead UFW MASQUERADE TRANSLATIONS", masqueradeSubnets...),
 			"ufw allow 80/tcp",
 			"ufw allow 443/tcp",
 			"ufw route allow from "+shellQuote(proxyDockerSubnet)+" to any",
@@ -190,17 +194,17 @@ func proxyTasks(config proxyConfig) []Task {
 			"ufw reload",
 		)},
 		{Name: "Start Pangolin reverse proxy stack", Apply: commandScript(
-			"docker compose -f "+shellQuote(composePath)+" pull",
-			"docker compose -f "+shellQuote(composePath)+" down --remove-orphans || true",
-			"docker compose -f "+shellQuote(composePath)+" up -d --remove-orphans",
+			composeCommand+" pull",
+			composeCommand+" down --remove-orphans || true",
+			composeCommand+" up -d --remove-orphans",
 		)},
 		{Name: "Bootstrap Pangolin organization and site", Apply: pangolinBootstrapCommand(config)},
 		{Name: "Verify Pangolin reverse proxy stack", Apply: commandScript(
-			"running=\"$(docker compose -f "+shellQuote(composePath)+" ps --services --status running)\"",
+			"running=\"$("+composeCommand+" ps --services --status running)\"",
 			"for service in pangolin gerbil traefik socket-proxy newt; do",
 			"  printf '%s\\n' \"$running\" | grep -Fx \"$service\" >/dev/null",
 			"done",
-			"docker compose -f "+shellQuote(composePath)+" ps",
+			composeCommand+" ps",
 		)},
 	}
 }

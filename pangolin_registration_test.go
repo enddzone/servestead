@@ -10,6 +10,16 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+const (
+	pangolinRegistrationTestProfileID       = "production"
+	pangolinRegistrationTestRunID           = "run-1"
+	pangolinRegistrationTestHost            = "203.0.113.10"
+	pangolinRegistrationTestDomain          = "example.com"
+	pangolinRegistrationTestOwnerEmail      = "owner@example.com"
+	pangolinRegistrationTestSetupToken      = "0123456789abcdefghijklmnopqrstuv"
+	pangolinRegistrationTestCurrentPassword = "current-password"
+)
+
 func TestPangolinInitialSetupComplete(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -55,17 +65,17 @@ func TestPangolinInitialSetupCompleteRejectsMissingState(t *testing.T) {
 func TestProfileDashboardHighlightsIncompletePangolinAndRevealsSetupToken(t *testing.T) {
 	choice := profileChoice{
 		Profile: Profile{
-			ID:                 "production",
-			Name:               "production",
-			IP:                 "203.0.113.10",
-			BaseDomain:         "example.com",
-			PangolinAdminEmail: "owner@example.com",
+			ID:                 pangolinRegistrationTestProfileID,
+			Name:               pangolinRegistrationTestProfileID,
+			IP:                 pangolinRegistrationTestHost,
+			BaseDomain:         pangolinRegistrationTestDomain,
+			PangolinAdminEmail: pangolinRegistrationTestOwnerEmail,
 		},
 		State: ProfileState{
-			ActiveRunID: "run-1",
+			ActiveRunID: pangolinRegistrationTestRunID,
 			Runs: map[string]SetupRun{
-				"run-1": {
-					ID: "run-1",
+				pangolinRegistrationTestRunID: {
+					ID: pangolinRegistrationTestRunID,
 					Stages: map[string]SetupStageStatus{
 						"proxy": {Status: stageStatusComplete},
 					},
@@ -73,8 +83,8 @@ func TestProfileDashboardHighlightsIncompletePangolinAndRevealsSetupToken(t *tes
 			},
 		},
 		Secrets: ProfileSecrets{
-			PangolinSetupToken:    "0123456789abcdefghijklmnopqrstuv",
-			PangolinAdminPassword: "current-password",
+			PangolinSetupToken:    pangolinRegistrationTestSetupToken,
+			PangolinAdminPassword: pangolinRegistrationTestCurrentPassword,
 		},
 	}
 	model := newProfileSetupModel([]profileChoice{choice})
@@ -82,7 +92,7 @@ func TestProfileDashboardHighlightsIncompletePangolinAndRevealsSetupToken(t *tes
 	model.refreshDashboard()
 	model.screen = profileSetupScreenDashboard
 
-	updated, _ := model.Update(pangolinRegistrationStatusMsg{profileID: "production", complete: false})
+	updated, _ := model.Update(pangolinRegistrationStatusMsg{profileID: pangolinRegistrationTestProfileID, complete: false})
 	model = updated.(profileSetupModel)
 	view := model.View()
 	for _, expected := range []string{
@@ -103,8 +113,8 @@ func TestProfileDashboardHighlightsIncompletePangolinAndRevealsSetupToken(t *tes
 	updated, _ = model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
 	view = updated.(profileSetupModel).View()
 	for _, expected := range []string{
-		"https://pangolin.example.com/auth/initial-setup",
-		"Setup token: 0123456789abcdefghijklmnopqrstuv",
+		"https://pangolin." + pangolinRegistrationTestDomain + "/auth/initial-setup",
+		"Setup token: " + pangolinRegistrationTestSetupToken,
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("revealed dashboard missing %q:\n%s", expected, view)
@@ -118,17 +128,17 @@ func TestProfileDashboardHighlightsIncompletePangolinAndRevealsSetupToken(t *tes
 func TestProfileDashboardRevealsPangolinCredentialsWhenRegistrationComplete(t *testing.T) {
 	choice := profileChoice{
 		Profile: Profile{
-			ID:                 "production",
-			Name:               "production",
-			IP:                 "203.0.113.10",
-			BaseDomain:         "example.com",
-			PangolinAdminEmail: "owner@example.com",
+			ID:                 pangolinRegistrationTestProfileID,
+			Name:               pangolinRegistrationTestProfileID,
+			IP:                 pangolinRegistrationTestHost,
+			BaseDomain:         pangolinRegistrationTestDomain,
+			PangolinAdminEmail: pangolinRegistrationTestOwnerEmail,
 		},
 		State: ProfileState{
-			ActiveRunID: "run-1",
+			ActiveRunID: pangolinRegistrationTestRunID,
 			Runs: map[string]SetupRun{
-				"run-1": {
-					ID: "run-1",
+				pangolinRegistrationTestRunID: {
+					ID: pangolinRegistrationTestRunID,
 					Stages: map[string]SetupStageStatus{
 						"proxy": {Status: stageStatusComplete},
 					},
@@ -136,8 +146,8 @@ func TestProfileDashboardRevealsPangolinCredentialsWhenRegistrationComplete(t *t
 			},
 		},
 		Secrets: ProfileSecrets{
-			PangolinSetupToken:    "0123456789abcdefghijklmnopqrstuv",
-			PangolinAdminPassword: "current-password",
+			PangolinSetupToken:    pangolinRegistrationTestSetupToken,
+			PangolinAdminPassword: pangolinRegistrationTestCurrentPassword,
 		},
 	}
 	model := newProfileSetupModel([]profileChoice{choice})
@@ -145,14 +155,14 @@ func TestProfileDashboardRevealsPangolinCredentialsWhenRegistrationComplete(t *t
 	model.refreshDashboard()
 	model.screen = profileSetupScreenDashboard
 
-	updated, _ := model.Update(pangolinRegistrationStatusMsg{profileID: "production", complete: true})
+	updated, _ := model.Update(pangolinRegistrationStatusMsg{profileID: pangolinRegistrationTestProfileID, complete: true})
 	model = updated.(profileSetupModel)
 	updated, _ = model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
 	view := updated.(profileSetupModel).View()
 	for _, expected := range []string{
-		"Pangolin URL: https://pangolin.example.com",
-		"Username: owner@example.com",
-		"Password: current-password",
+		"Pangolin URL: https://pangolin." + pangolinRegistrationTestDomain,
+		"Username: " + pangolinRegistrationTestOwnerEmail,
+		"Password: " + pangolinRegistrationTestCurrentPassword,
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("revealed dashboard missing %q:\n%s", expected, view)
@@ -165,12 +175,12 @@ func TestProfileDashboardRevealsPangolinCredentialsWhenRegistrationComplete(t *t
 
 func TestLoadProfileChoicesIncludesSavedPangolinCredentials(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
-	profile, err := store.Create(Profile{ID: "production", IP: "203.0.113.10"})
+	profile, err := store.Create(Profile{ID: pangolinRegistrationTestProfileID, IP: pangolinRegistrationTestHost})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SaveSecrets(profile.ID, ProfileSecrets{
-		PangolinAdminPassword: "current-password",
+		PangolinAdminPassword: pangolinRegistrationTestCurrentPassword,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -179,14 +189,14 @@ func TestLoadProfileChoicesIncludesSavedPangolinCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(choices) != 1 || choices[0].Secrets.PangolinAdminPassword != "current-password" {
+	if len(choices) != 1 || choices[0].Secrets.PangolinAdminPassword != pangolinRegistrationTestCurrentPassword {
 		t.Fatalf("saved Pangolin credentials were not loaded into TUI choice: %+v", choices)
 	}
 }
 
 func TestProfileDashboardChecksPangolinBeforeRetryingProxy(t *testing.T) {
 	model := newProfileSetupModel([]profileChoice{{
-		Profile: Profile{ID: "production", BaseDomain: "example.com"},
+		Profile: Profile{ID: pangolinRegistrationTestProfileID, BaseDomain: pangolinRegistrationTestDomain},
 		State:   ProfileState{Runs: map[string]SetupRun{}},
 	}})
 	model.selectedIndex = 0

@@ -68,24 +68,8 @@ func generateProviderKeypair(ctx context.Context, config keygenConfig, stdout, s
 	}
 
 	publicPath := config.Path + ".pub"
-	if !config.Force {
-		if _, err := os.Stat(config.Path); err == nil {
-			return fmt.Errorf("%s already exists; choose another --path or pass --force", config.Path)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("check private key path: %w", err)
-		}
-		if _, err := os.Stat(publicPath); err == nil {
-			return fmt.Errorf("%s already exists; choose another --path or pass --force", publicPath)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("check public key path: %w", err)
-		}
-	} else {
-		if err := os.Remove(config.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove existing private key: %w", err)
-		}
-		if err := os.Remove(publicPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove existing public key: %w", err)
-		}
+	if err := prepareKeypairDestination(config.Path, publicPath, config.Force); err != nil {
+		return err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(config.Path), 0700); err != nil {
@@ -112,6 +96,35 @@ func generateProviderKeypair(ctx context.Context, config keygenConfig, stdout, s
 		return fmt.Errorf("write public key: %w", err)
 	}
 	printProviderKeyGuidance(stdout, config.Path, publicPath, strings.TrimSpace(string(publicBytes)))
+	return nil
+}
+
+func prepareKeypairDestination(privatePath, publicPath string, force bool) error {
+	if force {
+		return removeExistingKeypair(privatePath, publicPath)
+	}
+	if err := ensureKeypairPathAvailable(privatePath, "private"); err != nil {
+		return err
+	}
+	return ensureKeypairPathAvailable(publicPath, "public")
+}
+
+func ensureKeypairPathAvailable(path, label string) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists; choose another --path or pass --force", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("check %s key path: %w", label, err)
+	}
+	return nil
+}
+
+func removeExistingKeypair(privatePath, publicPath string) error {
+	if err := os.Remove(privatePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove existing private key: %w", err)
+	}
+	if err := os.Remove(publicPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove existing public key: %w", err)
+	}
 	return nil
 }
 

@@ -197,6 +197,10 @@ func remoteWriteFileCommand(path, content, owner, group string, mode os.FileMode
 	}, "\n")
 }
 
+func remoteInstallDirectoryCommand(path, owner, group string, mode os.FileMode) string {
+	return "install -d -m " + fileModeDigits(mode) + " -o " + owner + " -g " + shellQuote(group) + " " + shellQuote(path)
+}
+
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }

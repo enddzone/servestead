@@ -11,15 +11,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"servestead/resources"
 	"sort"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"servestead/resources"
 )
 
 const stackMetadataFilename = "servestead.yaml"
+const stackComposeFilename = "compose.yaml"
+const gitNoExtDiffFlag = "--no-ext-diff"
 
 var stackSlugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 var environmentKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -89,70 +92,97 @@ func loadEditableStacks(repositoryPath string) ([]editableStack, error) {
 	}
 	stacks := []editableStack{}
 	for _, entry := range entries {
-		if !entry.IsDir() {
-			if isStackComposeFilename(entry.Name()) {
-				return nil, fmt.Errorf(
-					"compose file %s is outside a stack directory; move it to %s or press a in setup to import it",
-					filepath.Join("stacks", entry.Name()),
-					filepath.Join("stacks", "<stack-name>", "compose.yaml"),
-				)
-			}
-			continue
-		}
-		if entry.Name() == "observability" {
-			continue
-		}
-		if !stackSlugPattern.MatchString(entry.Name()) {
-			return nil, fmt.Errorf("stack directory %q must be a lowercase DNS label", entry.Name())
-		}
-		directory := filepath.Join(stacksDirectory, entry.Name())
-		compose, err := os.ReadFile(filepath.Join(directory, "compose.yaml"))
+		stack, include, err := loadEditableStackEntry(stacksDirectory, entry)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				children, readErr := os.ReadDir(directory)
-				if readErr == nil && len(children) == 0 {
-					continue
-				}
-				return nil, fmt.Errorf(
-					"stack %s is incomplete: expected %s; move a Compose file there or press a in setup to import one",
-					entry.Name(),
-					filepath.Join("stacks", entry.Name(), "compose.yaml"),
-				)
-			}
-			return nil, fmt.Errorf("stack %s: read compose.yaml: %w", entry.Name(), err)
+			return nil, err
 		}
-		services, err := inspectComposeServices(compose)
-		if err != nil {
-			return nil, fmt.Errorf("stack %s: %w", entry.Name(), err)
+		if include {
+			stacks = append(stacks, stack)
 		}
-		metadataData, err := os.ReadFile(filepath.Join(directory, stackMetadataFilename))
-		metadataMissing := false
-		metadata := stackMetadata{Version: 1}
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return nil, fmt.Errorf("stack %s: read %s: %w", entry.Name(), stackMetadataFilename, err)
-			}
-			metadataMissing = true
-		} else {
-			if err := yaml.Unmarshal(metadataData, &metadata); err != nil {
-				return nil, fmt.Errorf("stack %s metadata: %w", entry.Name(), err)
-			}
-			if err := validateStackMetadata(entry.Name(), metadata, services); err != nil {
-				return nil, fmt.Errorf("stack %s metadata: %w", entry.Name(), err)
-			}
-		}
-		stacks = append(stacks, editableStack{
-			Name: entry.Name(), Compose: string(compose), Metadata: metadata, Services: services,
-			MetadataMissing: metadataMissing,
-		})
 	}
 	sort.Slice(stacks, func(i, j int) bool { return stacks[i].Name < stacks[j].Name })
 	return stacks, nil
 }
 
+func loadEditableStackEntry(stacksDirectory string, entry os.DirEntry) (editableStack, bool, error) {
+	if !entry.IsDir() {
+		if isStackComposeFilename(entry.Name()) {
+			return editableStack{}, false, fmt.Errorf(
+				"compose file %s is outside a stack directory; move it to %s or press a in setup to import it",
+				filepath.Join("stacks", entry.Name()),
+				filepath.Join("stacks", "<stack-name>", stackComposeFilename),
+			)
+		}
+		return editableStack{}, false, nil
+	}
+	if entry.Name() == "observability" {
+		return editableStack{}, false, nil
+	}
+	if !stackSlugPattern.MatchString(entry.Name()) {
+		return editableStack{}, false, fmt.Errorf("stack directory %q must be a lowercase DNS label", entry.Name())
+	}
+	directory := filepath.Join(stacksDirectory, entry.Name())
+	compose, err := readEditableStackCompose(directory, entry.Name())
+	if err != nil {
+		return editableStack{}, false, err
+	}
+	if compose == nil {
+		return editableStack{}, false, nil
+	}
+	services, err := inspectComposeServices(compose)
+	if err != nil {
+		return editableStack{}, false, fmt.Errorf("stack %s: %w", entry.Name(), err)
+	}
+	metadata, metadataMissing, err := readEditableStackMetadata(directory, entry.Name(), services)
+	if err != nil {
+		return editableStack{}, false, err
+	}
+	return editableStack{
+		Name: entry.Name(), Compose: string(compose), Metadata: metadata, Services: services,
+		MetadataMissing: metadataMissing,
+	}, true, nil
+}
+
+func readEditableStackCompose(directory, name string) ([]byte, error) {
+	compose, err := os.ReadFile(filepath.Join(directory, stackComposeFilename))
+	if err == nil {
+		return compose, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("stack %s: read %s: %w", name, stackComposeFilename, err)
+	}
+	children, readErr := os.ReadDir(directory)
+	if readErr == nil && len(children) == 0 {
+		return nil, nil
+	}
+	return nil, fmt.Errorf(
+		"stack %s is incomplete: expected %s; move a Compose file there or press a in setup to import one",
+		name,
+		filepath.Join("stacks", name, stackComposeFilename),
+	)
+}
+
+func readEditableStackMetadata(directory, name string, services []composeServiceSummary) (stackMetadata, bool, error) {
+	metadataData, err := os.ReadFile(filepath.Join(directory, stackMetadataFilename))
+	metadata := stackMetadata{Version: 1}
+	if errors.Is(err, os.ErrNotExist) {
+		return metadata, true, nil
+	}
+	if err != nil {
+		return metadata, false, fmt.Errorf("stack %s: read %s: %w", name, stackMetadataFilename, err)
+	}
+	if err := yaml.Unmarshal(metadataData, &metadata); err != nil {
+		return metadata, false, fmt.Errorf("stack %s metadata: %w", name, err)
+	}
+	if err := validateStackMetadata(name, metadata, services); err != nil {
+		return metadata, false, fmt.Errorf("stack %s metadata: %w", name, err)
+	}
+	return metadata, false, nil
+}
+
 func isStackComposeFilename(name string) bool {
 	switch strings.ToLower(name) {
-	case "compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml":
+	case stackComposeFilename, "compose.yml", "docker-compose.yaml", "docker-compose.yml":
 		return true
 	default:
 		return false
@@ -170,28 +200,40 @@ func writeEditableStack(repositoryPath, originalName string, options stackAddOpt
 	}
 	stacksDirectory := filepath.Join(expandUserPath(repositoryPath), "stacks")
 	destination := filepath.Join(stacksDirectory, options.Name)
+	if err := prepareEditableStackDestination(stacksDirectory, destination, originalName, options.Name); err != nil {
+		return err
+	}
+	return writeEditableStackFiles(destination, metadata, compose)
+}
+
+func prepareEditableStackDestination(stacksDirectory, destination, originalName, name string) error {
 	if originalName == "" {
 		if _, err := os.Stat(destination); err == nil {
-			return fmt.Errorf("stack %q already exists", options.Name)
+			return fmt.Errorf("stack %q already exists", name)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-	} else {
-		if !stackSlugPattern.MatchString(originalName) {
-			return errors.New("original stack name must be a lowercase DNS label")
-		}
-		source := filepath.Join(stacksDirectory, originalName)
-		if originalName != options.Name {
-			if _, err := os.Stat(destination); err == nil {
-				return fmt.Errorf("stack %q already exists", options.Name)
-			} else if !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			if err := os.Rename(source, destination); err != nil {
-				return fmt.Errorf("rename stack: %w", err)
-			}
-		}
+		return nil
 	}
+	if !stackSlugPattern.MatchString(originalName) {
+		return errors.New("original stack name must be a lowercase DNS label")
+	}
+	if originalName == name {
+		return nil
+	}
+	if _, err := os.Stat(destination); err == nil {
+		return fmt.Errorf("stack %q already exists", name)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	source := filepath.Join(stacksDirectory, originalName)
+	if err := os.Rename(source, destination); err != nil {
+		return fmt.Errorf("rename stack: %w", err)
+	}
+	return nil
+}
+
+func writeEditableStackFiles(destination string, metadata stackMetadata, compose []byte) error {
 	if err := os.MkdirAll(destination, 0700); err != nil {
 		return err
 	}
@@ -199,7 +241,7 @@ func writeEditableStack(repositoryPath, originalName string, options stackAddOpt
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(destination, "compose.yaml"), compose, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(destination, stackComposeFilename), compose, 0600); err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(destination, stackMetadataFilename), metadataData, 0600)
@@ -255,16 +297,16 @@ func stackRepositoryNeedsPush(ctx context.Context, repositoryPath, head string) 
 	if err != nil {
 		return false, err
 	}
-	return !strings.Contains(contains, "origin/"), nil
+	return !strings.Contains(contains, gitOriginRemotePrefix), nil
 }
 
 func stackRepositoryDiff(ctx context.Context, repositoryPath string) (string, error) {
 	repositoryPath = expandUserPath(repositoryPath)
-	unstaged, err := runGit(ctx, repositoryPath, nil, "diff", "--no-ext-diff", "--", "stacks")
+	unstaged, err := runGit(ctx, repositoryPath, nil, "diff", gitNoExtDiffFlag, "--", "stacks")
 	if err != nil {
 		return "", err
 	}
-	staged, err := runGit(ctx, repositoryPath, nil, "diff", "--cached", "--no-ext-diff", "--", "stacks")
+	staged, err := runGit(ctx, repositoryPath, nil, "diff", "--cached", gitNoExtDiffFlag, "--", "stacks")
 	if err != nil {
 		return "", err
 	}
@@ -305,11 +347,14 @@ func untrackedFileDiff(ctx context.Context, repositoryPath, name string) (string
 	if cleanName == "." || cleanName == "stacks" || !strings.HasPrefix(cleanName, "stacks"+string(filepath.Separator)) {
 		return "", fmt.Errorf("invalid untracked stack path %q", name)
 	}
-	command := exec.CommandContext(ctx, "git", "-C", repositoryPath, "diff", "--no-index", "--no-ext-diff", "--", "/dev/null", cleanName)
+	command, err := newGitCommand(ctx, "-C", repositoryPath, "diff", "--no-index", gitNoExtDiffFlag, "--", "/dev/null", cleanName)
+	if err != nil {
+		return "", err
+	}
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	err := command.Run()
+	err = command.Run()
 	if err == nil {
 		return stdout.String(), nil
 	}
@@ -397,6 +442,42 @@ func (values *stackPublishFlags) Set(value string) error {
 }
 
 func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	options, services, metadata, environment, environmentKeys, err := stackAddInputs(args, stderr)
+	if err != nil {
+		return err
+	}
+	store, profile, state, err := loadStackAddProfile(options)
+	if err != nil {
+		return err
+	}
+	override, err := generateStackPangolinOverride(options.Name, metadata, services, profile)
+	if err != nil {
+		return err
+	}
+	revision, scaffoldCreated, err := prepareStackAddRepository(ctx, store, profile, state, stdout)
+	if err != nil {
+		return err
+	}
+	directory, copiedCompose, err := writeStackAddFiles(store, profile.ID, revision.Path, options, metadata, environment)
+	if err != nil {
+		return err
+	}
+	printStackAddSummary(stdout, stackAddSummary{
+		Options:         options,
+		RepositoryPath:  revision.Path,
+		Directory:       directory,
+		CopiedCompose:   copiedCompose,
+		ScaffoldCreated: scaffoldCreated,
+		Override:        override,
+		EnvironmentKeys: environmentKeys,
+		Metadata:        metadata,
+		Services:        services,
+		BaseDomain:      profile.BaseDomain,
+	})
+	return nil
+}
+
+func stackAddInputs(args []string, stderr io.Writer) (stackAddOptions, []composeServiceSummary, stackMetadata, string, []string, error) {
 	flags := flag.NewFlagSet("stack add", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	options := stackAddOptions{}
@@ -407,67 +488,71 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	flags.Var(&publications, "publish", "public route service:port:subdomain[:id] (repeatable)")
 	flags.StringVar(&options.EnvironmentFile, "env-file", "", "runtime environment file stored outside Git")
 	if err := flags.Parse(args); err != nil {
-		return err
+		return stackAddOptions{}, nil, stackMetadata{}, "", nil, err
 	}
 	if flags.NArg() != 0 {
-		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+		return stackAddOptions{}, nil, stackMetadata{}, "", nil, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
 	if options.ProfileID == "" || options.Compose == "" {
-		return errors.New("--profile and --compose are required")
+		return stackAddOptions{}, nil, stackMetadata{}, "", nil, errors.New("--profile and --compose are required")
 	}
 
 	composeData, err := os.ReadFile(expandUserPath(options.Compose))
 	if err != nil {
-		return fmt.Errorf("read Compose file: %w", err)
+		return stackAddOptions{}, nil, stackMetadata{}, "", nil, fmt.Errorf("read Compose file: %w", err)
 	}
 	services, err := inspectComposeServices(composeData)
 	if err != nil {
-		return err
+		return stackAddOptions{}, nil, stackMetadata{}, "", nil, err
 	}
 	options = withStackAddDefaults(options, services)
 	options.Resources, err = parseStackPublications(publications)
 	if err != nil {
-		return err
-	}
-	if err := validateStackMetadata(options.Name, stackMetadata{Version: 1, PublicResources: options.Resources}, services); err != nil {
-		return err
-	}
-
-	store, err := newDefaultProfileStore()
-	if err != nil {
-		return err
-	}
-	profile, state, err := store.Load(options.ProfileID)
-	if err != nil {
-		return fmt.Errorf("load profile: %w", err)
-	}
-	if profile.BaseDomain == "" && len(options.Resources) > 0 {
-		return errors.New("profile base domain is required before adding a public stack")
+		return stackAddOptions{}, nil, stackMetadata{}, "", nil, err
 	}
 	metadata := stackMetadata{Version: 1, PublicResources: options.Resources}
-	override, err := generateStackPangolinOverride(options.Name, metadata, services, profile)
-	if err != nil {
-		return err
-	}
 	var environment string
 	var environmentKeys []string
 	if options.EnvironmentFile != "" {
 		environment, environmentKeys, err = readStackEnvironmentFile(options.EnvironmentFile)
 		if err != nil {
-			return err
+			return stackAddOptions{}, nil, stackMetadata{}, "", nil, err
 		}
 	}
+	if err := validateStackMetadata(options.Name, metadata, services); err != nil {
+		return stackAddOptions{}, nil, stackMetadata{}, "", nil, err
+	}
+	return options, services, metadata, environment, environmentKeys, nil
+}
+
+func loadStackAddProfile(options stackAddOptions) (ProfileStore, Profile, ProfileState, error) {
+	store, err := newDefaultProfileStore()
+	if err != nil {
+		return nil, Profile{}, ProfileState{}, err
+	}
+	profile, state, err := store.Load(options.ProfileID)
+	if err != nil {
+		return nil, Profile{}, ProfileState{}, fmt.Errorf("load profile: %w", err)
+	}
+	if profile.BaseDomain == "" && len(options.Resources) > 0 {
+		return nil, Profile{}, ProfileState{}, errors.New("profile base domain is required before adding a public stack")
+	}
+	return store, profile, state, nil
+}
+
+func prepareStackAddRepository(ctx context.Context, store ProfileStore, profile Profile, state ProfileState, stdout io.Writer) (configRepositoryRevision, bool, error) {
 	repositoryPath := profile.ConfigRepositoryPath
 	if repositoryPath == "" {
+		var err error
 		repositoryPath, err = defaultConfigRepositoryPath(profile.ID)
 		if err != nil {
-			return err
+			return configRepositoryRevision{}, false, err
 		}
 	}
 	fmt.Fprintf(stdout, "Preparing configuration repository at %s...\n", repositoryPath)
 	absoluteRepositoryPath, err := filepath.Abs(expandUserPath(repositoryPath))
 	if err != nil {
-		return err
+		return configRepositoryRevision{}, false, err
 	}
 	revision := configRepositoryRevision{Path: absoluteRepositoryPath}
 	repositoryScaffold := observabilityComposeFile(observabilityConfig{
@@ -477,95 +562,139 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	if _, err := os.Stat(filepath.Join(absoluteRepositoryPath, ".git")); errors.Is(err, os.ErrNotExist) {
 		revision, err = prepareConfigRepository(ctx, repositoryPath, "", "", profile.ID, repositoryScaffold)
 		if err != nil {
-			return err
+			return configRepositoryRevision{}, false, err
 		}
 	} else if err != nil {
-		return err
+		return configRepositoryRevision{}, false, err
 	}
 	scaffoldCreated, err := ensureConfigRepositoryScaffold(ctx, revision.Path, repositoryScaffold)
 	if err != nil {
-		return err
+		return configRepositoryRevision{}, false, err
 	}
 	profile.ConfigRepositoryPath = revision.Path
 	if err := store.Save(profile, state); err != nil {
-		return err
+		return configRepositoryRevision{}, false, err
 	}
+	return revision, scaffoldCreated, nil
+}
 
-	directory := filepath.Join(revision.Path, "stacks", options.Name)
-	composeDestination := filepath.Join(directory, "compose.yaml")
+func writeStackAddFiles(store ProfileStore, profileID, repositoryPath string, options stackAddOptions, metadata stackMetadata, environment string) (string, bool, error) {
+	directory := filepath.Join(repositoryPath, "stacks", options.Name)
+	composeDestination := filepath.Join(directory, stackComposeFilename)
 	sourcePath, err := filepath.Abs(expandUserPath(options.Compose))
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	destinationPath, err := filepath.Abs(composeDestination)
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	if _, err := os.Stat(filepath.Join(directory, stackMetadataFilename)); err == nil {
-		return fmt.Errorf("stack %q is already configured at %s", options.Name, directory)
+		return "", false, fmt.Errorf("stack %q is already configured at %s", options.Name, directory)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+		return "", false, err
 	}
 	if err := os.MkdirAll(directory, 0700); err != nil {
-		return err
+		return "", false, err
 	}
-	if sourcePath != destinationPath {
-		if _, err := os.Stat(composeDestination); err == nil {
-			return fmt.Errorf("stack %q already has a compose.yaml", options.Name)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if err := copyFile(sourcePath, composeDestination, 0600); err != nil {
-			return err
-		}
+	copiedCompose := sourcePath != destinationPath
+	if err := copyStackAddCompose(sourcePath, destinationPath, composeDestination, options.Name); err != nil {
+		return "", false, err
 	}
 	metadataData, err := yaml.Marshal(metadata)
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	if err := os.WriteFile(filepath.Join(directory, stackMetadataFilename), metadataData, 0600); err != nil {
-		return err
+		return "", false, err
 	}
 	if options.EnvironmentFile != "" {
-		if err := saveStackEnvironment(store, profile.ID, options.Name, environment); err != nil {
-			return err
+		if err := saveStackEnvironment(store, profileID, options.Name, environment); err != nil {
+			return "", false, err
 		}
-		fmt.Fprintf(stdout, "Runtime environment saved outside Git (%d keys).\n", len(environmentKeys))
 	}
+	return directory, copiedCompose, nil
+}
 
-	fmt.Fprintf(stdout, "Stack scaffold created: %s\n", directory)
-	if scaffoldCreated {
+func copyStackAddCompose(sourcePath, destinationPath, composeDestination, name string) error {
+	if sourcePath == destinationPath {
+		return nil
+	}
+	if _, err := os.Stat(composeDestination); err == nil {
+		return fmt.Errorf("stack %q already has a %s", name, stackComposeFilename)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return copyFile(sourcePath, composeDestination, 0600)
+}
+
+type stackAddSummary struct {
+	Options         stackAddOptions
+	RepositoryPath  string
+	Directory       string
+	CopiedCompose   bool
+	ScaffoldCreated bool
+	Override        string
+	EnvironmentKeys []string
+	Metadata        stackMetadata
+	Services        []composeServiceSummary
+	BaseDomain      string
+}
+
+func printStackAddSummary(stdout io.Writer, summary stackAddSummary) {
+	if summary.Options.EnvironmentFile != "" {
+		fmt.Fprintf(stdout, "Runtime environment saved outside Git (%d keys).\n", len(summary.EnvironmentKeys))
+	}
+	fmt.Fprintf(stdout, "Stack scaffold created: %s\n", summary.Directory)
+	if summary.ScaffoldCreated {
 		fmt.Fprintln(stdout, "The managed observability scaffold was prepared in the same change set.")
 	}
-	if sourcePath != destinationPath {
+	if summary.CopiedCompose {
 		fmt.Fprintln(stdout, "Only the Compose file was imported. Copy any relative bind-mount, env, or configuration files into the stack directory before committing.")
 	}
-	if len(metadata.PublicResources) == 0 {
+	if len(summary.Metadata.PublicResources) == 0 {
 		fmt.Fprintln(stdout, "Public resources: none; this stack will remain private.")
 	}
-	for _, resource := range metadata.PublicResources {
-		fmt.Fprintf(stdout, "Public resource: https://%s.%s -> %s:%d\n", resource.Subdomain, profile.BaseDomain, resource.Service, resource.Port)
+	for _, resource := range summary.Metadata.PublicResources {
+		fmt.Fprintf(stdout, "Public resource: https://%s.%s -> %s:%d\n", resource.Subdomain, summary.BaseDomain, resource.Service, resource.Port)
 	}
 	fmt.Fprintln(stdout, "Review the imported Compose file for literal secrets; Servestead does not move application-specific secrets out of Git.")
-	for _, resource := range metadata.PublicResources {
-		if servicePublishesPorts(services, resource.Service) {
+	for _, resource := range summary.Metadata.PublicResources {
+		if servicePublishesPorts(summary.Services, resource.Service) {
 			fmt.Fprintf(stdout, "Servestead will suppress %s's direct host port bindings in its generated deployment override.\n", resource.Service)
 		}
 	}
 	fmt.Fprintln(stdout, "Servestead will generate and validate these deployment labels:")
-	for _, label := range pangolinLabelsFromOverride(override) {
+	for _, label := range pangolinLabelsFromOverride(summary.Override) {
 		fmt.Fprintf(stdout, "  %s\n", label)
 	}
 	fmt.Fprintln(stdout, "\nReview the complete configuration change, then commit it once. Servestead deploys committed configuration only:")
-	fmt.Fprintf(stdout, "  git -C %s add stacks\n", shellQuote(revision.Path))
-	fmt.Fprintf(stdout, "  git -C %s commit -m %s\n", shellQuote(revision.Path), shellQuote("Add "+options.Name+" stack"))
+	fmt.Fprintf(stdout, "  git -C %s add stacks\n", shellQuote(summary.RepositoryPath))
+	fmt.Fprintf(stdout, "  git -C %s commit -m %s\n", shellQuote(summary.RepositoryPath), shellQuote("Add "+summary.Options.Name+" stack"))
 	fmt.Fprintln(stdout, "Then open the profile dashboard, press s, select this stack, and press r to deploy it independently.")
-	return nil
 }
 
 func runStackEnvironment(args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 || (args[0] != "set" && args[0] != "remove") {
-		return errors.New(`usage: servestead stack env <set|remove> --profile <id> --stack <name> [--file <path>]`)
+	action, profileID, stackName, path, err := stackEnvironmentInputs(args, stderr)
+	if err != nil {
+		return err
+	}
+	store, err := newDefaultProfileStore()
+	if err != nil {
+		return err
+	}
+	if err := ensureStackEnvironmentTarget(store, profileID, stackName); err != nil {
+		return err
+	}
+	if action == "remove" {
+		return removeStackEnvironment(store, profileID, stackName, path, stdout)
+	}
+	return setStackEnvironment(store, profileID, stackName, path, stdout)
+}
+
+func stackEnvironmentInputs(args []string, stderr io.Writer) (string, string, string, string, error) {
+	if len(args) == 0 || !isStackEnvironmentAction(args[0]) {
+		return "", "", "", "", errors.New(`usage: servestead stack env <set|remove> --profile <id> --stack <name> [--file <path>]`)
 	}
 	action := args[0]
 	flags := flag.NewFlagSet("stack env "+action, flag.ContinueOnError)
@@ -575,18 +704,22 @@ func runStackEnvironment(args []string, stdout, stderr io.Writer) error {
 	flags.StringVar(&stackName, "stack", "", "stack name")
 	flags.StringVar(&path, "file", "", "environment file")
 	if err := flags.Parse(args[1:]); err != nil {
-		return err
+		return "", "", "", "", err
 	}
 	if flags.NArg() != 0 {
-		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+		return "", "", "", "", fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
 	if profileID == "" || !stackSlugPattern.MatchString(stackName) {
-		return errors.New("--profile and a valid --stack are required")
+		return "", "", "", "", errors.New("--profile and a valid --stack are required")
 	}
-	store, err := newDefaultProfileStore()
-	if err != nil {
-		return err
-	}
+	return action, profileID, stackName, path, nil
+}
+
+func isStackEnvironmentAction(action string) bool {
+	return action == "set" || action == "remove"
+}
+
+func ensureStackEnvironmentTarget(store ProfileStore, profileID, stackName string) error {
 	profile, _, err := store.Load(profileID)
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
@@ -598,16 +731,21 @@ func runStackEnvironment(args []string, stdout, stderr io.Writer) error {
 	if _, err := os.Stat(metadataPath); err != nil {
 		return fmt.Errorf("stack %q is not configured: %w", stackName, err)
 	}
-	if action == "remove" {
-		if path != "" {
-			return errors.New("--file cannot be used with env remove")
-		}
-		if err := saveStackEnvironment(store, profileID, stackName, ""); err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "Removed the runtime environment for %s. Deploy or synchronize the stack to apply it.\n", stackName)
-		return nil
+	return nil
+}
+
+func removeStackEnvironment(store ProfileStore, profileID, stackName, path string, stdout io.Writer) error {
+	if path != "" {
+		return errors.New("--file cannot be used with env remove")
 	}
+	if err := saveStackEnvironment(store, profileID, stackName, ""); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Removed the runtime environment for %s. Deploy or synchronize the stack to apply it.\n", stackName)
+	return nil
+}
+
+func setStackEnvironment(store ProfileStore, profileID, stackName, path string, stdout io.Writer) error {
 	if path == "" {
 		return errors.New("--file is required with env set")
 	}
@@ -820,28 +958,32 @@ func validateStackMetadata(stackName string, metadata stackMetadata, services []
 	ids := map[string]bool{}
 	subdomains := map[string]bool{}
 	for _, resource := range metadata.PublicResources {
-		if !stackSlugPattern.MatchString(resource.ID) {
-			return fmt.Errorf("resource ID %q must be a lowercase DNS label", resource.ID)
-		}
-		if ids[resource.ID] {
-			return fmt.Errorf("resource ID %q is duplicated", resource.ID)
-		}
-		ids[resource.ID] = true
-		if subdomains[resource.Subdomain] {
-			return fmt.Errorf("resource subdomain %q is duplicated", resource.Subdomain)
-		}
-		subdomains[resource.Subdomain] = true
-		if resource.Protocol != "http" && resource.Protocol != "https" {
-			return fmt.Errorf("resource %q protocol must be http or https", resource.ID)
-		}
-		if resource.Healthcheck.Enabled && resource.Healthcheck.Path == "" {
-			return fmt.Errorf("resource %q enables health checks but has no path", resource.ID)
-		}
-		if err := validateStackResource(resource, services); err != nil {
+		if err := validateStackMetadataResource(resource, services, ids, subdomains); err != nil {
 			return fmt.Errorf("resource %q: %w", resource.ID, err)
 		}
 	}
 	return nil
+}
+
+func validateStackMetadataResource(resource stackPublicResource, services []composeServiceSummary, ids, subdomains map[string]bool) error {
+	if !stackSlugPattern.MatchString(resource.ID) {
+		return fmt.Errorf("resource ID %q must be a lowercase DNS label", resource.ID)
+	}
+	if ids[resource.ID] {
+		return fmt.Errorf("resource ID %q is duplicated", resource.ID)
+	}
+	ids[resource.ID] = true
+	if subdomains[resource.Subdomain] {
+		return fmt.Errorf("resource subdomain %q is duplicated", resource.Subdomain)
+	}
+	subdomains[resource.Subdomain] = true
+	if resource.Protocol != "http" && resource.Protocol != "https" {
+		return fmt.Errorf("resource %q protocol must be http or https", resource.ID)
+	}
+	if resource.Healthcheck.Enabled && resource.Healthcheck.Path == "" {
+		return fmt.Errorf("resource %q enables health checks but has no path", resource.ID)
+	}
+	return validateStackResource(resource, services)
 }
 
 func generateStackPangolinOverride(stackName string, metadata stackMetadata, services []composeServiceSummary, profile Profile) (string, error) {
@@ -867,34 +1009,11 @@ func generateStackPangolinOverride(stackName string, metadata stackMetadata, ser
 			Public:     len(resources) > 0,
 			ResetPorts: len(resources) > 0 && servicePublishesPorts(services, service),
 		}
-		for _, resource := range resources {
-			if resource.SSO && firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail) == "" {
-				return "", fmt.Errorf("resource %q enables SSO but the profile has no Pangolin administrator email", resource.ID)
-			}
-			prefix := "pangolin.public-resources.servestead-" + stackName + "-" + resource.ID
-			labels := []string{
-				prefix + ".name=" + resource.Name,
-				prefix + ".protocol=" + resource.Protocol,
-				prefix + ".full-domain=" + resource.Subdomain + "." + profile.BaseDomain,
-				prefix + ".auth.sso-enabled=" + strconv.FormatBool(resource.SSO),
-				prefix + ".targets[0].hostname=" + resource.Service,
-				prefix + ".targets[0].port=" + strconv.Itoa(resource.Port),
-				prefix + ".targets[0].method=" + resource.Protocol,
-			}
-			if resource.SSO {
-				labels = append(labels, prefix+".auth.sso-users[0]="+firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail))
-			}
-			if resource.Healthcheck.Enabled {
-				labels = append(labels,
-					prefix+".targets[0].healthcheck.enabled=true",
-					prefix+".targets[0].healthcheck.hostname="+resource.Service,
-					prefix+".targets[0].healthcheck.port="+strconv.Itoa(resource.Port),
-					prefix+".targets[0].healthcheck.scheme="+resource.Protocol,
-					prefix+".targets[0].healthcheck.path="+resource.Healthcheck.Path,
-				)
-			}
-			overrideService.Labels = append(overrideService.Labels, labels...)
+		labels, err := stackPangolinOverrideLabels(stackName, resources, profile)
+		if err != nil {
+			return "", err
 		}
+		overrideService.Labels = labels
 		overrideServices = append(overrideServices, overrideService)
 	}
 	return mustRenderResourceTemplate(resources.StackPangolinOverride, struct {
@@ -906,6 +1025,48 @@ func generateStackPangolinOverride(stackName string, metadata stackMetadata, ser
 		HasPublicResources:      len(metadata.PublicResources) > 0,
 		Services:                overrideServices,
 	}), nil
+}
+
+func stackPangolinOverrideLabels(stackName string, resources []stackPublicResource, profile Profile) ([]string, error) {
+	labels := []string{}
+	for _, resource := range resources {
+		resourceLabels, err := stackPangolinResourceLabels(stackName, resource, profile)
+		if err != nil {
+			return nil, err
+		}
+		labels = append(labels, resourceLabels...)
+	}
+	return labels, nil
+}
+
+func stackPangolinResourceLabels(stackName string, resource stackPublicResource, profile Profile) ([]string, error) {
+	adminEmail := firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail)
+	if resource.SSO && adminEmail == "" {
+		return nil, fmt.Errorf("resource %q enables SSO but the profile has no Pangolin administrator email", resource.ID)
+	}
+	prefix := "pangolin.public-resources.servestead-" + stackName + "-" + resource.ID
+	labels := []string{
+		prefix + ".name=" + resource.Name,
+		prefix + ".protocol=" + resource.Protocol,
+		prefix + ".full-domain=" + resource.Subdomain + "." + profile.BaseDomain,
+		prefix + ".auth.sso-enabled=" + strconv.FormatBool(resource.SSO),
+		prefix + ".targets[0].hostname=" + resource.Service,
+		prefix + ".targets[0].port=" + strconv.Itoa(resource.Port),
+		prefix + ".targets[0].method=" + resource.Protocol,
+	}
+	if resource.SSO {
+		labels = append(labels, prefix+".auth.sso-users[0]="+adminEmail)
+	}
+	if resource.Healthcheck.Enabled {
+		labels = append(labels,
+			prefix+".targets[0].healthcheck.enabled=true",
+			prefix+".targets[0].healthcheck.hostname="+resource.Service,
+			prefix+".targets[0].healthcheck.port="+strconv.Itoa(resource.Port),
+			prefix+".targets[0].healthcheck.scheme="+resource.Protocol,
+			prefix+".targets[0].healthcheck.path="+resource.Healthcheck.Path,
+		)
+	}
+	return labels, nil
 }
 
 func servicePublishesPorts(services []composeServiceSummary, name string) bool {

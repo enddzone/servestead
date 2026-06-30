@@ -283,10 +283,7 @@ func (provider *digitalOceanProvider) listImages(ctx context.Context) ([]cloudIm
 			return nil, err
 		}
 		for _, image := range images {
-			if !strings.EqualFold(image.Distribution, "Ubuntu") || image.Slug == "" {
-				continue
-			}
-			if image.Status != "" && image.Status != "available" {
+			if !isUsableDigitalOceanUbuntuImage(image) {
 				continue
 			}
 			result = append(result, cloudImage{
@@ -303,16 +300,25 @@ func (provider *digitalOceanProvider) listImages(ctx context.Context) ([]cloudIm
 		}
 		options.Page++
 	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Slug == defaultDigitalOceanImage {
-			return true
-		}
-		if result[j].Slug == defaultDigitalOceanImage {
-			return false
-		}
-		return result[i].Slug < result[j].Slug
-	})
+	sort.Slice(result, func(i, j int) bool { return lessDigitalOceanImage(result[i], result[j]) })
 	return result, nil
+}
+
+func isUsableDigitalOceanUbuntuImage(image godo.Image) bool {
+	if !strings.EqualFold(image.Distribution, "Ubuntu") || image.Slug == "" {
+		return false
+	}
+	return image.Status == "" || image.Status == "available"
+}
+
+func lessDigitalOceanImage(left, right cloudImage) bool {
+	if left.Slug == defaultDigitalOceanImage {
+		return true
+	}
+	if right.Slug == defaultDigitalOceanImage {
+		return false
+	}
+	return left.Slug < right.Slug
 }
 
 func (provider *digitalOceanProvider) listKeys(ctx context.Context) ([]cloudSSHKey, error) {

@@ -26,7 +26,7 @@ func TestHardeningCommandsContainBaseline(t *testing.T) {
 		"Install CrowdSec and firewall bouncer",
 	})
 	for _, expected := range []string{
-		`test "$ID" = "ubuntu"`,
+		`[[ "$ID" = "ubuntu" ]]`,
 		`dpkg --compare-versions "$VERSION_ID" ge 22.04`,
 		"sysctl -n 'net.ipv4.conf.all.rp_filter'",
 		"apt-get -o DPkg::Lock::Timeout=300 update",
@@ -38,7 +38,7 @@ func TestHardeningCommandsContainBaseline(t *testing.T) {
 		"apt-get -o DPkg::Lock::Timeout=300 install -y 'apt-transport-https' 'ca-certificates' 'curl' 'gnupg' 'iptables' 'unattended-upgrades'",
 		"/etc/ssh/sshd_config.d/99-servestead-hardening.conf",
 		`ram_gib="$(( (mem_kib + 1048575) / 1048576 ))"`,
-		`if [ "$ram_gib" -lt 2 ]; then swap_gib="$((ram_gib * 2))"; elif [ "$ram_gib" -le 8 ]; then swap_gib="$ram_gib"; else swap_gib=4; fi`,
+		`if [[ "$ram_gib" -lt 2 ]]; then swap_gib="$((ram_gib * 2))"; elif [[ "$ram_gib" -le 8 ]]; then swap_gib="$ram_gib"; else swap_gib=4; fi`,
 		`swapon --show=NAME --noheadings --raw`,
 		`fallocate -l "${swap_gib}G" /swapfile`,
 		`dd if=/dev/zero of=/swapfile`,

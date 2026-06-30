@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"servestead/resources"
 	"strings"
+
+	"servestead/resources"
 )
 
 type bootstrapConfig struct {
