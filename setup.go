@@ -162,7 +162,7 @@ func runSetup(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	}
 	resume := setupResume{}
 	for {
-		request, err := collectSetupRequest(store, stderr, resume)
+		request, err := collectSetupRequest(ctx, store, stderr, resume)
 		if err != nil {
 			return err
 		}
@@ -219,7 +219,8 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 	return runPreflight(config, stdout)
 }
 
-func collectSetupRequest(store ProfileStore, output io.Writer, resume setupResume) (setupRequest, error) {
+func collectSetupRequest(ctx context.Context, store ProfileStore, output io.Writer, resume setupResume) (setupRequest, error) {
+	resumeState := resume
 	for {
 		profiles, err := loadProfileChoices(store)
 		if err != nil {
@@ -227,7 +228,7 @@ func collectSetupRequest(store ProfileStore, output io.Writer, resume setupResum
 		}
 		model := newProfileSetupModel(profiles)
 		model.profileStore = store
-		applySetupResume(&model, resume)
+		applySetupResume(&model, resumeState)
 		program := tea.NewProgram(model, tea.WithOutput(output), tea.WithAltScreen())
 		finalModel, err := program.Run()
 		if err != nil {
@@ -252,6 +253,14 @@ func collectSetupRequest(store ProfileStore, output io.Writer, resume setupResum
 				return setupRequest{}, err
 			}
 			return setupRequest{Legacy: true, LegacyConfig: config}, nil
+		}
+		if result.provision {
+			profile, err := collectDigitalOceanProvisionProfile(ctx, store, output)
+			if err != nil {
+				return setupRequest{}, err
+			}
+			resumeState = setupResume{ProfileID: profile.ID, Screen: profileSetupScreenDashboard}
+			continue
 		}
 		if !result.done {
 			return setupRequest{}, errors.New("setup did not complete")
@@ -380,6 +389,9 @@ const (
 	profileSetupScreenStackDeleteConfirm
 	profileSetupScreenStackDiff
 	profileSetupScreenStackCommit
+	profileSetupScreenCloud
+	profileSetupScreenCloudConfirm
+	profileSetupScreenCloudRunning
 	profileSetupScreenReview
 	profileSetupScreenDeleteConfirm
 )
@@ -469,6 +481,10 @@ type profileSetupModel struct {
 	stackSyncStatus          string
 	stackDiffViewport        viewport.Model
 	stackCommitInput         textinput.Model
+	cloudAction              string
+	cloudNotice              string
+	cloudTokenInput          textinput.Model
+	cloudConfirmInput        textinput.Model
 	repositoryMode           string
 	focus                    int
 	err                      string
@@ -476,6 +492,7 @@ type profileSetupModel struct {
 	height                   int
 	done                     bool
 	legacy                   bool
+	provision                bool
 	cancelled                bool
 }
 
@@ -495,7 +512,7 @@ type stackEnvironmentOption struct {
 }
 
 func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
-	items := make([]list.Item, 0, len(profiles)+2)
+	items := make([]list.Item, 0, len(profiles)+3)
 	for index, choice := range profiles {
 		status := latestProfileStatus(choice.State)
 		if status == "" {
@@ -509,6 +526,7 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 		})
 	}
 	items = append(items,
+		profileListItem{kind: "provision", title: "Provision a new DigitalOcean VPS", description: "Create one billable Droplet, save it as a profile, then return to setup."},
 		profileListItem{kind: "new", title: "Set up a new server profile", description: "Collect IP, SSH key, domain, and email before running the full setup plan."},
 		profileListItem{kind: "legacy", title: "Advanced legacy setup paths", description: "Open key generation, one-off hardening, network, proxy, or doctor modes."},
 	)
@@ -573,6 +591,12 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 	model.stackEnvironmentPicker = newStackFilePicker(".", nil, true)
 	model.stackCommitInput = newSetupInputs([]setupInputField{{
 		label: "Commit message", placeholder: "Update application stacks",
+	}})[0]
+	model.cloudTokenInput = newSetupInputs([]setupInputField{{
+		label: "DigitalOcean API token", value: firstNonEmpty(os.Getenv("DIGITALOCEAN_ACCESS_TOKEN"), os.Getenv("DIGITALOCEAN_TOKEN")), secret: true,
+	}})[0]
+	model.cloudConfirmInput = newSetupInputs([]setupInputField{{
+		label: "Confirmation",
 	}})[0]
 	model.inputs[0].Focus()
 	return model
@@ -829,6 +853,8 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model.pangolinError = ""
 		}
 		return model, nil
+	case profileCloudActionMsg:
+		return model.applyProfileCloudAction(msg), nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
@@ -878,6 +904,12 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return model.updateStackDiff(msg)
 		case profileSetupScreenStackCommit:
 			return model.updateStackCommit(msg)
+		case profileSetupScreenCloud:
+			return model.updateProfileCloud(msg)
+		case profileSetupScreenCloudConfirm:
+			return model.updateProfileCloudConfirm(msg)
+		case profileSetupScreenCloudRunning:
+			return model, nil
 		case profileSetupScreenReview:
 			return model.updateProfileReview(msg)
 		case profileSetupScreenDeleteConfirm:
@@ -900,7 +932,8 @@ func profileSetupScreenAcceptsText(screen profileSetupScreen) bool {
 	switch screen {
 	case profileSetupScreenIntake, profileSetupScreenAdvanced, profileSetupScreenRepositoryDetails,
 		profileSetupScreenStackCompose, profileSetupScreenStackEditor, profileSetupScreenStackResourceEditor,
-		profileSetupScreenStackEnvironment, profileSetupScreenStackReview, profileSetupScreenStackCommit:
+		profileSetupScreenStackEnvironment, profileSetupScreenStackReview, profileSetupScreenStackCommit,
+		profileSetupScreenCloudConfirm:
 		return true
 	default:
 		return false
@@ -933,6 +966,9 @@ func (model profileSetupModel) updateProfilePicker(key tea.KeyMsg) (tea.Model, t
 		switch selected.kind {
 		case "legacy":
 			model.legacy = true
+			return model, tea.Quit
+		case "provision":
+			model.provision = true
 			return model, tea.Quit
 		case "new":
 			model.selectedIndex = -1
@@ -967,6 +1003,9 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 			return model, nil
 		}
 		model.singleStage = stage
+		if stage == "platform" && model.selectedProfileNeedsPlatformIntake() {
+			return model.openProfileStageIntake(stage), nil
+		}
 		proxyRetry := false
 		if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
 			choice := model.profiles[model.selectedIndex]
@@ -1003,12 +1042,45 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 		}
 	case "c", "C":
 		return model, model.checkPangolinRegistration()
+	case "o", "O":
+		if !model.selectedProfileHasCloud() {
+			model.err = "selected profile has no DigitalOcean Droplet metadata"
+			return model, nil
+		}
+		model.err = ""
+		model.cloudNotice = ""
+		model.screen = profileSetupScreenCloud
 	default:
 		var cmd tea.Cmd
 		model.stageTable, cmd = model.stageTable.Update(key)
 		return model, cmd
 	}
 	return model, nil
+}
+
+func (model profileSetupModel) selectedProfileNeedsPlatformIntake() bool {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		return false
+	}
+	profile := model.profiles[model.selectedIndex].Profile
+	return strings.TrimSpace(profile.PrivateKeyPath) == "" ||
+		strings.TrimSpace(profile.BaseDomain) == "" ||
+		strings.TrimSpace(profile.LetsEncryptEmail) == ""
+}
+
+func (model profileSetupModel) openProfileStageIntake(stage string) profileSetupModel {
+	model.singleStage = stage
+	model.err = "Platform needs a domain and Let's Encrypt email before it can configure proxy and observability."
+	model.blurInputs(false)
+	model.focus = 2
+	if strings.TrimSpace(model.inputs[1].Value()) == "" {
+		model.focus = 1
+	} else if strings.TrimSpace(model.inputs[2].Value()) != "" && strings.TrimSpace(model.inputs[3].Value()) == "" {
+		model.focus = 3
+	}
+	model.inputs[model.focus].Focus()
+	model.screen = profileSetupScreenIntake
+	return model
 }
 
 func (model profileSetupModel) openPangolinCredentialRetry(stage, notice string) profileSetupModel {
@@ -2251,6 +2323,7 @@ func (model *profileSetupModel) goBack() {
 		model.screen = profileSetupScreenPicker
 	case profileSetupScreenIntake:
 		if model.selectedIndex >= 0 {
+			model.singleStage = ""
 			model.screen = profileSetupScreenDashboard
 		} else {
 			model.screen = profileSetupScreenPicker
@@ -2305,8 +2378,17 @@ func (model *profileSetupModel) goBack() {
 	case profileSetupScreenStackCommit:
 		model.stackCommitInput.Blur()
 		model.screen = profileSetupScreenStacks
+	case profileSetupScreenCloud:
+		model.screen = profileSetupScreenDashboard
+	case profileSetupScreenCloudConfirm:
+		model.cloudTokenInput.Blur()
+		model.cloudConfirmInput.Blur()
+		model.screen = profileSetupScreenCloud
+	case profileSetupScreenCloudRunning:
+		model.screen = profileSetupScreenCloudConfirm
 	case profileSetupScreenReview:
 		if model.selectedIndex >= 0 {
+			model.singleStage = ""
 			model.screen = profileSetupScreenDashboard
 		} else {
 			model.screen = profileSetupScreenIntake
@@ -2398,6 +2480,7 @@ func (model *profileSetupModel) refreshDashboard() {
 	model.stackHead = ""
 	model.stackNeedsPush = false
 	model.stackSyncStatus = ""
+	model.cloudNotice = ""
 	model.stackTable = newStackTable(nil, "", nil)
 	model.resizeStackTable()
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
@@ -2452,6 +2535,12 @@ func (model *profileSetupModel) refreshPlanPreview() {
 		model.planViewport.SetContent(err.Error())
 		return
 	}
+	config := model.reviewSetupConfig(options)
+	model.planViewport.SetContent(model.reviewPlanSummary(options, config))
+	model.planViewport.GotoTop()
+}
+
+func (model profileSetupModel) reviewSetupConfig(options setupCLIOptions) setupConfig {
 	config := setupConfig{
 		Mode:               setupModeFullRun,
 		Host:               options.IP,
@@ -2461,14 +2550,64 @@ func (model *profileSetupModel) refreshPlanPreview() {
 		AdminPublicKeyPath: publicKeyPath(expandUserPath(firstNonEmpty(options.PrivateKeyPath, defaultKeygenConfig().Path))),
 		BaseDomain:         options.BaseDomain,
 		LetsEncryptEmail:   options.LetsEncryptEmail,
+		PangolinAdminEmail: firstNonEmpty(options.PangolinAdminEmail, options.LetsEncryptEmail),
 		ProfileID:          "(new profile)",
 		ServerSecret:       "generated-placeholder",
 	}
 	if !options.Fresh {
 		config.ProfileID = firstNonEmpty(options.ProfileID, "(new profile)")
 	}
-	model.planViewport.SetContent(setupPlanSummary(config))
-	model.planViewport.GotoTop()
+	if model.singleStage != "" {
+		config.Mode = setupModeForStage(model.singleStage)
+	}
+	return config
+}
+
+func (model profileSetupModel) reviewPlanSummary(options setupCLIOptions, config setupConfig) string {
+	if model.singleStage == "" {
+		return setupPlanSummary(config)
+	}
+	var builder strings.Builder
+	stageLabel := profileRunStageLabel(model.singleStage)
+	fmt.Fprintf(&builder, "Selected action: %s\n", stageLabel)
+	fmt.Fprintf(&builder, "- Target: %s\n", reviewTargetLabel(options))
+	fmt.Fprintf(&builder, "- SSH user: %s with %s\n", config.AdminUser, config.PrivateKeyPath)
+	if config.BaseDomain != "" {
+		fmt.Fprintf(&builder, "- Domain: %s\n", config.BaseDomain)
+	}
+	if config.LetsEncryptEmail != "" {
+		fmt.Fprintf(&builder, "- Let's Encrypt email: %s\n", config.LetsEncryptEmail)
+	}
+	builder.WriteString("\nWhat will run:\n")
+	switch model.singleStage {
+	case "platform":
+		builder.WriteString("- Network: configure Docker networking and UFW.\n")
+		builder.WriteString("- Proxy: deploy Pangolin, Traefik, Gerbil, and Newt.\n")
+		builder.WriteString("- Observability: deploy Beszel, Dozzle, and Dockhand from the committed repository configuration.\n")
+		builder.WriteString("- Generate or reuse profile secrets without printing them.\n")
+		builder.WriteString("\nWhat will not run:\n")
+		builder.WriteString("- No new VPS will be provisioned.\n")
+		builder.WriteString("- Bootstrap and Harden will not run from this action.\n")
+	case "observability":
+		builder.WriteString("- Deploy observability services from the committed repository configuration.\n")
+	case "stacks":
+		builder.WriteString("- Synchronize committed standalone stack configuration with the server.\n")
+	default:
+		if strings.HasPrefix(model.singleStage, "stack:") {
+			fmt.Fprintf(&builder, "- Deploy only the %s standalone stack from committed configuration.\n", strings.TrimPrefix(model.singleStage, "stack:"))
+		} else {
+			fmt.Fprintf(&builder, "- Run only the selected %s stage.\n", stageLabel)
+		}
+	}
+	if stageUsesRepository(model.singleStage) {
+		builder.WriteString("\nRepository preparation:\n")
+		fmt.Fprintf(&builder, "- %s\n", model.repositoryReviewLine())
+		builder.WriteString("- SSH execution starts only after repository preparation succeeds.\n")
+	}
+	if model.singleStage == "platform" && config.BaseDomain != "" && config.Host != "" {
+		fmt.Fprintf(&builder, "\n%s.\n", requiredDNSGuidance(config.BaseDomain, config.Host))
+	}
+	return builder.String()
 }
 
 func (model profileSetupModel) optionsFromInputs() (setupCLIOptions, error) {
@@ -2523,16 +2662,22 @@ func (model profileSetupModel) optionsForSelectedProfile() (setupCLIOptions, err
 		return setupCLIOptions{}, errors.New("no profile selected")
 	}
 	profile := model.profiles[model.selectedIndex].Profile
+	inputValue := func(index int) string {
+		if index < 0 || index >= len(model.inputs) {
+			return ""
+		}
+		return strings.TrimSpace(model.inputs[index].Value())
+	}
 	options := setupCLIOptions{
 		IP:                    profile.IP,
 		ProfileID:             profile.ID,
 		Name:                  profile.Name,
 		InitialSSHUser:        profile.InitialSSHUser,
 		AdminUser:             profile.AdminUser,
-		PrivateKeyPath:        profile.PrivateKeyPath,
-		BaseDomain:            profile.BaseDomain,
-		LetsEncryptEmail:      profile.LetsEncryptEmail,
-		PangolinAdminEmail:    firstNonEmpty(strings.TrimSpace(model.advanced[3].Value()), profile.PangolinAdminEmail, profile.LetsEncryptEmail),
+		PrivateKeyPath:        expandUserPath(firstNonEmpty(inputValue(1), profile.PrivateKeyPath)),
+		BaseDomain:            firstNonEmpty(inputValue(2), profile.BaseDomain),
+		LetsEncryptEmail:      firstNonEmpty(inputValue(3), profile.LetsEncryptEmail),
+		PangolinAdminEmail:    firstNonEmpty(strings.TrimSpace(model.advanced[3].Value()), profile.PangolinAdminEmail, firstNonEmpty(inputValue(3), profile.LetsEncryptEmail)),
 		PangolinAdminPassword: strings.TrimSpace(model.advanced[4].Value()),
 	}
 	switch model.repositoryMode {
@@ -2609,6 +2754,12 @@ func (model profileSetupModel) View() string {
 		builder.WriteString(setupHelpStyle.Render("Only staged changes under stacks/ are included."))
 		builder.WriteString("\n\n")
 		builder.WriteString(model.stackCommitInput.View())
+	case profileSetupScreenCloud:
+		builder.WriteString(model.profileCloudView())
+	case profileSetupScreenCloudConfirm:
+		builder.WriteString(model.profileCloudConfirmView())
+	case profileSetupScreenCloudRunning:
+		builder.WriteString(model.profileCloudRunningView())
 	case profileSetupScreenReview:
 		builder.WriteString(model.reviewView())
 	case profileSetupScreenDeleteConfirm:
@@ -2623,6 +2774,7 @@ func (model profileSetupModel) View() string {
 		screen:               model.screen,
 		hasProfile:           model.selectedIndex >= 0,
 		hasPangolinAccess:    model.selectedProfileHasPangolinAccess(),
+		hasCloud:             model.selectedProfileHasCloud(),
 		stackComposeManual:   model.stackComposeManual,
 		stackEnvironmentMode: model.stackEnvironmentMode,
 		stackEditorFocus:     model.focus,
@@ -2649,6 +2801,10 @@ func (model profileSetupModel) dashboardView() string {
 	}
 	builder.WriteString(model.pangolinRegistrationView(choice))
 	builder.WriteString("\n\n")
+	if choice.Profile.Cloud != nil {
+		builder.WriteString(model.profileCloudSummary(choice.Profile))
+		builder.WriteString("\n\n")
+	}
 	builder.WriteString(model.progress.ViewAs(profileCompletion(&choice.State)))
 	builder.WriteString("\n\n")
 	builder.WriteString(model.stageTable.View())
@@ -2976,28 +3132,85 @@ func (model profileSetupModel) repositoryDetailsView() string {
 
 func (model profileSetupModel) reviewView() string {
 	var builder strings.Builder
-	builder.WriteString("Review full setup plan\n\n")
+	if model.singleStage == "" {
+		builder.WriteString("Review full setup plan\n\n")
+	} else {
+		builder.WriteString(fmt.Sprintf("Review %s run\n\n", profileRunStageLabel(model.singleStage)))
+	}
 	builder.WriteString(model.planViewport.View())
 	builder.WriteString("\n")
-	if model.selectedIndex >= 0 && !model.fresh {
-		builder.WriteString("Profile action: resume selected profile.\n")
-	} else if model.fresh {
-		builder.WriteString("Profile action: create a fresh profile for this server.\n")
-	} else {
-		builder.WriteString("Profile action: create a new profile.\n")
+	builder.WriteString("\nRun\n")
+	builder.WriteString("- ")
+	builder.WriteString(model.runReviewLine())
+	builder.WriteString("\n")
+	if model.singleStage == "platform" {
+		builder.WriteString("- No new VPS will be provisioned. Bootstrap and Harden will not run from this action.\n")
 	}
-	switch model.repositoryMode {
-	case "create":
-		path := firstNonEmpty(strings.TrimSpace(model.repositoryInputs[0].Value()), "the profile default path")
-		builder.WriteString(fmt.Sprintf("Repository action: create and commit a new local repository at %s.\n", path))
-	case "existing":
-		builder.WriteString(fmt.Sprintf("Repository action: use existing checkout at %s.\n", strings.TrimSpace(model.repositoryInputs[0].Value())))
-	case "github":
-		path := firstNonEmpty(strings.TrimSpace(model.repositoryInputs[0].Value()), "the profile default path")
-		builder.WriteString(fmt.Sprintf("Repository action: clone %s into %s.\n", strings.TrimSpace(model.repositoryInputs[1].Value()), path))
+	builder.WriteString("\nProfile\n")
+	builder.WriteString("- ")
+	builder.WriteString(model.profileReviewLine())
+	builder.WriteString("\n")
+	if model.singleStage == "" || stageUsesRepository(model.singleStage) {
+		builder.WriteString("\nRepository preparation\n")
+		builder.WriteString("- ")
+		builder.WriteString(model.repositoryReviewLine())
+		builder.WriteString("\n")
 	}
-	builder.WriteString("After confirmation, Servestead prepares the repository first. SSH execution starts only after repository preparation succeeds.\n")
+	builder.WriteString("\nExecution order\n")
+	builder.WriteString("- Run local preflight checks before contacting the server.\n")
+	if model.singleStage == "" || stageUsesRepository(model.singleStage) {
+		builder.WriteString("- Prepare the local configuration repository before SSH execution.\n")
+	}
+	builder.WriteString("- SSH execution starts only after repository preparation succeeds.\n")
 	return builder.String()
+}
+
+func (model profileSetupModel) runReviewLine() string {
+	if model.singleStage == "" {
+		return "Full setup can run Bootstrap, Harden, Platform, and committed stack deployment as needed."
+	}
+	if model.singleStage == "platform" {
+		return "Platform runs Network, Proxy, and Observability for the selected profile."
+	}
+	return fmt.Sprintf("Run only %s for the selected profile.", profileRunStageLabel(model.singleStage))
+}
+
+func (model profileSetupModel) profileReviewLine() string {
+	if model.selectedIndex >= 0 && !model.fresh {
+		return "Resume the selected saved profile."
+	}
+	if model.fresh {
+		return "Create a fresh profile for this server and preserve the existing saved profile."
+	}
+	return "Create a new saved profile for this server."
+}
+
+func (model profileSetupModel) repositoryReviewLine() string {
+	switch model.repositoryMode {
+	case "existing":
+		return fmt.Sprintf("Use existing local checkout at %s.", strings.TrimSpace(model.repositoryInputs[0].Value()))
+	case "github":
+		path := firstNonEmpty(strings.TrimSpace(model.repositoryInputs[0].Value()), "the profile default path under Servestead's config directory")
+		return fmt.Sprintf("Clone %s into %s, then use the committed configuration.", strings.TrimSpace(model.repositoryInputs[1].Value()), path)
+	default:
+		path := strings.TrimSpace(model.repositoryInputs[0].Value())
+		if path == "" {
+			return "Create and commit a new local configuration repository at the profile default path under Servestead's config directory."
+		}
+		return fmt.Sprintf("Create and commit a new local configuration repository at %s.", path)
+	}
+}
+
+func reviewTargetLabel(options setupCLIOptions) string {
+	label := firstNonEmpty(options.Name, options.ProfileID, options.IP, "(unnamed profile)")
+	if options.IP != "" && label != options.IP {
+		return fmt.Sprintf("%s (%s)", label, options.IP)
+	}
+	return label
+}
+
+func stageUsesRepository(stage string) bool {
+	return stage == "platform" || stage == "observability" || stage == "stacks" || strings.HasPrefix(stage, "stack:")
 }
 
 func (model profileSetupModel) deleteConfirmView() string {
@@ -3017,6 +3230,7 @@ type profileSetupHelp struct {
 	screen               profileSetupScreen
 	hasProfile           bool
 	hasPangolinAccess    bool
+	hasCloud             bool
 	stackComposeManual   bool
 	stackEnvironmentMode stackEnvironmentMode
 	stackEditorFocus     int
@@ -3048,6 +3262,9 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 		}
 		if helpMap.hasPangolinAccess {
 			bindings = append(bindings, key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "reveal")))
+		}
+		if helpMap.hasCloud {
+			bindings = append(bindings, key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "cloud")))
 		}
 		return bindings
 	case profileSetupScreenIntake:
@@ -3180,6 +3397,23 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "commit")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	case profileSetupScreenCloud:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "restart")),
+			key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "destroy")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+			key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
+		}
+	case profileSetupScreenCloudConfirm:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "run")),
+			key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "field")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
+	case profileSetupScreenCloudRunning:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel")),
 		}
 	case profileSetupScreenReview:
 		return []key.Binding{
@@ -3509,7 +3743,7 @@ func setupModeForStage(stage string) setupMode {
 	case "stacks":
 		return setupModeObservability
 	case "platform":
-		return setupModeFullRun
+		return setupModeProxy
 	default:
 		return setupModeFullRun
 	}
@@ -3532,6 +3766,9 @@ func validateStageRunConfig(stage string, config setupConfig) error {
 			return errors.New("admin SSH user must be a valid Linux username")
 		}
 	case "proxy", "platform":
+		if config.BaseDomain == "" || config.LetsEncryptEmail == "" {
+			return fmt.Errorf("profile domain and Let's Encrypt email are required for %s; edit the profile before running it", profileRunStageLabel(stage))
+		}
 		return validateProxyConfig(proxyConfig{
 			Host:             config.Host,
 			SSHUser:          config.AdminUser,
@@ -5327,7 +5564,7 @@ func (model setupModel) View() string {
 		builder.WriteString(setupHelpStyle.Render(setupModeOptions()[int(model.mode)].Description))
 		builder.WriteString("\n\n")
 		if model.mode == setupModeProviderKey {
-			builder.WriteString("Servestead will write the private key and matching .pub file, then print the public key for Hetzner or DigitalOcean.")
+			builder.WriteString("Servestead will write the private key and matching .pub file, then print the public key for DigitalOcean.")
 		} else if model.mode == setupModeProxy {
 			builder.WriteString("Enter the target host, domain, and Let's Encrypt email. Servestead generates the Pangolin server secret.")
 		} else {

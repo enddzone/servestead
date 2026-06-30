@@ -9,7 +9,7 @@ Use this checklist before running remote setup.
   <li>A local machine with Go 1.26.4 or newer.</li>
   <li>A fresh Ubuntu 22.04 or newer VPS. Ubuntu 24.04 is the default for provisioning.</li>
   <li>An ED25519 SSH key pair for administrative access.</li>
-  <li>If provisioning: an SSH public key already registered with Hetzner or DigitalOcean.</li>
+  <li>If provisioning: a DigitalOcean API token and a local SSH public key.</li>
   <li>If deploying the proxy: a domain you control and an email address for Let's Encrypt.</li>
   <li>DNS access for the apex domain and wildcard subdomains.</li>
 </ul>
@@ -38,7 +38,7 @@ The default private key path is:
 $HOME/.ssh/servestead_ed25519
 ```
 
-Add the printed public key to your cloud provider before provisioning or use an existing key pair for an existing VPS.
+Guided DigitalOcean provisioning can upload the printed public key if it is not already present in your DigitalOcean account. For direct CLI provisioning, add the public key to DigitalOcean first and use the provider key ID or fingerprint with `servestead provision --ssh-key`.
 
 ## DNS Records
 

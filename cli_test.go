@@ -34,9 +34,9 @@ func TestSubcommandHelpIsSuccessful(t *testing.T) {
 func TestProvisionRequiresProviderCredential(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := run(context.Background(), []string{
-		"provision", "--provider", "hetzner", "--name", "aegis-01", "--ssh-key", "key-id",
+		"provision", "--provider", "digitalocean", "--name", "aegis-01", "--ssh-key", "key-id",
 	}, &stdout, &stderr, func(string) string { return "" })
-	if err == nil || err.Error() != "HETZNER_API_TOKEN or HCLOUD_TOKEN is required" {
+	if err == nil || err.Error() != "DIGITALOCEAN_ACCESS_TOKEN or DIGITALOCEAN_TOKEN is required" {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

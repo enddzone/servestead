@@ -65,4 +65,6 @@ Configuration repositories should contain reviewed Compose and metadata files, n
 
 ## Provisioning Boundary
 
-`servestead provision` creates one billable VPS and stops after reporting the public IPv4 address. It does not bootstrap or harden automatically.
+Direct `servestead provision` creates one billable DigitalOcean Droplet and stops after reporting the public IPv4 address. Guided setup can also create one DigitalOcean Droplet, save it as a local profile, and return to the dashboard. Provisioning does not bootstrap or harden automatically.
+
+DigitalOcean API tokens are used from the environment or a masked TUI prompt for the current run. They are not saved in profile metadata or profile secrets.

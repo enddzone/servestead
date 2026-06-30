@@ -2,16 +2,15 @@
 
 ## Commands
 
-`servestead provision` creates one VPS and waits until its public IPv4 address is available. It does not bootstrap or harden automatically. This separation ensures that a successfully created, billable instance is clearly reported even if later remote configuration fails.
+`servestead provision` creates one DigitalOcean Droplet and waits until its public IPv4 address is available. It does not bootstrap or harden automatically. This separation ensures that a successfully created, billable instance is clearly reported even if later remote configuration fails.
 
-Supported providers and defaults:
+Supported provider and defaults:
 
 | Provider | Credential environment variable | Region | Size | Image |
 | --- | --- | --- | --- | --- |
-| Hetzner | `HETZNER_API_TOKEN` or `HCLOUD_TOKEN` | `fsn1` | `cx23` | `ubuntu-24.04` |
 | DigitalOcean | `DIGITALOCEAN_ACCESS_TOKEN` or `DIGITALOCEAN_TOKEN` | `nyc3` | `s-1vcpu-1gb` | `ubuntu-24-04-x64` |
 
-All defaults can be overridden by CLI flags. The cloud SSH key must already exist at the provider and is supplied by ID, name, or fingerprint as supported by that provider. Tokens are environment-only to avoid exposure in command arguments.
+All defaults can be overridden by CLI flags. Direct CLI provisioning uses an existing DigitalOcean SSH key ID or fingerprint. Guided TUI provisioning can read the local public key, match it to existing DigitalOcean keys, upload it if needed, show catalog pricing, create one Droplet, save cloud metadata on the local profile, and return to the setup dashboard. Tokens are read from the environment or masked TUI input and are not persisted.
 
 `servestead bootstrap` uses the native Go SSH runner to connect to the target and execute the admin setup commands. It creates `servestead` by default, locks password authentication for that account, grants passwordless sudo, and installs an ED25519 authorized key.
 
@@ -27,7 +26,9 @@ All defaults can be overridden by CLI flags. The cloud SSH key must already exis
 
 - `main.go`: process entry point.
 - `cli.go`: command parsing, validation, provider defaults, and credential lookup.
-- `cloud.go`: minimal standard-library clients for the two provider APIs.
+- `cloud.go`: thin `godo`-backed DigitalOcean provider wrapper for catalog, SSH keys, create, reboot, and destroy.
+- `provision_tui.go`: DigitalOcean provisioning TUI screens and profile creation handoff.
+- `profile_cloud.go`: saved-profile DigitalOcean restart/destroy actions.
 - `bootstrap.go`: admin bootstrap remote command sequence.
 - `remote.go`: native SSH client, known-host handling, shell quoting, and remote file writes.
 - `resources/`: embedded deployment resources grouped by runtime area (`bootstrap`, `hardening`, `network`, `observability`, `proxy`, and `stacks`).
@@ -35,7 +36,7 @@ All defaults can be overridden by CLI flags. The cloud SSH key must already exis
 - `*_test.go`: provider contract, native command, key generation, and CLI tests.
 - `README.md`: operator-facing build and usage instructions.
 
-The remote runner intentionally uses `golang.org/x/crypto/ssh` instead of local OpenSSH or Ansible binaries. Provider API clients remain minimal standard-library HTTP clients; adding provider SDKs is not justified by the current command surface.
+The remote runner intentionally uses `golang.org/x/crypto/ssh` instead of local OpenSSH or Ansible binaries. DigitalOcean provisioning uses the official `github.com/digitalocean/godo` client behind local wrapper interfaces so tests can use mocked HTTP servers or fake providers without live cloud calls.
 
 ## Resource embedding practice
 
@@ -47,5 +48,5 @@ Do not embed user-owned application Compose files, runtime environment files, pr
 
 ## External references checked
 
-- Hetzner Cloud API: <https://docs.hetzner.cloud/reference/cloud>
-- DigitalOcean Droplet API: <https://docs.digitalocean.com/products/droplets/reference/api/droplets/>
+- DigitalOcean Droplet API: <https://docs.digitalocean.com/reference/api/reference/droplets/>
+- DigitalOcean Regions, Sizes, Images, SSH Keys, and Droplet Actions APIs.

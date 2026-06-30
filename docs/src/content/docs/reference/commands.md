@@ -27,13 +27,6 @@ bin/servestead keygen
 
 ```sh
 bin/servestead provision \
-  --provider hetzner \
-  --name aegis-01 \
-  --ssh-key my-provider-key
-```
-
-```sh
-bin/servestead provision \
   --provider digitalocean \
   --name aegis-01 \
   --ssh-key provider-key-id-or-fingerprint

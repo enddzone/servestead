@@ -17,7 +17,7 @@ The safest way to learn it is to start with a fresh, disposable Ubuntu VPS and u
   </div>
   <div class="path-card">
     <h3>New cloud server</h3>
-    <p>You want Servestead to create a Hetzner or DigitalOcean VPS before setup. Provisioning is billable.</p>
+    <p>You want Servestead to create a DigitalOcean VPS before setup. Provisioning is billable.</p>
     <p><a href="/getting-started/provision-vps/">Provision a VPS</a></p>
   </div>
 </div>
@@ -40,6 +40,7 @@ With one profile-aware run, Servestead can:
 - It does not make live cloud API calls during tests.
 - It does not store runtime secrets in the Git-backed configuration repository.
 - It does not disable external SSH until the requested setup stages do so.
+- It does not bootstrap or harden a newly provisioned Droplet until you explicitly run setup actions.
 
 ## Recommended First Run
 

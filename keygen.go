@@ -131,10 +131,9 @@ func printProviderKeyGuidance(stdout io.Writer, privatePath, publicPath, publicK
 	fmt.Fprintln(stdout, "This helper creates an unencrypted private key so Servestead and OpenSSH can use it non-interactively. Keep the private key file local and protected.")
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "Provider guidance:")
-	fmt.Fprintln(stdout, "- Hetzner Cloud: Project -> Security -> SSH Keys -> Add SSH key. Use the key name or ID with `servestead provision --ssh-key`.")
 	fmt.Fprintln(stdout, "- DigitalOcean: Settings -> Security -> SSH Keys -> Add SSH Key. Use the key fingerprint or ID with `servestead provision --ssh-key`.")
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "After the provider accepts the key:")
-	fmt.Fprintln(stdout, "1. Run `servestead provision --provider <hetzner|digitalocean> --name <name> --ssh-key <provider-key>`.")
+	fmt.Fprintln(stdout, "1. Run `servestead provision --provider digitalocean --name <name> --ssh-key <key-id-or-fingerprint>`.")
 	fmt.Fprintf(stdout, "2. Use `%s` as the private key when running `servestead setup` or logging in manually.\n", privatePath)
 }
