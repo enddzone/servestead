@@ -456,8 +456,14 @@ func TestFailedProxyRetryCollectsPangolinCredentials(t *testing.T) {
 		}},
 	}
 	model := newProfileSetupModel([]profileChoice{{
-		Profile: Profile{ID: "profile-1", BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com"},
-		State:   state,
+		Profile: Profile{
+			ID:               "profile-1",
+			IP:               "203.0.113.10",
+			PrivateKeyPath:   "/tmp/aegis-key",
+			BaseDomain:       "example.com",
+			LetsEncryptEmail: "admin@example.com",
+		},
+		State: state,
 	}})
 	model.selectedIndex = 0
 	model.setInputsFromChoice(false)
@@ -466,6 +472,59 @@ func TestFailedProxyRetryCollectsPangolinCredentials(t *testing.T) {
 	result := updated.(profileSetupModel)
 	if result.screen != profileSetupScreenAdvanced || result.singleStage != "platform" {
 		t.Fatalf("failed Platform retry did not request credentials: screen=%d stage=%q", result.screen, result.singleStage)
+	}
+}
+
+func TestPlatformStageWithMissingProfileValuesOpensIntake(t *testing.T) {
+	state := ProfileState{Runs: map[string]SetupRun{}}
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID:             "profile-1",
+			IP:             "203.0.113.10",
+			AdminUser:      "servestead",
+			PrivateKeyPath: "/tmp/aegis-key",
+		},
+		State: state,
+	}})
+	model.selectedIndex = 0
+	model.setInputsFromChoice(false)
+	model.stageTable = newProfileStageTable(&state)
+	model.stageTable.SetCursor(2)
+
+	updated, command := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	result := updated.(profileSetupModel)
+	if command != nil || result.done || result.screen != profileSetupScreenIntake || result.singleStage != "platform" {
+		t.Fatalf("Platform with missing values should open intake: screen=%d stage=%q done=%v", result.screen, result.singleStage, result.done)
+	}
+	if result.focus != 2 || !strings.Contains(result.err, "domain") {
+		t.Fatalf("intake should focus the domain field with guidance: focus=%d err=%q", result.focus, result.err)
+	}
+}
+
+func TestOptionsForSelectedProfileUsesEditedIntakeValues(t *testing.T) {
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID:             "profile-1",
+			IP:             "203.0.113.10",
+			AdminUser:      "servestead",
+			PrivateKeyPath: "/tmp/aegis-key",
+		},
+		State: ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	model.selectedIndex = 0
+	model.setInputsFromChoice(false)
+	model.inputs[2].SetValue("example.com")
+	model.inputs[3].SetValue("admin@example.com")
+
+	options, err := model.optionsForSelectedProfile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.ProfileID != "profile-1" || options.BaseDomain != "example.com" || options.LetsEncryptEmail != "admin@example.com" {
+		t.Fatalf("selected profile options did not include edited intake values: %+v", options)
+	}
+	if options.PangolinAdminEmail != "admin@example.com" {
+		t.Fatalf("Pangolin admin email should default to edited Let's Encrypt email: %+v", options)
 	}
 }
 
@@ -1035,9 +1094,50 @@ func TestProfileSetupRepositoryFlowDefaultsToCreateBeforeSSH(t *testing.T) {
 		t.Fatalf("create choice did not proceed to review: %+v", result)
 	}
 	review := result.reviewView()
-	if !strings.Contains(review, "create and commit a new local repository") ||
-		!strings.Contains(review, "prepares the repository first") {
+	if !strings.Contains(review, "Repository") ||
+		!strings.Contains(review, "Create and commit a new local configuration repository") ||
+		!strings.Contains(review, "Prepare the local configuration repository before SSH execution") {
 		t.Fatalf("review does not explain repository timing:\n%s", review)
+	}
+}
+
+func TestProfileSetupPlatformReviewExplainsStageAndRepository(t *testing.T) {
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID:               "profile-1",
+			Name:             "production",
+			IP:               "203.0.113.10",
+			AdminUser:        "servestead",
+			PrivateKeyPath:   "/tmp/aegis-key",
+			BaseDomain:       "example.com",
+			LetsEncryptEmail: "admin@example.com",
+		},
+		State: ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	model.selectedIndex = 0
+	model.setInputsFromChoice(false)
+	model.singleStage = "platform"
+	model.screen = profileSetupScreenReview
+	model.refreshPlanPreview()
+
+	review := model.reviewView()
+	for _, expected := range []string{
+		"Review Platform run",
+		"Selected action: Platform",
+		"Network: configure Docker networking and UFW",
+		"Proxy: deploy Pangolin",
+		"Observability: deploy Beszel",
+		"No new VPS will be provisioned",
+		"Bootstrap and Harden will not run",
+		"Repository preparation",
+		"SSH execution starts only after repository preparation succeeds",
+	} {
+		if !strings.Contains(review, expected) {
+			t.Fatalf("Platform review missing %q:\n%s", expected, review)
+		}
+	}
+	if strings.Contains(review, "Profile action:") || strings.Contains(review, "Repository action:") {
+		t.Fatalf("Platform review still uses ambiguous action labels:\n%s", review)
 	}
 }
 
@@ -1752,6 +1852,37 @@ func TestPrepareProfileStageSetupDoesNotRequireProxyFieldsForHarden(t *testing.T
 	}
 	if config.Mode != setupModeHardenOnly || config.BaseDomain != "" || config.LetsEncryptEmail != "" {
 		t.Fatalf("unexpected harden stage config: %+v", config)
+	}
+}
+
+func TestPrepareProfileStageSetupGeneratesPlatformSecrets(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		ID:               "profile-1",
+		Name:             "production",
+		IP:               "203.0.113.10",
+		AdminUser:        "servestead",
+		PrivateKeyPath:   "/tmp/aegis-key",
+		BaseDomain:       "example.com",
+		LetsEncryptEmail: "admin@example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, config, err := prepareProfileStageSetup(setupCLIOptions{ProfileID: profile.ID}, store, "platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.ServerSecret == "" || config.PangolinSetupToken == "" || config.PangolinAdminEmail != "admin@example.com" {
+		t.Fatalf("platform stage did not hydrate generated secrets: %+v", config)
+	}
+	secrets, err := store.LoadSecrets(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secrets.ServerSecret != config.ServerSecret || secrets.PangolinSetupToken != config.PangolinSetupToken {
+		t.Fatalf("generated platform secrets were not persisted: config=%+v secrets=%+v", config, secrets)
 	}
 }
 

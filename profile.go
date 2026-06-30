@@ -31,18 +31,32 @@ const (
 )
 
 type Profile struct {
-	ID                   string    `json:"id"`
-	Name                 string    `json:"name"`
-	IP                   string    `json:"ip"`
-	InitialSSHUser       string    `json:"initial_ssh_user"`
-	AdminUser            string    `json:"admin_user"`
-	PrivateKeyPath       string    `json:"private_key_path"`
-	BaseDomain           string    `json:"base_domain,omitempty"`
-	LetsEncryptEmail     string    `json:"lets_encrypt_email,omitempty"`
-	PangolinAdminEmail   string    `json:"pangolin_admin_email,omitempty"`
-	ConfigRepositoryPath string    `json:"config_repository_path,omitempty"`
-	CreatedAt            time.Time `json:"created_at"`
-	UpdatedAt            time.Time `json:"updated_at"`
+	ID                   string        `json:"id"`
+	Name                 string        `json:"name"`
+	IP                   string        `json:"ip"`
+	InitialSSHUser       string        `json:"initial_ssh_user"`
+	AdminUser            string        `json:"admin_user"`
+	PrivateKeyPath       string        `json:"private_key_path"`
+	BaseDomain           string        `json:"base_domain,omitempty"`
+	LetsEncryptEmail     string        `json:"lets_encrypt_email,omitempty"`
+	PangolinAdminEmail   string        `json:"pangolin_admin_email,omitempty"`
+	ConfigRepositoryPath string        `json:"config_repository_path,omitempty"`
+	Cloud                *ProfileCloud `json:"cloud,omitempty"`
+	CreatedAt            time.Time     `json:"created_at"`
+	UpdatedAt            time.Time     `json:"updated_at"`
+}
+
+type ProfileCloud struct {
+	Provider     string     `json:"provider"`
+	ResourceID   string     `json:"resource_id"`
+	Name         string     `json:"name,omitempty"`
+	Region       string     `json:"region,omitempty"`
+	Size         string     `json:"size,omitempty"`
+	Image        string     `json:"image,omitempty"`
+	PriceMonthly float64    `json:"price_monthly,omitempty"`
+	PriceHourly  float64    `json:"price_hourly,omitempty"`
+	CreatedAt    time.Time  `json:"created_at,omitempty"`
+	DestroyedAt  *time.Time `json:"destroyed_at,omitempty"`
 }
 
 type ProfileSummary struct {

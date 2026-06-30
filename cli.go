@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -19,7 +18,7 @@ Usage:
 
 Direct commands:
   servestead keygen
-  servestead provision --provider <hetzner|digitalocean> --name <name> --ssh-key <provider-key>
+  servestead provision --provider digitalocean --name <name> --ssh-key <digitalocean-key-id-or-fingerprint>
   servestead bootstrap --host <ipv4> --admin-public-key <path> --private-key <path>
   servestead harden --host <ipv4> --private-key <path>
   servestead network --host <ipv4> --private-key <path>
@@ -114,12 +113,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv ge
 func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer, getenv getenvFunc) error {
 	flags := flag.NewFlagSet("provision", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	providerName := flags.String("provider", "", "cloud provider: hetzner or digitalocean")
+	providerName := flags.String("provider", digitalOceanProviderName, "cloud provider: digitalocean")
 	name := flags.String("name", "", "server name")
 	region := flags.String("region", "", "provider region/location (provider default when omitted)")
 	size := flags.String("size", "", "provider server size (provider default when omitted)")
 	image := flags.String("image", "", "Ubuntu image slug (provider default when omitted)")
-	sshKey := flags.String("ssh-key", "", "existing provider SSH key ID, name, or fingerprint; run keygen first if needed")
+	sshKey := flags.String("ssh-key", "", "existing DigitalOcean SSH key ID or fingerprint; run keygen first if needed")
 	timeout := flags.Duration("timeout", 5*time.Minute, "maximum time to wait for a public IPv4 address")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -145,20 +144,13 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer, 
 
 	var provider cloudProvider
 	switch *providerName {
-	case "hetzner":
-		config.withDefaults("fsn1", "cx23", "ubuntu-24.04")
-		token := firstNonEmpty(getenv("HETZNER_API_TOKEN"), getenv("HCLOUD_TOKEN"))
-		if token == "" {
-			return errors.New("HETZNER_API_TOKEN or HCLOUD_TOKEN is required")
-		}
-		provider = newHetznerProvider(http.DefaultClient, "https://api.hetzner.cloud/v1", token)
-	case "digitalocean":
-		config.withDefaults("nyc3", "s-1vcpu-1gb", "ubuntu-24-04-x64")
+	case digitalOceanProviderName:
+		config.withDefaults(defaultDigitalOceanRegion, defaultDigitalOceanSize, defaultDigitalOceanImage)
 		token := firstNonEmpty(getenv("DIGITALOCEAN_ACCESS_TOKEN"), getenv("DIGITALOCEAN_TOKEN"))
 		if token == "" {
 			return errors.New("DIGITALOCEAN_ACCESS_TOKEN or DIGITALOCEAN_TOKEN is required")
 		}
-		provider = newDigitalOceanProvider(http.DefaultClient, "https://api.digitalocean.com/v2", token)
+		provider = newDigitalOceanProvider(token)
 	case "":
 		return errors.New("--provider is required")
 	default:
@@ -174,18 +166,6 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer, 
 	}
 	fmt.Fprintf(stdout, "server created: provider=%s id=%s ipv4=%s\n", *providerName, server.ID, server.IPv4)
 	return nil
-}
-
-func (config *provisionConfig) withDefaults(region, size, image string) {
-	if config.Region == "" {
-		config.Region = region
-	}
-	if config.Size == "" {
-		config.Size = size
-	}
-	if config.Image == "" {
-		config.Image = image
-	}
 }
 
 func firstNonEmpty(values ...string) string {

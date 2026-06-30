@@ -61,7 +61,7 @@ UI/dashboard follow-up implementation:
 ### Phase 1 — Complete
 
 - [x] Define the Go coordinator architecture with a native SSH remote runner.
-- [x] Read cloud API credentials from the environment and create Ubuntu instances on Hetzner or DigitalOcean.
+- [x] Read DigitalOcean API credentials from the environment and create Ubuntu Droplets.
 - [x] Bootstrap a target through its initial SSH user and install an administrative ED25519 public key.
 
 Verification completed on 2026-06-23:

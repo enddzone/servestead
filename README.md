@@ -1,11 +1,11 @@
 # Servestead
 
-Servestead, the Server Homestead, is a local Go CLI for turning a raw Ubuntu VPS into a hardened, Git-backed place to run private application stacks. It supports Hetzner and DigitalOcean provisioning, administrative-user bootstrapping, operating-system hardening, Pangolin-backed ingress, and observability through native Go orchestration.
+Servestead, the Server Homestead, is a local Go CLI for turning a raw Ubuntu VPS into a hardened, Git-backed place to run private application stacks. It supports DigitalOcean provisioning, administrative-user bootstrapping, operating-system hardening, Pangolin-backed ingress, and observability through native Go orchestration.
 
 ## Prerequisites
 
 - Go 1.26.4 or newer to build the CLI
-- An existing SSH key registered with the selected cloud provider
+- A DigitalOcean API token when provisioning from Servestead
 - A local ED25519 key pair for administrative access
 
 `bootstrap`, `harden`, `network`, and `keygen` do not require local Ansible, OpenSSH, or `ssh-keygen` binaries. Remote bootstrap, hardening, and network configuration still assume a supported Ubuntu target with standard system tools such as `apt`, `sudo`, `systemctl`, `curl`, `gpg`, and `iptables`.
@@ -30,37 +30,38 @@ Use `npm run build` from `docs/` to verify the static GitHub Pages output locall
 
 ## Provision a VPS
 
-Credentials are read from the environment so they do not appear in shell process listings.
+The recommended path is the setup TUI:
 
-Cloud providers require an SSH public key before they can create a server. Servestead can generate a provider login keypair and print the public key to copy into the provider UI:
+```sh
+bin/servestead setup
+```
+
+Choose **Provision a new DigitalOcean VPS**. The TUI prompts for a DigitalOcean token, Droplet name, and local Servestead key, then loads regions, sizes, Ubuntu images, and SSH keys from DigitalOcean. Size choices show monthly and hourly prices. Before creating anything billable, Servestead shows a review screen and requires an exact typed confirmation phrase. After the Droplet has a public IPv4 address, Servestead saves it as a profile and returns to the setup dashboard.
+
+DigitalOcean requires an SSH public key before it can create a Droplet. Servestead can generate a provider login keypair:
 
 ```sh
 bin/servestead keygen
 ```
 
-The default key path is `$HOME/.ssh/servestead_ed25519`. After adding the printed public key to Hetzner or DigitalOcean, use the provider's key name, ID, or fingerprint with `--ssh-key`, and use the generated private key for setup and manual login.
+The default key path is `$HOME/.ssh/servestead_ed25519`. The setup TUI can upload the matching public key to DigitalOcean when it is not already present.
 
-Hetzner:
-
-```sh
-export HETZNER_API_TOKEN='...'
-bin/servestead provision \
-  --provider hetzner \
-  --name aegis-01 \
-  --ssh-key my-provider-key
-```
-
-DigitalOcean:
+The TUI can prompt for the DigitalOcean token. To avoid entering it each run, export it first:
 
 ```sh
 export DIGITALOCEAN_ACCESS_TOKEN='...'
+```
+
+For direct CLI provisioning, add the public key to DigitalOcean first, then use the key ID or fingerprint with `--ssh-key`:
+
+```sh
 bin/servestead provision \
   --provider digitalocean \
   --name aegis-01 \
   --ssh-key 'provider-key-id-or-fingerprint'
 ```
 
-Provider defaults target Ubuntu 24.04 and can be overridden with `--region`, `--size`, and `--image`. Provisioning is billable and is not run by the test suite.
+Defaults target Ubuntu 24.04 in `nyc3` on `s-1vcpu-1gb` and can be overridden with `--region`, `--size`, and `--image`. Provisioning is billable and is not run by the test suite.
 
 ## Guided setup
 
@@ -91,7 +92,9 @@ bin/servestead setup \
   --yes
 ```
 
-Running `setup` without `--ip` opens the full-screen, profile-first terminal UI. It lists saved profiles and presents three setup actions: Bootstrap, Harden, and Platform. Platform runs networking, Pangolin proxy, and observability in order from one command. The TUI collects missing full-run values before any remote command runs and presents explicit choices to create a local configuration repository, use an existing checkout, or clone GitHub. The review screen shows the selected repository action. After confirmation, Servestead prepares the repository first and starts SSH execution only after that succeeds. From a saved profile dashboard, use `j`/`k` to select an action and press `r` to run it once, even if it is already marked complete. Press `p` to reveal the saved Pangolin administrator username and password. Retrying Platform after Pangolin has already been registered opens masked administrator email/password inputs and saves the supplied credentials in the owner-only profile secrets file. Press `q` to quit from navigation or run screens, `esc` to go back, or `x` to delete only the local saved profile, secrets, state, and run logs; delete does not change the remote server. The older one-off guided paths remain available from the advanced legacy setup entry. Setup does not create billable cloud resources; use `provision` separately when you want the CLI to create a server.
+Running `setup` without `--ip` opens the full-screen, profile-first terminal UI. It lists saved profiles and can provision a new DigitalOcean VPS before setup. The provisioning path reads a DigitalOcean token, loads regions, sizes, Ubuntu images, and SSH keys from the API, displays hourly and monthly size prices, requires explicit confirmation, creates one billable Droplet, saves it as a profile, and returns to the dashboard. It does not bootstrap or harden automatically. Saved DigitalOcean profiles expose cloud actions from the dashboard: press `o` to restart or destroy the Droplet after confirmation; destroying a Droplet keeps the local profile, secrets, state, and logs.
+
+Existing profile dashboards present three setup actions: Bootstrap, Harden, and Platform. Platform runs networking, Pangolin proxy, and observability in order from one command. The TUI collects missing full-run values before any remote command runs and presents explicit choices to create a local configuration repository, use an existing checkout, or clone GitHub. The review screen shows the selected repository action. After confirmation, Servestead prepares the repository first and starts SSH execution only after that succeeds. From a saved profile dashboard, use `j`/`k` to select an action and press `r` to run it once, even if it is already marked complete. Press `p` to reveal the saved Pangolin administrator username and password. Retrying Platform after Pangolin has already been registered opens masked administrator email/password inputs and saves the supplied credentials in the owner-only profile secrets file. Press `q` to quit from navigation or run screens, `esc` to go back, or `x` to delete only the local saved profile, secrets, state, and run logs; local profile delete does not change the remote server. The older one-off guided paths remain available from the advanced legacy setup entry.
 
 For a quick preflight check without opening the TUI:
 

@@ -44,7 +44,6 @@ func TestGenerateProviderKeypairWritesOpenSSHKeysAndPrintsGuidance(t *testing.T)
 		"Servestead SSH keypair ready.",
 		"ssh-ed25519 ",
 		"aegis-test",
-		"Hetzner Cloud",
 		"DigitalOcean",
 		"servestead provision",
 	} {
