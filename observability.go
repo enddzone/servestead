@@ -583,15 +583,14 @@ func dockhandGitStackName(stackName string) string {
 }
 
 func stackResourceVerifyCommand(config observabilityConfig, stack configuredStack) string {
-	specs := make([]string, 0, len(stack.Resources))
+	specs := make([]stackResourceVerificationSpec, 0, len(stack.Resources))
 	for _, resource := range stack.Resources {
-		specs = append(specs, fmt.Sprintf(
-			`{"nice_id":%s,"domain":%s}`,
-			jsonString(servesteadProjectPrefix+stack.Name+"-"+resource.ID),
-			jsonString(resource.Subdomain+"."+config.BaseDomain),
-		))
+		specs = append(specs, stackResourceVerificationSpec{
+			NiceID: servesteadProjectPrefix + stack.Name + "-" + resource.ID,
+			Domain: resource.Subdomain + "." + config.BaseDomain,
+		})
 	}
-	specification := "[" + strings.Join(specs, ",") + "]"
+	specification := mustJSON(specs)
 	loginPayload := fmt.Sprintf(`{"email":%s,"password":%s}`,
 		jsonString(config.AdminEmail), jsonString(config.PangolinPassword))
 	verify := `import json,sys
@@ -810,11 +809,20 @@ func observabilityResourceSpecs(baseDomain string) string {
 		{Name: "Dozzle", Domain: "dozzle." + baseDomain, NiceID: observabilityDozzleID},
 		{Name: "Dockhand", Domain: "dockhand." + baseDomain, NiceID: observabilityDockhandID},
 	}
-	data, err := json.Marshal(specs)
+	return mustJSON(specs)
+}
+
+func mustJSON(value any) string {
+	data, err := json.Marshal(value)
 	if err != nil {
 		panic(err)
 	}
 	return string(data)
+}
+
+type stackResourceVerificationSpec struct {
+	NiceID string `json:"nice_id"`
+	Domain string `json:"domain"`
 }
 
 type observabilityResourceSpec struct {
