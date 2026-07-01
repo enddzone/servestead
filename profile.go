@@ -147,48 +147,61 @@ func GeneratePangolinSetupToken() (string, error) {
 }
 
 func (secrets *ProfileSecrets) EnsureComposeWiringSecrets() error {
-	if secrets.PangolinAdminPassword == "" {
-		generated, err := generatePassword(32)
-		if err != nil {
+	if err := ensureGeneratedSecret(&secrets.PangolinAdminPassword, 32, generatePassword); err != nil {
+		return err
+	}
+	for _, item := range composeWiringSecretGenerators(secrets) {
+		if err := ensureGeneratedSecret(item.value, item.size, generateLowercaseSecret); err != nil {
 			return err
 		}
-		secrets.PangolinAdminPassword = generated
 	}
-	generators := []struct {
-		value *string
-		size  int
-	}{
+	return secrets.ensureBeszelHubKeypair()
+}
+
+type composeWiringSecretGenerator struct {
+	value *string
+	size  int
+}
+
+func composeWiringSecretGenerators(secrets *ProfileSecrets) []composeWiringSecretGenerator {
+	return []composeWiringSecretGenerator{
 		{&secrets.NewtID, 15},
 		{&secrets.NewtSecret, 48},
 		{&secrets.BeszelAdminPassword, 32},
 		{&secrets.BeszelSystemToken, 48},
 	}
-	for _, item := range generators {
-		if *item.value != "" {
-			continue
-		}
-		generated, err := generateLowercaseSecret(item.size)
-		if err != nil {
-			return err
-		}
-		*item.value = generated
+}
+
+func ensureGeneratedSecret(value *string, size int, generate func(int) (string, error)) error {
+	if *value != "" {
+		return nil
 	}
-	if secrets.BeszelHubPrivateKey == "" || secrets.BeszelHubPublicKey == "" {
-		publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			return err
-		}
-		privateBlock, err := ssh.MarshalPrivateKey(privateKey, "servestead-beszel")
-		if err != nil {
-			return err
-		}
-		sshPublicKey, err := ssh.NewPublicKey(publicKey)
-		if err != nil {
-			return err
-		}
-		secrets.BeszelHubPrivateKey = string(pem.EncodeToMemory(privateBlock))
-		secrets.BeszelHubPublicKey = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPublicKey)))
+	generated, err := generate(size)
+	if err != nil {
+		return err
 	}
+	*value = generated
+	return nil
+}
+
+func (secrets *ProfileSecrets) ensureBeszelHubKeypair() error {
+	if secrets.BeszelHubPrivateKey != "" && secrets.BeszelHubPublicKey != "" {
+		return nil
+	}
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+	privateBlock, err := ssh.MarshalPrivateKey(privateKey, "servestead-beszel")
+	if err != nil {
+		return err
+	}
+	sshPublicKey, err := ssh.NewPublicKey(publicKey)
+	if err != nil {
+		return err
+	}
+	secrets.BeszelHubPrivateKey = string(pem.EncodeToMemory(privateBlock))
+	secrets.BeszelHubPublicKey = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPublicKey)))
 	return nil
 }
 

@@ -1,0 +1,56 @@
+version: "2"
+
+formatters:
+  enable:
+    - gofmt
+    - gci
+  settings:
+    gofmt:
+      simplify: true
+      rewrite-rules:
+        - pattern: "interface{}"
+          replacement: "any"
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  exclusions:
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+  default: none
+  enable:
+    - dupword
+    - exptostd
+    - fatcontext
+    - gocognit
+    - loggercheck
+    - mirror
+    - misspell
+    - thelper
+    - usestdlibvars
+    - usetesting
+  settings:
+    gocognit:
+      # Sonar allows cognitive complexity up to 15; report 16 and higher.
+      min-complexity: 16
+    misspell:
+      locale: US
+      ignore-rules:
+        - cancelled
+        - cancelling
+
+output:
+  sort-order:
+    - linter
+    - severity
+    - file

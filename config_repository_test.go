@@ -10,13 +10,21 @@ import (
 	"testing"
 )
 
+const (
+	configRepositoryTestProfileID  = "profile-1"
+	configRepositoryTestDomain     = "example.com"
+	configRepositoryTestAdminEmail = "admin@example.com"
+	configRepositoryTestGitEmail   = "test@example.com"
+	configRepositoryTestNoGit      = "git is not installed"
+)
+
 func TestDefaultConfigRepositoryPathUsesXDGConfigHome(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	path, err := defaultConfigRepositoryPath("profile-1")
+	path, err := defaultConfigRepositoryPath(configRepositoryTestProfileID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(path, filepath.Join("servestead", "repositories", "profile-1")) {
+	if !strings.HasSuffix(path, filepath.Join("servestead", "repositories", configRepositoryTestProfileID)) {
 		t.Fatalf("unexpected repository path: %s", path)
 	}
 }
@@ -25,10 +33,10 @@ func TestPrepareConfigRepositoryInitializesAndDeploysExactCommit(t *testing.T) {
 	requireGit(t)
 	repository := filepath.Join(t.TempDir(), "repository")
 	scaffold := observabilityComposeFile(observabilityConfig{
-		BaseDomain: "example.com",
-		AdminEmail: "admin@example.com",
+		BaseDomain: configRepositoryTestDomain,
+		AdminEmail: configRepositoryTestAdminEmail,
 	})
-	revision, err := prepareConfigRepository(context.Background(), repository, "", "", "profile-1", scaffold)
+	revision, err := prepareConfigRepository(context.Background(), repository, "", "", configRepositoryTestProfileID, scaffold)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,14 +51,14 @@ func TestPrepareConfigRepositoryInitializesAndDeploysExactCommit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repository, "notes.txt"), []byte("unrelated\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := prepareConfigRepository(context.Background(), repository, "", "", "profile-1", scaffold); err != nil {
+	if _, err := prepareConfigRepository(context.Background(), repository, "", "", configRepositoryTestProfileID, scaffold); err != nil {
 		t.Fatalf("unrelated working-tree change blocked deployment: %v", err)
 	}
 	composePath := filepath.Join(repository, filepath.FromSlash(observabilityComposeRepositoryPath))
 	if err := os.WriteFile(composePath, []byte(scaffold+"\n# edited\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := prepareConfigRepository(context.Background(), repository, "", "", "profile-1", scaffold); err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
+	if _, err := prepareConfigRepository(context.Background(), repository, "", "", configRepositoryTestProfileID, scaffold); err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
 		t.Fatalf("expected dirty Compose rejection, got %v", err)
 	}
 }
@@ -59,8 +67,8 @@ func TestPrepareSuppliedRepositoryScaffoldsThenRequiresReview(t *testing.T) {
 	requireGit(t)
 	repository := t.TempDir()
 	runGitCommand(t, repository, "init", "-b", "main")
-	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: "example.com", AdminEmail: "admin@example.com"})
-	_, err := prepareConfigRepository(context.Background(), repository, "", "", "profile-1", scaffold)
+	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: configRepositoryTestDomain, AdminEmail: configRepositoryTestAdminEmail})
+	_, err := prepareConfigRepository(context.Background(), repository, "", "", configRepositoryTestProfileID, scaffold)
 	if !errors.Is(err, errRepositoryReviewRequired) {
 		t.Fatalf("expected review-required error, got %v", err)
 	}
@@ -81,10 +89,10 @@ func TestPrepareConfigRepositoryRefreshesManagedObservabilityScaffoldForReview(t
 		t.Fatal(err)
 	}
 	runGitCommand(t, repository, "add", observabilityComposeRepositoryPath)
-	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Legacy observability")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email="+configRepositoryTestGitEmail, "commit", "-m", "Legacy observability")
 
-	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: "example.com", AdminEmail: "admin@example.com"})
-	_, err := prepareConfigRepository(context.Background(), repository, "", "", "profile-1", scaffold)
+	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: configRepositoryTestDomain, AdminEmail: configRepositoryTestAdminEmail})
+	_, err := prepareConfigRepository(context.Background(), repository, "", "", configRepositoryTestProfileID, scaffold)
 	if !errors.Is(err, errRepositoryReviewRequired) {
 		t.Fatalf("expected review-required error, got %v", err)
 	}
@@ -123,7 +131,7 @@ func TestResolveConfigRepositoryBranchRejectsAmbiguousDetachedCheckout(t *testin
 		t.Fatal(err)
 	}
 	runGitCommand(t, repository, "add", "README.md")
-	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Initial")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email="+configRepositoryTestGitEmail, "commit", "-m", "Initial")
 	runGitCommand(t, repository, "checkout", "--detach", "HEAD")
 
 	_, err := resolveConfigRepositoryBranch(context.Background(), repository, "  origin/feature\n  origin/main\n")
@@ -136,7 +144,7 @@ func TestEnsureConfigRepositoryScaffoldIsIdempotent(t *testing.T) {
 	requireGit(t)
 	repository := t.TempDir()
 	runGitCommand(t, repository, "init", "-b", "main")
-	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: "example.com", AdminEmail: "admin@example.com"})
+	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: configRepositoryTestDomain, AdminEmail: configRepositoryTestAdminEmail})
 	created, err := ensureConfigRepositoryScaffold(context.Background(), repository, scaffold)
 	if err != nil {
 		t.Fatal(err)
@@ -211,8 +219,8 @@ func TestValidateGitHubRepositoryURL(t *testing.T) {
 
 func TestObservabilityScaffoldContainsNoGeneratedSecrets(t *testing.T) {
 	config := observabilityConfig{
-		BaseDomain:    "example.com",
-		AdminEmail:    "admin@example.com",
+		BaseDomain:    configRepositoryTestDomain,
+		AdminEmail:    configRepositoryTestAdminEmail,
 		AdminPassword: "admin-secret",
 		SystemToken:   "system-secret",
 	}
@@ -230,16 +238,216 @@ func TestObservabilityScaffoldContainsNoGeneratedSecrets(t *testing.T) {
 	}
 }
 
+func TestPrepareConfigRepositoryCheckoutRejectsInvalidInputs(t *testing.T) {
+	if _, err := prepareConfigRepositoryCheckout(context.Background(), filepath.Join(t.TempDir(), "repository"), "git@github.com:example/repo.git", ""); err == nil {
+		t.Fatal("invalid GitHub repository URL was accepted")
+	}
+
+	repository := t.TempDir()
+	if _, err := prepareConfigRepositoryCheckout(context.Background(), repository, "", ""); err == nil || !strings.Contains(err.Error(), "not a Git repository") {
+		t.Fatalf("existing non-Git repository returned unexpected error: %v", err)
+	}
+}
+
+func TestResolveConfigRepositoryRemoteUsesPushedOriginBranch(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repository, "add", "README.md")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email="+configRepositoryTestGitEmail, "commit", "-m", "Initial")
+	runGitCommand(t, repository, "remote", "add", "origin", "https://github.com/enddzone/servestead.git")
+	runGitCommand(t, repository, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+	commit := strings.TrimSpace(gitOutput(t, repository, "rev-parse", "HEAD"))
+	origin, branch, err := resolveConfigRepositoryRemote(context.Background(), repository, "https://github.com/enddzone/servestead.git", commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if origin != "https://github.com/enddzone/servestead.git" || branch != "main" {
+		t.Fatalf("unexpected remote resolution: origin=%q branch=%q", origin, branch)
+	}
+
+	_, _, err = resolveConfigRepositoryRemote(context.Background(), repository, "https://github.com/enddzone/other.git", commit)
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched GitHub repository returned unexpected error: %v", err)
+	}
+
+	runGitCommand(t, repository, "update-ref", "-d", "refs/remotes/origin/main")
+	_, _, err = resolveConfigRepositoryRemote(context.Background(), repository, "", commit)
+	if err == nil || !strings.Contains(err.Error(), "not been pushed") {
+		t.Fatalf("unpushed commit returned unexpected error: %v", err)
+	}
+}
+
+func TestResolveConfigRepositoryRemoteRejectsInvalidOrigin(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repository, "add", "README.md")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email="+configRepositoryTestGitEmail, "commit", "-m", "Initial")
+	runGitCommand(t, repository, "remote", "add", "origin", "https://gitlab.com/enddzone/servestead.git")
+
+	commit := strings.TrimSpace(gitOutput(t, repository, "rev-parse", "HEAD"))
+	_, _, err := resolveConfigRepositoryRemote(context.Background(), repository, "", commit)
+	if err == nil || !strings.Contains(err.Error(), "origin") {
+		t.Fatalf("invalid origin returned unexpected error: %v", err)
+	}
+}
+
+func TestLoadCommittedStacksIncludesFilesAndSkipsObservability(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init", "-b", "main")
+
+	files := map[string]string{
+		"stacks/observability/compose.yaml": "services:\n  placeholder:\n    image: example/placeholder\n",
+		"stacks/site/compose.yaml":          testApplicationCompose,
+		"stacks/site/config/app.conf":       "enabled=true\n",
+		"stacks/site/servestead.yaml": `version: 1
+public_resources:
+  - id: web
+    service: web
+    name: Site
+    subdomain: site
+    port: 80
+    protocol: http
+    sso: true
+    healthcheck:
+      enabled: true
+      path: /health
+`,
+	}
+	for name, content := range files {
+		path := filepath.Join(repository, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGitCommand(t, repository, "add", "stacks")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email="+configRepositoryTestGitEmail, "commit", "-m", "Add stacks")
+
+	stacks, err := loadCommittedStacks(context.Background(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stacks) != 1 {
+		t.Fatalf("expected one application stack, got %+v", stacks)
+	}
+	stack := stacks[0]
+	if stack.Name != "site" || stack.Compose != testApplicationCompose || stack.Metadata.Version != 1 || stack.ComposeSHA256 == "" {
+		t.Fatalf("unexpected stack: %+v", stack)
+	}
+	if stack.Files["compose.yaml"] != testApplicationCompose || stack.Files["config/app.conf"] != "enabled=true\n" {
+		t.Fatalf("committed stack files were not loaded: %+v", stack.Files)
+	}
+	if !strings.Contains(stack.MetadataContent, "subdomain: site") {
+		t.Fatalf("metadata content was not loaded: %q", stack.MetadataContent)
+	}
+}
+
+func TestLoadCommittedStackRejectsInvalidNameAndMissingCompose(t *testing.T) {
+	repository := newConfigRepositoryWithInitialCommit(t)
+	if _, _, err := loadCommittedStack(context.Background(), repository, "Bad_Name"); err == nil || !strings.Contains(err.Error(), "lowercase DNS") {
+		t.Fatalf("invalid stack name returned unexpected error: %v", err)
+	}
+	if _, _, err := loadCommittedStack(context.Background(), repository, "site"); err == nil || !strings.Contains(err.Error(), "committed compose.yaml") {
+		t.Fatalf("missing stack compose returned unexpected error: %v", err)
+	}
+}
+
+func TestLoadCommittedStackRejectsMissingMetadata(t *testing.T) {
+	repository := newConfigRepositoryWithInitialCommit(t)
+	commitConfigRepositoryFile(t, repository, "stacks/site/compose.yaml", testApplicationCompose, "Add stack compose")
+	if _, _, err := loadCommittedStack(context.Background(), repository, "site"); err == nil || !strings.Contains(err.Error(), "is not configured") {
+		t.Fatalf("missing stack metadata returned unexpected error: %v", err)
+	}
+}
+
+func TestLoadCommittedStackRejectsInvalidMetadataAndCompose(t *testing.T) {
+	repository := newConfigRepositoryWithInitialCommit(t)
+	commitConfigRepositoryFile(t, repository, "stacks/site/compose.yaml", testApplicationCompose, "Add stack compose")
+	commitConfigRepositoryFile(t, repository, "stacks/site/servestead.yaml", "version: [\n", "Add invalid metadata")
+	if _, _, err := loadCommittedStack(context.Background(), repository, "site"); err == nil || !strings.Contains(err.Error(), "metadata") {
+		t.Fatalf("invalid stack metadata returned unexpected error: %v", err)
+	}
+
+	commitConfigRepositoryFile(t, repository, "stacks/site/compose.yaml", "services: [\n", "Add invalid compose")
+	commitConfigRepositoryFile(t, repository, "stacks/site/servestead.yaml", "version: 1\n", "Add valid metadata")
+	if _, _, err := loadCommittedStack(context.Background(), repository, "site"); err == nil || !strings.Contains(err.Error(), "stack site") {
+		t.Fatalf("invalid stack compose returned unexpected error: %v", err)
+	}
+}
+
+func TestLoadCommittedStackRejectsInvalidResource(t *testing.T) {
+	repository := newConfigRepositoryWithInitialCommit(t)
+	invalidResource := `version: 1
+public_resources:
+  - id: web
+    service: missing
+    name: Web
+    subdomain: web
+    port: 80
+    protocol: http
+`
+	commitConfigRepositoryFile(t, repository, "stacks/site/compose.yaml", testApplicationCompose, "Add stack compose")
+	commitConfigRepositoryFile(t, repository, "stacks/site/servestead.yaml", invalidResource, "Add invalid resource")
+	if _, _, err := loadCommittedStack(context.Background(), repository, "site"); err == nil || !strings.Contains(err.Error(), "metadata") {
+		t.Fatalf("invalid stack resource returned unexpected error: %v", err)
+	}
+}
+
+func newConfigRepositoryWithInitialCommit(t *testing.T) string {
+	t.Helper()
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init", "-b", "main")
+	commitConfigRepositoryFile(t, repository, "README.md", "test\n", "Initial")
+	return repository
+}
+
+func commitConfigRepositoryFile(t *testing.T, repository, name, content, message string) {
+	t.Helper()
+	path := filepath.Join(repository, filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repository, "add", name)
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email="+configRepositoryTestGitEmail, "commit", "-m", message)
+}
+
+func TestValidateObservabilityComposeRejectsMissingServices(t *testing.T) {
+	err := validateObservabilityCompose([]byte("services: {}\n"))
+	if err == nil || !strings.Contains(err.Error(), "required service") {
+		t.Fatalf("missing services returned unexpected error: %v", err)
+	}
+}
+
 func requireGit(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git is not installed")
+	if _, err := trustedGitExecutable(); err != nil {
+		t.Skip(configRepositoryTestNoGit)
 	}
 }
 
 func runGitCommand(t *testing.T, directory string, arguments ...string) {
 	t.Helper()
-	command := exec.Command("git", append([]string{"-C", directory}, arguments...)...)
+	gitPath, err := trustedGitExecutable()
+	if err != nil {
+		t.Skip(configRepositoryTestNoGit)
+	}
+	command := exec.Command(gitPath, append([]string{"-C", directory}, arguments...)...)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", arguments[0], err, output)
 	}
@@ -247,7 +455,11 @@ func runGitCommand(t *testing.T, directory string, arguments ...string) {
 
 func gitOutput(t *testing.T, directory string, arguments ...string) string {
 	t.Helper()
-	command := exec.Command("git", append([]string{"-C", directory}, arguments...)...)
+	gitPath, err := trustedGitExecutable()
+	if err != nil {
+		t.Skip(configRepositoryTestNoGit)
+	}
+	command := exec.Command(gitPath, append([]string{"-C", directory}, arguments...)...)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", arguments[0], err, output)

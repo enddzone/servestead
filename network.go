@@ -8,8 +8,9 @@ import (
 	"io"
 	"net"
 	"os"
-	"servestead/resources"
 	"strings"
+
+	"servestead/resources"
 )
 
 type networkConfig struct {
@@ -23,6 +24,15 @@ type networkRemoteClientFactory func(context.Context, networkConfig, io.Writer, 
 
 var newNetworkRemoteClient networkRemoteClientFactory = func(ctx context.Context, config networkConfig, stdout, stderr io.Writer) (remoteClient, error) {
 	return newSSHRemoteClient(ctx, config.Host, config.SSHUser, config.PrivateKeyPath, stdout, stderr)
+}
+
+var defaultDockerBridgeSubnets = []string{
+	dockerCIDR(172, 17, 0, 0, 16),
+	dockerCIDR(172, 18, 0, 0, 16),
+}
+
+func dockerCIDR(a, b, c, d, prefix int) string {
+	return fmt.Sprintf("%d.%d.%d.%d/%d", a, b, c, d, prefix)
 }
 
 func runNetwork(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -146,7 +156,7 @@ func ufwMasqueradeCommand() string {
 	return commandScript(
 		`egress_interface="$(ip -4 route show default 0.0.0.0/0 | awk '{print $5; exit}')"`,
 		`test -n "$egress_interface"`,
-		installUFWMasqueradeBlockCommand("Servestead UFW MASQUERADE TRANSLATIONS", "172.17.0.0/16", "172.18.0.0/16"),
+		installUFWMasqueradeBlockCommand("Servestead UFW MASQUERADE TRANSLATIONS", defaultDockerBridgeSubnets...),
 	)
 }
 
@@ -177,17 +187,23 @@ func sshPortForHost(host string) (string, error) {
 }
 
 func ufwPolicyCommand(sshPort string) string {
-	return commandScript(
-		"ufw allow in proto tcp to any port "+shellQuote(sshPort),
+	routeCommands := []string{
+		"ufw allow in proto tcp to any port " + shellQuote(sshPort),
 		"ufw default deny incoming",
 		"ufw default allow outgoing",
 		"ufw default deny routed",
 		"ufw allow 80/tcp",
 		"ufw allow 443/tcp",
-		"ufw route allow from 172.17.0.0/16 to any",
-		"ufw route allow from 172.18.0.0/16 to any",
+	}
+	for _, subnet := range defaultDockerBridgeSubnets {
+		routeCommands = append(routeCommands, "ufw route allow from "+shellQuote(subnet)+" to any")
+	}
+	routeCommands = append(routeCommands,
 		"ufw --force enable",
 		"ufw reload",
 		"ufw status verbose",
+	)
+	return commandScript(
+		routeCommands...,
 	)
 }

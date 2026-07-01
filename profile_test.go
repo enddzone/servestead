@@ -13,11 +13,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+const profileTestHost = "203.0.113.10"
+
 func TestProfileStoreCreatesPrivateProfileFiles(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
 
 	profile, err := store.Create(Profile{
-		IP:             "203.0.113.10",
+		IP:             profileTestHost,
 		PrivateKeyPath: "/tmp/aegis-key",
 	})
 	if err != nil {
@@ -48,7 +50,7 @@ func TestProfileStoreCreatesPrivateProfileFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.IP != "203.0.113.10" || state.Runs == nil {
+	if loaded.IP != profileTestHost || state.Runs == nil {
 		t.Fatalf("unexpected loaded profile/state: %+v %+v", loaded, state)
 	}
 	assertFileMode(t, store.profileDirectory(profile.ID), 0700)
@@ -59,11 +61,11 @@ func TestProfileStoreCreatesPrivateProfileFiles(t *testing.T) {
 
 func TestProfileStoreResolveByIPSortsNewestFirst(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
-	older, err := store.Create(Profile{IP: "203.0.113.10", Name: "older"})
+	older, err := store.Create(Profile{IP: profileTestHost, Name: "older"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	newer, err := store.Create(Profile{IP: "203.0.113.10", Name: "newer"})
+	newer, err := store.Create(Profile{IP: profileTestHost, Name: "newer"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +78,7 @@ func TestProfileStoreResolveByIPSortsNewestFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	matches, err := store.ResolveByIP("203.0.113.10")
+	matches, err := store.ResolveByIP(profileTestHost)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +110,7 @@ func TestProfileStoreCorruptJSONNamesPath(t *testing.T) {
 
 func TestProfileStoreDeletesProfileDirectory(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
-	profile, err := store.Create(Profile{ID: "old-profile", IP: "203.0.113.10"})
+	profile, err := store.Create(Profile{ID: "old-profile", IP: profileTestHost})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +138,7 @@ func TestProfileStoreDeletesProfileDirectory(t *testing.T) {
 
 func TestProfileStoreAppendsJSONLEvents(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
-	profile, err := store.Create(Profile{IP: "203.0.113.10"})
+	profile, err := store.Create(Profile{IP: profileTestHost})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,5 +197,19 @@ func TestEnsureComposeWiringSecretsIsStable(t *testing.T) {
 	}
 	if _, _, _, _, err := ssh.ParseAuthorizedKey([]byte(secrets.BeszelHubPublicKey)); err != nil {
 		t.Fatalf("invalid Beszel Hub public key: %v", err)
+	}
+}
+
+func TestEnsureGeneratedSecretPropagatesGeneratorError(t *testing.T) {
+	expected := errors.New("generator failed")
+	value := ""
+	err := ensureGeneratedSecret(&value, 32, func(int) (string, error) {
+		return "", expected
+	})
+	if !errors.Is(err, expected) {
+		t.Fatalf("expected generator error, got %v", err)
+	}
+	if value != "" {
+		t.Fatalf("secret was set after generator failure: %q", value)
 	}
 }

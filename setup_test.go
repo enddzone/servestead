@@ -10,8 +10,28 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+)
+
+const (
+	setupTestHost                    = "203.0.113.10"
+	setupTestDomain                  = "example.com"
+	setupTestEmail                   = "admin@example.com"
+	setupTestPrivateKey              = "/tmp/aegis-key"
+	setupTestHome                    = "/tmp/aegis-home"
+	setupTestHomePrivateKey          = "/tmp/aegis-home/id_ed25519"
+	setupTestEnvPrivateKey           = "$SERVESTEAD_TEST_HOME/id_ed25519"
+	setupTestUnexpectedConfigMessage = "unexpected config: %+v"
+	setupTestProfileID               = "profile-1"
+	setupTestFailedRunID             = "failed-run"
+	setupTestLegacyRunID             = "legacy-run"
+	setupTestOldPassword             = "old-password"
+	setupTestNewAdminEmail           = "new-admin@example.com"
+	setupTestNewPassword             = "new-password"
+	setupTestComposeFilename         = "compose.yaml"
+	setupTestAPIKeyEnvironment       = "API_KEY=secret\n"
 )
 
 func TestRunPreflightPassesWithRequiredKeys(t *testing.T) {
@@ -66,17 +86,173 @@ func TestRunSetupWithoutIPRequiresTerminal(t *testing.T) {
 	}
 }
 
+func TestSetupRequestFromResultHandlesTerminalStates(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		IP:               setupTestHost,
+		AdminUser:        "servestead",
+		PrivateKeyPath:   setupTestPrivateKey,
+		BaseDomain:       setupTestDomain,
+		LetsEncryptEmail: setupTestEmail,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, err = setupRequestFromResult(context.Background(), store, io.Discard, profileSetupModel{cancelled: true})
+	if err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("cancelled setup returned unexpected error: %v", err)
+	}
+
+	_, _, repeat, err := setupRequestFromResult(context.Background(), store, io.Discard, profileSetupModel{deleteProfileID: profile.ID})
+	if err != nil || !repeat {
+		t.Fatalf("delete result should repeat without error: repeat=%v err=%v", repeat, err)
+	}
+	if _, _, err := store.Load(profile.ID); err == nil {
+		t.Fatal("deleted profile still loads")
+	}
+
+	_, _, _, err = setupRequestFromResult(context.Background(), store, io.Discard, profileSetupModel{})
+	if err == nil || !strings.Contains(err.Error(), "did not complete") {
+		t.Fatalf("incomplete setup returned unexpected error: %v", err)
+	}
+
+	profile, err = store.Create(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageModel := newProfileSetupModel([]profileChoice{{Profile: profile, State: ProfileState{Runs: map[string]SetupRun{}}}})
+	stageModel.selectedIndex = 0
+	stageModel.done = true
+	stageModel.singleStage = "harden"
+	request, _, repeat, err := setupRequestFromResult(context.Background(), store, io.Discard, stageModel)
+	if err != nil || repeat || request.Stage != "harden" || request.ProfileOptions.ProfileID != profile.ID {
+		t.Fatalf("unexpected one-time stage request: request=%+v repeat=%v err=%v", request, repeat, err)
+	}
+
+	fullModel := newProfileSetupModel(nil)
+	fullModel.inputs[0].SetValue(setupTestHost)
+	fullModel.inputs[1].SetValue(setupTestPrivateKey)
+	fullModel.inputs[2].SetValue(setupTestDomain)
+	fullModel.inputs[3].SetValue(setupTestEmail)
+	fullModel.done = true
+	request, _, repeat, err = setupRequestFromResult(context.Background(), store, io.Discard, fullModel)
+	if err != nil || repeat || request.Stage != "" || request.ProfileOptions.IP != setupTestHost {
+		t.Fatalf("unexpected full setup request: request=%+v repeat=%v err=%v", request, repeat, err)
+	}
+}
+
+func TestLegacySetupModelNavigationAndConfirmation(t *testing.T) {
+	t.Setenv("SERVESTEAD_TEST_HOME", setupTestHome)
+	model := newSetupModel()
+	if model.Init() == nil {
+		t.Fatal("setup model should blink the active input")
+	}
+	if !strings.Contains(model.View(), "Servestead setup") {
+		t.Fatalf("mode view missing title:\n%s", model.View())
+	}
+
+	updated, command := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	model = updated.(setupModel)
+	if command != nil || model.step != setupStepMode {
+		t.Fatalf("non-key message changed setup state: %+v", model)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	model = updated.(setupModel)
+	if model.selected != 1 {
+		t.Fatalf("down key did not advance mode selection: %d", model.selected)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(setupModel)
+	if model.step != setupStepInput || model.mode != setupModeBootstrapHarden || len(model.inputs) == 0 {
+		t.Fatalf("enter did not open bootstrap input step: %+v", model)
+	}
+	if !strings.Contains(model.View(), "Set up an existing Ubuntu VPS") {
+		t.Fatalf("input view missing selected mode:\n%s", model.View())
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(setupModel)
+	if model.focus != 1 {
+		t.Fatalf("tab did not advance input focus: %d", model.focus)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	model = updated.(setupModel)
+	if model.focus != 0 {
+		t.Fatalf("shift+tab did not move input focus back: %d", model.focus)
+	}
+
+	values := []string{setupTestHost, "root", "servestead", setupTestEnvPrivateKey}
+	for index, value := range values {
+		model.inputs[index].SetValue(value)
+	}
+	model.focus = len(model.inputs) - 1
+	updated, command = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(setupModel)
+	if command != nil || model.step != setupStepConfirm || model.config.Host != setupTestHost {
+		t.Fatalf("valid inputs did not open confirmation: %+v", model)
+	}
+	if !strings.Contains(model.View(), "Review plan") {
+		t.Fatalf("confirm view missing review:\n%s", model.View())
+	}
+}
+
+func TestLegacySetupModelEditDoctorAndCancel(t *testing.T) {
+	t.Setenv("SERVESTEAD_TEST_HOME", setupTestHome)
+	model := newSetupModel()
+	model.selected = int(setupModeBootstrapHarden)
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(setupModel)
+	values := []string{setupTestHost, "root", "servestead", setupTestEnvPrivateKey}
+	for index, value := range values {
+		model.inputs[index].SetValue(value)
+	}
+	model.focus = len(model.inputs) - 1
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(setupModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	model = updated.(setupModel)
+	if model.step != setupStepInput {
+		t.Fatalf("edit key did not return to input: %+v", model)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(setupModel)
+	if model.step != setupStepMode {
+		t.Fatalf("escape from input did not return to mode: %+v", model)
+	}
+
+	model.selected = int(setupModeDoctor)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(setupModel)
+	if model.step != setupStepConfirm || model.config.Mode != setupModeDoctor {
+		t.Fatalf("doctor mode did not skip to confirmation: %+v", model)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	model = updated.(setupModel)
+	if model.step != setupStepMode {
+		t.Fatalf("editing doctor mode should return to mode selection: %+v", model)
+	}
+
+	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	model = updated.(setupModel)
+	if command == nil || !model.cancelled {
+		t.Fatalf("q from mode should cancel setup: %+v", model)
+	}
+}
+
 func TestSetupConfigFromInputs(t *testing.T) {
-	t.Setenv("SERVESTEAD_TEST_HOME", "/tmp/aegis-home")
+	t.Setenv("SERVESTEAD_TEST_HOME", setupTestHome)
 	model := setupModel{
 		mode:   setupModeBootstrapHarden,
 		inputs: setupInputs(setupModeBootstrapHarden),
 	}
 	values := []string{
-		"203.0.113.10",
+		setupTestHost,
 		"root",
 		"servestead",
-		"$SERVESTEAD_TEST_HOME/id_ed25519",
+		setupTestEnvPrivateKey,
 	}
 	for index, value := range values {
 		model.inputs[index].SetValue(value)
@@ -86,16 +262,16 @@ func TestSetupConfigFromInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Host != "203.0.113.10" || config.InitialSSHUser != "root" || config.AdminUser != "servestead" {
-		t.Fatalf("unexpected config: %+v", config)
+	if config.Host != setupTestHost || config.InitialSSHUser != "root" || config.AdminUser != "servestead" {
+		t.Fatalf(setupTestUnexpectedConfigMessage, config)
 	}
-	if config.AdminPublicKeyPath != "/tmp/aegis-home/id_ed25519.pub" || config.PrivateKeyPath != "/tmp/aegis-home/id_ed25519" {
+	if config.AdminPublicKeyPath != "/tmp/aegis-home/id_ed25519.pub" || config.PrivateKeyPath != setupTestHomePrivateKey {
 		t.Fatalf("unexpected key paths: %+v", config)
 	}
 }
 
 func TestSetupProviderKeyConfigFromInputs(t *testing.T) {
-	t.Setenv("SERVESTEAD_TEST_HOME", "/tmp/aegis-home")
+	t.Setenv("SERVESTEAD_TEST_HOME", setupTestHome)
 	model := setupModel{
 		mode:   setupModeProviderKey,
 		inputs: setupInputs(setupModeProviderKey),
@@ -108,17 +284,17 @@ func TestSetupProviderKeyConfigFromInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	if config.ProviderKeyPath != "/tmp/aegis-home/provider" || config.ProviderKeyComment != "provider-comment" {
-		t.Fatalf("unexpected config: %+v", config)
+		t.Fatalf(setupTestUnexpectedConfigMessage, config)
 	}
 }
 
 func TestSetupPlanSummaryGivesGuidance(t *testing.T) {
 	summary := setupPlanSummary(setupConfig{
 		Mode:               setupModeBootstrapHarden,
-		Host:               "203.0.113.10",
+		Host:               setupTestHost,
 		InitialSSHUser:     "root",
 		AdminUser:          "servestead",
-		PrivateKeyPath:     "/tmp/aegis-key",
+		PrivateKeyPath:     setupTestPrivateKey,
 		AdminPublicKeyPath: "/tmp/aegis-key.pub",
 	})
 	if !strings.Contains(summary, "Connect to 203.0.113.10") || !strings.Contains(summary, "Harden the server") {
@@ -130,15 +306,15 @@ func TestSetupPlanSummaryGivesGuidance(t *testing.T) {
 }
 
 func TestSetupNetworkConfigFromInputs(t *testing.T) {
-	t.Setenv("SERVESTEAD_TEST_HOME", "/tmp/aegis-home")
+	t.Setenv("SERVESTEAD_TEST_HOME", setupTestHome)
 	model := setupModel{
 		mode:   setupModeNetwork,
 		inputs: setupInputs(setupModeNetwork),
 	}
 	values := []string{
-		"203.0.113.10",
+		setupTestHost,
 		"servestead",
-		"$SERVESTEAD_TEST_HOME/id_ed25519",
+		setupTestEnvPrivateKey,
 	}
 	for index, value := range values {
 		model.inputs[index].SetValue(value)
@@ -148,8 +324,8 @@ func TestSetupNetworkConfigFromInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Host != "203.0.113.10" || config.AdminUser != "servestead" || config.PrivateKeyPath != "/tmp/aegis-home/id_ed25519" {
-		t.Fatalf("unexpected config: %+v", config)
+	if config.Host != setupTestHost || config.AdminUser != "servestead" || config.PrivateKeyPath != setupTestHomePrivateKey {
+		t.Fatalf(setupTestUnexpectedConfigMessage, config)
 	}
 }
 
@@ -165,17 +341,17 @@ func TestSetupOptionsIncludeProxyMode(t *testing.T) {
 }
 
 func TestSetupProxyConfigFromInputs(t *testing.T) {
-	t.Setenv("SERVESTEAD_TEST_HOME", "/tmp/aegis-home")
+	t.Setenv("SERVESTEAD_TEST_HOME", setupTestHome)
 	model := setupModel{
 		mode:   setupModeProxy,
 		inputs: setupInputs(setupModeProxy),
 	}
 	values := []string{
-		"203.0.113.10",
+		setupTestHost,
 		"servestead",
-		"$SERVESTEAD_TEST_HOME/id_ed25519",
-		"example.com",
-		"admin@example.com",
+		setupTestEnvPrivateKey,
+		setupTestDomain,
+		setupTestEmail,
 	}
 	for index, value := range values {
 		model.inputs[index].SetValue(value)
@@ -185,10 +361,10 @@ func TestSetupProxyConfigFromInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Host != "203.0.113.10" || config.AdminUser != "servestead" || config.PrivateKeyPath != "/tmp/aegis-home/id_ed25519" {
+	if config.Host != setupTestHost || config.AdminUser != "servestead" || config.PrivateKeyPath != setupTestHomePrivateKey {
 		t.Fatalf("unexpected SSH config: %+v", config)
 	}
-	if config.BaseDomain != "example.com" || config.LetsEncryptEmail != "admin@example.com" || config.ServerSecret == "" || config.PangolinSetupToken == "" {
+	if config.BaseDomain != setupTestDomain || config.LetsEncryptEmail != setupTestEmail || config.ServerSecret == "" || config.PangolinSetupToken == "" {
 		t.Fatalf("unexpected proxy config: %+v", config)
 	}
 	if strings.Contains(setupPlanSummary(config), config.ServerSecret) || strings.Contains(setupPlanSummary(config), config.PangolinSetupToken) {
@@ -199,11 +375,11 @@ func TestSetupProxyConfigFromInputs(t *testing.T) {
 func TestSetupPlanSummaryIncludesProxyGuidance(t *testing.T) {
 	summary := setupPlanSummary(setupConfig{
 		Mode:             setupModeProxy,
-		Host:             "203.0.113.10",
+		Host:             setupTestHost,
 		AdminUser:        "servestead",
-		PrivateKeyPath:   "/tmp/aegis-key",
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		PrivateKeyPath:   setupTestPrivateKey,
+		BaseDomain:       setupTestDomain,
+		LetsEncryptEmail: setupTestEmail,
 		ServerSecret:     "secret",
 	})
 	for _, expected := range []string{
@@ -227,7 +403,7 @@ func TestRunSetupPlanRunsProxyMode(t *testing.T) {
 	}
 	client := &recordingRemoteClient{}
 	newProxyRemoteClient = func(_ context.Context, config proxyConfig, _, _ io.Writer) (remoteClient, error) {
-		if config.BaseDomain != "example.com" || config.LetsEncryptEmail != "admin@example.com" || config.ServerSecret != "secret" {
+		if config.BaseDomain != setupTestDomain || config.LetsEncryptEmail != setupTestEmail || config.ServerSecret != "secret" {
 			t.Fatalf("unexpected proxy config: %+v", config)
 		}
 		return client, nil
@@ -236,17 +412,17 @@ func TestRunSetupPlanRunsProxyMode(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := runSetupPlan(context.Background(), setupConfig{
 		Mode:             setupModeProxy,
-		Host:             "203.0.113.10",
+		Host:             setupTestHost,
 		AdminUser:        "servestead",
 		PrivateKeyPath:   privateKey,
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		BaseDomain:       setupTestDomain,
+		LetsEncryptEmail: setupTestEmail,
 		ServerSecret:     "secret",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(client.commands) != len(proxyTasks(proxyConfig{SSHUser: "servestead", BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com", ServerSecret: "secret"})) {
+	if len(client.commands) != len(proxyTasks(proxyConfig{SSHUser: "servestead", BaseDomain: setupTestDomain, LetsEncryptEmail: setupTestEmail, ServerSecret: "secret"})) {
 		t.Fatalf("unexpected proxy command count: %d", len(client.commands))
 	}
 	if !strings.Contains(stdout.String(), "Step 1/1: deploy Pangolin and reverse proxy stack.") {
@@ -258,10 +434,10 @@ func TestPrepareProfileSetupGeneratesPersistentSecret(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
 
 	profile, state, config, err := prepareProfileSetup(setupCLIOptions{
-		IP:               "203.0.113.10",
-		PrivateKeyPath:   "/tmp/aegis-key",
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		IP:               setupTestHost,
+		PrivateKeyPath:   setupTestPrivateKey,
+		BaseDomain:       setupTestDomain,
+		LetsEncryptEmail: setupTestEmail,
 	}, store, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -277,9 +453,9 @@ func TestPrepareProfileSetupGeneratesPersistentSecret(t *testing.T) {
 	}
 
 	_, _, secondConfig, err := prepareProfileSetup(setupCLIOptions{
-		IP:               "203.0.113.10",
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		IP:               setupTestHost,
+		BaseDomain:       setupTestDomain,
+		LetsEncryptEmail: setupTestEmail,
 	}, store, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -296,21 +472,21 @@ func TestPrepareCompletedLegacyProfileDoesNotInventUndeployedSetupToken(t *testi
 	t.Setenv("PANGOLIN_ADMIN_PASSWORD", "existing-password")
 	store := newFileProfileStore(t.TempDir())
 	profile, err := store.Create(Profile{
-		IP:               "203.0.113.10",
+		IP:               setupTestHost,
 		InitialSSHUser:   "root",
 		AdminUser:        "servestead",
-		PrivateKeyPath:   "/tmp/aegis-key",
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		PrivateKeyPath:   setupTestPrivateKey,
+		BaseDomain:       setupTestDomain,
+		LetsEncryptEmail: setupTestEmail,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	state := ProfileState{
-		ActiveRunID: "legacy-run",
+		ActiveRunID: setupTestLegacyRunID,
 		Runs: map[string]SetupRun{
-			"legacy-run": {
-				ID:     "legacy-run",
+			setupTestLegacyRunID: {
+				ID:     setupTestLegacyRunID,
 				Status: runStatusComplete,
 				Stages: map[string]SetupStageStatus{
 					"proxy": {Status: stageStatusComplete},
@@ -341,16 +517,16 @@ func TestPrepareFailedProxyUsesExplicitPangolinPasswordOverride(t *testing.T) {
 	t.Setenv("PANGOLIN_ADMIN_PASSWORD", "existing-admin-password")
 	store := newFileProfileStore(t.TempDir())
 	profile, err := store.Create(Profile{
-		IP: "203.0.113.10", AdminUser: "servestead", PrivateKeyPath: "/tmp/aegis-key",
-		BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com",
+		IP: setupTestHost, AdminUser: "servestead", PrivateKeyPath: setupTestPrivateKey,
+		BaseDomain: setupTestDomain, LetsEncryptEmail: setupTestEmail,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	state := ProfileState{
-		ActiveRunID: "failed-run",
-		Runs: map[string]SetupRun{"failed-run": {
-			ID: "failed-run", Status: runStatusFailed,
+		ActiveRunID: setupTestFailedRunID,
+		Runs: map[string]SetupRun{setupTestFailedRunID: {
+			ID: setupTestFailedRunID, Status: runStatusFailed,
 			Stages: map[string]SetupStageStatus{"proxy": {Status: stageStatusFailed}},
 		}},
 	}
@@ -373,12 +549,12 @@ func TestPrepareFailedProxyUsesExplicitPangolinPasswordOverride(t *testing.T) {
 func TestPrepareProfileStageSetupPersistsChangedPangolinCredentialsForAPI(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
 	profile, err := store.Create(Profile{
-		ID:                 "profile-1",
-		IP:                 "203.0.113.10",
+		ID:                 setupTestProfileID,
+		IP:                 setupTestHost,
 		AdminUser:          "servestead",
-		PrivateKeyPath:     "/tmp/aegis-key",
-		BaseDomain:         "example.com",
-		LetsEncryptEmail:   "admin@example.com",
+		PrivateKeyPath:     setupTestPrivateKey,
+		BaseDomain:         setupTestDomain,
+		LetsEncryptEmail:   setupTestEmail,
 		PangolinAdminEmail: "old-admin@example.com",
 	})
 	if err != nil {
@@ -399,34 +575,34 @@ func TestPrepareProfileStageSetupPersistsChangedPangolinCredentialsForAPI(t *tes
 	}
 	if err := store.SaveSecrets(profile.ID, ProfileSecrets{
 		ServerSecret:          "server-secret",
-		PangolinAdminPassword: "old-password",
+		PangolinAdminPassword: setupTestOldPassword,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	_, _, config, err := prepareProfileStageSetup(setupCLIOptions{
 		ProfileID:             profile.ID,
-		PangolinAdminEmail:    "new-admin@example.com",
-		PangolinAdminPassword: "new-password",
+		PangolinAdminEmail:    setupTestNewAdminEmail,
+		PangolinAdminPassword: setupTestNewPassword,
 	}, store, "observability")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.PangolinAdminEmail != "new-admin@example.com" || config.PangolinAdminPassword != "new-password" {
+	if config.PangolinAdminEmail != setupTestNewAdminEmail || config.PangolinAdminPassword != setupTestNewPassword {
 		t.Fatalf("changed Pangolin credentials were not reflected in setup config: %+v", config)
 	}
 	loadedProfile, _, err := store.Load(profile.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loadedProfile.PangolinAdminEmail != "new-admin@example.com" {
+	if loadedProfile.PangolinAdminEmail != setupTestNewAdminEmail {
 		t.Fatalf("changed Pangolin admin email was not saved: %+v", loadedProfile)
 	}
 	secrets, err := store.LoadSecrets(profile.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if secrets.PangolinAdminPassword != "new-password" {
+	if secrets.PangolinAdminPassword != setupTestNewPassword {
 		t.Fatalf("changed Pangolin admin password was not saved: %+v", secrets)
 	}
 	command := observabilityResourceVerifyCommand(observabilityConfig{
@@ -434,7 +610,7 @@ func TestPrepareProfileStageSetupPersistsChangedPangolinCredentialsForAPI(t *tes
 		AdminEmail:       config.PangolinAdminEmail,
 		PangolinPassword: config.PangolinAdminPassword,
 	})
-	for _, expected := range []string{`"email":"new-admin@example.com"`, `"password":"new-password"`} {
+	for _, expected := range []string{`"email":"` + setupTestNewAdminEmail + `"`, `"password":"` + setupTestNewPassword + `"`} {
 		if !strings.Contains(command, expected) {
 			t.Fatalf("Pangolin API login command did not use changed credential %q:\n%s", expected, command)
 		}
@@ -450,18 +626,18 @@ func TestAdvancedSetupMasksPangolinPassword(t *testing.T) {
 
 func TestFailedProxyRetryCollectsPangolinCredentials(t *testing.T) {
 	state := ProfileState{
-		ActiveRunID: "failed-run",
-		Runs: map[string]SetupRun{"failed-run": {
+		ActiveRunID: setupTestFailedRunID,
+		Runs: map[string]SetupRun{setupTestFailedRunID: {
 			Stages: map[string]SetupStageStatus{"proxy": {Status: stageStatusFailed}},
 		}},
 	}
 	model := newProfileSetupModel([]profileChoice{{
 		Profile: Profile{
-			ID:               "profile-1",
-			IP:               "203.0.113.10",
-			PrivateKeyPath:   "/tmp/aegis-key",
-			BaseDomain:       "example.com",
-			LetsEncryptEmail: "admin@example.com",
+			ID:               setupTestProfileID,
+			IP:               setupTestHost,
+			PrivateKeyPath:   setupTestPrivateKey,
+			BaseDomain:       setupTestDomain,
+			LetsEncryptEmail: setupTestEmail,
 		},
 		State: state,
 	}})
@@ -479,10 +655,10 @@ func TestPlatformStageWithMissingProfileValuesOpensIntake(t *testing.T) {
 	state := ProfileState{Runs: map[string]SetupRun{}}
 	model := newProfileSetupModel([]profileChoice{{
 		Profile: Profile{
-			ID:             "profile-1",
-			IP:             "203.0.113.10",
+			ID:             setupTestProfileID,
+			IP:             setupTestHost,
 			AdminUser:      "servestead",
-			PrivateKeyPath: "/tmp/aegis-key",
+			PrivateKeyPath: setupTestPrivateKey,
 		},
 		State: state,
 	}})
@@ -517,44 +693,44 @@ func TestPlatformStageWithMissingProfileValuesOpensIntake(t *testing.T) {
 func TestOptionsForSelectedProfileUsesEditedIntakeValues(t *testing.T) {
 	model := newProfileSetupModel([]profileChoice{{
 		Profile: Profile{
-			ID:             "profile-1",
-			IP:             "203.0.113.10",
+			ID:             setupTestProfileID,
+			IP:             setupTestHost,
 			AdminUser:      "servestead",
-			PrivateKeyPath: "/tmp/aegis-key",
+			PrivateKeyPath: setupTestPrivateKey,
 		},
 		State: ProfileState{Runs: map[string]SetupRun{}},
 	}})
 	model.selectedIndex = 0
 	model.setInputsFromChoice(false)
-	model.inputs[2].SetValue("example.com")
-	model.inputs[3].SetValue("admin@example.com")
+	model.inputs[2].SetValue(setupTestDomain)
+	model.inputs[3].SetValue(setupTestEmail)
 
 	options, err := model.optionsForSelectedProfile()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.ProfileID != "profile-1" || options.BaseDomain != "example.com" || options.LetsEncryptEmail != "admin@example.com" {
+	if options.ProfileID != setupTestProfileID || options.BaseDomain != setupTestDomain || options.LetsEncryptEmail != setupTestEmail {
 		t.Fatalf("selected profile options did not include edited intake values: %+v", options)
 	}
-	if options.PangolinAdminEmail != "admin@example.com" {
+	if options.PangolinAdminEmail != setupTestEmail {
 		t.Fatalf("Pangolin admin email should default to edited Let's Encrypt email: %+v", options)
 	}
 }
 
 func TestFailedStackSyncRetryCollectsPangolinCredentials(t *testing.T) {
 	state := ProfileState{
-		ActiveRunID: "failed-run",
-		Runs: map[string]SetupRun{"failed-run": {
+		ActiveRunID: setupTestFailedRunID,
+		Runs: map[string]SetupRun{setupTestFailedRunID: {
 			Stages: map[string]SetupStageStatus{"stacks": {Status: stageStatusFailed}},
 		}},
 	}
 	model := newProfileSetupModel([]profileChoice{{
 		Profile: Profile{
-			ID: "profile-1", IP: "203.0.113.10", BaseDomain: "example.com",
-			LetsEncryptEmail: "admin@example.com", PangolinAdminEmail: "admin@example.com",
+			ID: setupTestProfileID, IP: setupTestHost, BaseDomain: setupTestDomain,
+			LetsEncryptEmail: setupTestEmail, PangolinAdminEmail: setupTestEmail,
 		},
 		State:   state,
-		Secrets: ProfileSecrets{PangolinAdminPassword: "old-password"},
+		Secrets: ProfileSecrets{PangolinAdminPassword: setupTestOldPassword},
 	}})
 	model.selectedIndex = 0
 	model.setInputsFromChoice(false)
@@ -572,22 +748,22 @@ func TestFailedStackSyncRetryCollectsPangolinCredentials(t *testing.T) {
 
 func TestFailedSingleStackRetryCollectsPangolinCredentials(t *testing.T) {
 	state := ProfileState{
-		ActiveRunID: "failed-run",
-		Runs: map[string]SetupRun{"failed-run": {
+		ActiveRunID: setupTestFailedRunID,
+		Runs: map[string]SetupRun{setupTestFailedRunID: {
 			Stages: map[string]SetupStageStatus{"stack:site": {Status: stageStatusFailed}},
 		}},
 	}
 	model := newProfileSetupModel([]profileChoice{{
-		Profile: Profile{ID: "profile-1", IP: "203.0.113.10", BaseDomain: "example.com"},
+		Profile: Profile{ID: setupTestProfileID, IP: setupTestHost, BaseDomain: setupTestDomain},
 		State:   state,
-		Secrets: ProfileSecrets{PangolinAdminPassword: "old-password"},
+		Secrets: ProfileSecrets{PangolinAdminPassword: setupTestOldPassword},
 	}})
 	model.selectedIndex = 0
 	model.setInputsFromChoice(false)
 	model.screen = profileSetupScreenStacks
 	model.stackGitStatus = "clean"
 	model.stacks = []editableStack{{Name: "site"}}
-	model.stackTable = newStackTable(model.stacks, "example.com", &state)
+	model.stackTable = newStackTable(model.stacks, setupTestDomain, &state)
 	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	result := updated.(profileSetupModel)
 	if command != nil || result.done || result.screen != profileSetupScreenAdvanced || result.singleStage != "stack:site" {
@@ -598,14 +774,14 @@ func TestFailedSingleStackRetryCollectsPangolinCredentials(t *testing.T) {
 func TestProfileSetupModelResumesSelectedProfile(t *testing.T) {
 	choice := profileChoice{
 		Profile: Profile{
-			ID:               "profile-1",
+			ID:               setupTestProfileID,
 			Name:             "production",
-			IP:               "203.0.113.10",
+			IP:               setupTestHost,
 			InitialSSHUser:   "root",
 			AdminUser:        "servestead",
-			PrivateKeyPath:   "/tmp/aegis-key",
-			BaseDomain:       "example.com",
-			LetsEncryptEmail: "admin@example.com",
+			PrivateKeyPath:   setupTestPrivateKey,
+			BaseDomain:       setupTestDomain,
+			LetsEncryptEmail: setupTestEmail,
 		},
 		State: ProfileState{
 			ActiveRunID: "run-1",
@@ -629,7 +805,7 @@ func TestProfileSetupModelResumesSelectedProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.ProfileID != "profile-1" || options.IP != "203.0.113.10" {
+	if options.ProfileID != setupTestProfileID || options.IP != setupTestHost {
 		t.Fatalf("selected profile should preserve profile identity and IP: %+v", options)
 	}
 }
@@ -652,12 +828,12 @@ func TestProfileSetupModelRendersDashboardFromProfileState(t *testing.T) {
 	}
 	model := newProfileSetupModel([]profileChoice{{
 		Profile: Profile{
-			ID:               "profile-1",
+			ID:               setupTestProfileID,
 			Name:             "production",
-			IP:               "203.0.113.10",
-			PrivateKeyPath:   "/tmp/aegis-key",
-			BaseDomain:       "example.com",
-			LetsEncryptEmail: "admin@example.com",
+			IP:               setupTestHost,
+			PrivateKeyPath:   setupTestPrivateKey,
+			BaseDomain:       setupTestDomain,
+			LetsEncryptEmail: setupTestEmail,
 		},
 		State: state,
 	}})
@@ -673,6 +849,30 @@ func TestProfileSetupModelRendersDashboardFromProfileState(t *testing.T) {
 }
 
 func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
+	model, repository, composePath := newGuidedStackAddModel(t)
+	result := openGuidedStackAddCompose(t, model, composePath)
+	result = addGuidedStackRoute(t, result, 0)
+	result = addGuidedStackRoute(t, result, 1)
+	result = selectAdjacentStackEnvironment(t, result)
+	result.stackInputs[0].SetValue("site")
+	updated, _ := result.updateStackReview(tea.KeyMsg{Type: tea.KeyEnter})
+	result = updated.(profileSetupModel)
+	if result.screen != profileSetupScreenStacks || len(result.stacks) != 1 || result.stacks[0].Name != "site" {
+		t.Fatalf("stack review did not save in-session: %+v", result)
+	}
+	if result.err != "" {
+		t.Fatalf("stack review left an error: %s", result.err)
+	}
+	if len(result.stacks[0].Metadata.PublicResources) != 2 {
+		t.Fatalf("multi-service routes were not saved: %+v", result.stacks[0].Metadata.PublicResources)
+	}
+	if _, err := os.Stat(filepath.Join(repository, filepath.FromSlash(observabilityComposeRepositoryPath))); err != nil {
+		t.Fatalf("repository scaffold was not prepared before commit: %v", err)
+	}
+}
+
+func newGuidedStackAddModel(t *testing.T) (profileSetupModel, string, string) {
+	t.Helper()
 	requireGit(t)
 	directory := t.TempDir()
 	repository := filepath.Join(directory, "repository")
@@ -680,7 +880,7 @@ func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
 		t.Fatal(err)
 	}
 	runGitCommand(t, repository, "init")
-	composePath := filepath.Join(directory, "compose.yaml")
+	composePath := filepath.Join(directory, setupTestComposeFilename)
 	if err := os.WriteFile(composePath, []byte(`services:
   web:
     image: nginx
@@ -691,15 +891,20 @@ func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
 `), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(directory, ".env"), []byte("API_KEY=secret\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, ".env"), []byte(setupTestAPIKeyEnvironment), 0600); err != nil {
 		t.Fatal(err)
 	}
 	model := newProfileSetupModel([]profileChoice{{
-		Profile: Profile{ID: "profile-1", IP: "203.0.113.10", ConfigRepositoryPath: repository},
+		Profile: Profile{ID: setupTestProfileID, IP: setupTestHost, ConfigRepositoryPath: repository},
 		State:   ProfileState{Runs: map[string]SetupRun{}},
 	}})
 	model.selectedIndex = 0
 	model.screen = profileSetupScreenDashboard
+	return model, repository, composePath
+}
+
+func openGuidedStackAddCompose(t *testing.T, model profileSetupModel, composePath string) profileSetupModel {
+	t.Helper()
 	updated, _ := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
 	result := updated.(profileSetupModel)
 	if result.screen != profileSetupScreenStacks {
@@ -724,37 +929,50 @@ func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
 	if result.screen != profileSetupScreenStackServices || len(result.stackResources) != 0 {
 		t.Fatalf("Compose intake did not open private-by-default service selection: %v %+v", result.screen, result.stackResources)
 	}
+	return result
+}
 
-	updated, _ = result.updateStackServices(tea.KeyMsg{Type: tea.KeyEnter})
+func addGuidedStackRoute(t *testing.T, result profileSetupModel, serviceIndex int) profileSetupModel {
+	t.Helper()
+	if serviceIndex > 0 {
+		for index := 0; index < serviceIndex; index++ {
+			updated, _ := result.updateStackServices(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+			result = updated.(profileSetupModel)
+		}
+	}
+	updated, _ := result.updateStackServices(tea.KeyMsg{Type: tea.KeyEnter})
 	result = updated.(profileSetupModel)
-	if result.screen != profileSetupScreenStackResourceEditor || result.stackResourceInputs[1].Value() != result.stackServices[0].Name {
+	if result.screen != profileSetupScreenStackResourceEditor || result.stackResourceInputs[1].Value() != result.stackServices[serviceIndex].Name {
 		t.Fatalf("first service route editor did not open: %v %q", result.screen, result.stackResourceInputs[1].Value())
 	}
-	if strings.Contains(result.stackResourceEditorView(), "Resource ID") {
+	if serviceIndex == 0 && strings.Contains(result.stackResourceEditorView(), "Resource ID") {
 		t.Fatal("advanced route fields were shown by default")
 	}
-	updated, _ = result.updateStackResourceEditor(tea.KeyMsg{Type: tea.KeyCtrlX})
+	result = openGuidedStackAdvancedFields(t, result, serviceIndex)
+	updated, _ = result.updateStackResourceEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
+	result = updated.(profileSetupModel)
+	if result.screen != profileSetupScreenStackServices || len(result.stackResources) != serviceIndex+1 {
+		t.Fatalf("route was not retained: %+v", result.stackResources)
+	}
+	return result
+}
+
+func openGuidedStackAdvancedFields(t *testing.T, result profileSetupModel, serviceIndex int) profileSetupModel {
+	t.Helper()
+	if serviceIndex != 0 {
+		return result
+	}
+	updated, _ := result.updateStackResourceEditor(tea.KeyMsg{Type: tea.KeyCtrlX})
 	result = updated.(profileSetupModel)
 	if !strings.Contains(result.stackResourceEditorView(), "Resource ID") {
 		t.Fatal("advanced route fields did not open")
 	}
-	updated, _ = result.updateStackResourceEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
-	result = updated.(profileSetupModel)
-	if result.screen != profileSetupScreenStackServices || len(result.stackResources) != 1 {
-		t.Fatalf("web route was not retained: %+v", result.stackResources)
-	}
+	return result
+}
 
-	updated, _ = result.updateStackServices(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
-	result = updated.(profileSetupModel)
-	updated, _ = result.updateStackServices(tea.KeyMsg{Type: tea.KeyEnter})
-	result = updated.(profileSetupModel)
-	if result.stackResourceInputs[1].Value() != result.stackServices[1].Name {
-		t.Fatalf("second service route editor did not open: %q", result.stackResourceInputs[1].Value())
-	}
-	updated, _ = result.updateStackResourceEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
-	result = updated.(profileSetupModel)
-
-	updated, _ = result.updateStackServices(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+func selectAdjacentStackEnvironment(t *testing.T, result profileSetupModel) profileSetupModel {
+	t.Helper()
+	updated, _ := result.updateStackServices(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
 	result = updated.(profileSetupModel)
 	if result.screen != profileSetupScreenStackEnvironment || len(result.stackEnvironmentOptions) != 3 {
 		t.Fatalf("runtime environment choices were not prepared: %+v", result.stackEnvironmentOptions)
@@ -766,21 +984,7 @@ func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
 	if result.screen != profileSetupScreenStackReview || len(result.stackEnvironmentKeys) != 1 {
 		t.Fatalf("adjacent environment did not open review: %v %+v", result.screen, result.stackEnvironmentKeys)
 	}
-	result.stackInputs[0].SetValue("site")
-	updated, _ = result.updateStackReview(tea.KeyMsg{Type: tea.KeyEnter})
-	result = updated.(profileSetupModel)
-	if result.screen != profileSetupScreenStacks || len(result.stacks) != 1 || result.stacks[0].Name != "site" {
-		t.Fatalf("stack review did not save in-session: %+v", result)
-	}
-	if result.err != "" {
-		t.Fatalf("stack review left an error: %s", result.err)
-	}
-	if len(result.stacks[0].Metadata.PublicResources) != 2 {
-		t.Fatalf("multi-service routes were not saved: %+v", result.stacks[0].Metadata.PublicResources)
-	}
-	if _, err := os.Stat(filepath.Join(repository, filepath.FromSlash(observabilityComposeRepositoryPath))); err != nil {
-		t.Fatalf("repository scaffold was not prepared before commit: %v", err)
-	}
+	return result
 }
 
 func TestSetupResumeReturnsToStackManagerForStackStages(t *testing.T) {
@@ -788,16 +992,16 @@ func TestSetupResumeReturnsToStackManagerForStackStages(t *testing.T) {
 	repository := t.TempDir()
 	runGitCommand(t, repository, "init")
 	model := newProfileSetupModel([]profileChoice{{
-		Profile: Profile{ID: "profile-1", IP: "203.0.113.10", ConfigRepositoryPath: repository},
+		Profile: Profile{ID: setupTestProfileID, IP: setupTestHost, ConfigRepositoryPath: repository},
 		State:   ProfileState{Runs: map[string]SetupRun{}},
 	}})
 
-	applySetupResume(&model, resumeAfterStage("profile-1", "stacks"))
+	applySetupResume(&model, resumeAfterStage(setupTestProfileID, "stacks"))
 	if model.selectedIndex != 0 || model.screen != profileSetupScreenStacks {
 		t.Fatalf("stack stage did not resume stack manager: %+v", model)
 	}
 
-	applySetupResume(&model, resumeAfterStage("profile-1", "harden"))
+	applySetupResume(&model, resumeAfterStage(setupTestProfileID, "harden"))
 	if model.screen != profileSetupScreenDashboard {
 		t.Fatalf("non-stack stage did not resume dashboard: %+v", model.screen)
 	}
@@ -805,7 +1009,7 @@ func TestSetupResumeReturnsToStackManagerForStackStages(t *testing.T) {
 
 func TestStackFilePickersSelectComposeAndShowHiddenEnvironmentFiles(t *testing.T) {
 	directory := t.TempDir()
-	composePath := filepath.Join(directory, "compose.yaml")
+	composePath := filepath.Join(directory, setupTestComposeFilename)
 	if err := os.WriteFile(composePath, []byte("services:\n  web:\n    image: nginx\n    expose: [80]\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -834,6 +1038,14 @@ func TestStackFilePickersSelectComposeAndShowHiddenEnvironmentFiles(t *testing.T
 }
 
 func TestStackEditorManagesMultipleResourcesAndRuntimeEnvironment(t *testing.T) {
+	model, store, profile, repository := newMultiResourceStackEditorModel(t)
+	model = editFirstStackResourceSubdomain(t, model)
+	model = saveStackEditorRuntimeEnvironment(t, model)
+	assertStackEditorSavedRuntimeEnvironment(t, store, profile.ID, repository)
+}
+
+func newMultiResourceStackEditorModel(t *testing.T) (profileSetupModel, ProfileStore, Profile, string) {
+	t.Helper()
 	requireGit(t)
 	repository := t.TempDir()
 	runGitCommand(t, repository, "init")
@@ -856,7 +1068,7 @@ func TestStackEditorManagesMultipleResourcesAndRuntimeEnvironment(t *testing.T) 
 		t.Fatal(err)
 	}
 	store := newFileProfileStore(t.TempDir())
-	profile, err := store.Create(Profile{IP: "203.0.113.10", ConfigRepositoryPath: repository})
+	profile, err := store.Create(Profile{IP: setupTestHost, ConfigRepositoryPath: repository})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -875,7 +1087,11 @@ func TestStackEditorManagesMultipleResourcesAndRuntimeEnvironment(t *testing.T) 
 	if model.screen != profileSetupScreenStackEditor || len(model.stackResources) != 2 || model.err != "" {
 		t.Fatalf("multi-resource stack did not open: %+v", model.stackResources)
 	}
+	return model, store, profile, repository
+}
 
+func editFirstStackResourceSubdomain(t *testing.T, model profileSetupModel) profileSetupModel {
+	t.Helper()
 	updated, _ := model.updateStackEditor(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
 	model = updated.(profileSetupModel)
 	if model.screen != profileSetupScreenStackResourceEditor {
@@ -887,12 +1103,16 @@ func TestStackEditorManagesMultipleResourcesAndRuntimeEnvironment(t *testing.T) 
 	if model.stackResources[0].Subdomain != "app" {
 		t.Fatalf("resource edit was not retained: %+v", model.stackResources)
 	}
+	return model
+}
 
+func saveStackEditorRuntimeEnvironment(t *testing.T, model profileSetupModel) profileSetupModel {
+	t.Helper()
 	environmentPath := filepath.Join(t.TempDir(), ".env")
-	if err := os.WriteFile(environmentPath, []byte("API_KEY=secret\n"), 0600); err != nil {
+	if err := os.WriteFile(environmentPath, []byte(setupTestAPIKeyEnvironment), 0600); err != nil {
 		t.Fatal(err)
 	}
-	updated, _ = model.updateStackEditor(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	updated, _ := model.updateStackEditor(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
 	model = updated.(profileSetupModel)
 	model.stackEnvironmentMode = stackEnvironmentManual
 	model.stackEnvironmentInput.SetValue(environmentPath)
@@ -903,11 +1123,16 @@ func TestStackEditorManagesMultipleResourcesAndRuntimeEnvironment(t *testing.T) 
 	if model.screen != profileSetupScreenStacks || model.err != "" {
 		t.Fatalf("stack editor did not save: %v %s", model.screen, model.err)
 	}
-	secrets, err := store.LoadSecrets(profile.ID)
+	return model
+}
+
+func assertStackEditorSavedRuntimeEnvironment(t *testing.T, store ProfileStore, profileID, repository string) {
+	t.Helper()
+	secrets, err := store.LoadSecrets(profileID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if secrets.StackEnvironments["suite"] != "API_KEY=secret\n" {
+	if secrets.StackEnvironments["suite"] != setupTestAPIKeyEnvironment {
 		t.Fatal("runtime environment was not saved in profile secrets")
 	}
 	reloaded, err := loadEditableStacks(repository)
@@ -928,7 +1153,7 @@ func TestProfileDashboardDetectsRepositoryStacks(t *testing.T) {
 	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(stackDirectory, "compose.yaml"), []byte(testApplicationCompose), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(stackDirectory, setupTestComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
 		t.Fatal(err)
 	}
 	metadata := `version: 1
@@ -949,7 +1174,7 @@ public_resources:
 	}
 	model := newProfileSetupModel([]profileChoice{{
 		Profile: Profile{
-			ID: "profile-1", IP: "203.0.113.10", BaseDomain: "example.com",
+			ID: setupTestProfileID, IP: setupTestHost, BaseDomain: setupTestDomain,
 			ConfigRepositoryPath: repository,
 		},
 		State: ProfileState{Runs: map[string]SetupRun{}},
@@ -994,6 +1219,19 @@ public_resources:
 }
 
 func TestProfileStackManagerReviewsComposeOnlyStack(t *testing.T) {
+	model, stackDirectory := newComposeOnlyStackManagerModel(t)
+	assertComposeOnlyStackDraft(t, model)
+	saved := reviewAndSaveComposeOnlyStack(t, model)
+	if _, err := os.Stat(filepath.Join(stackDirectory, stackMetadataFilename)); err != nil {
+		t.Fatalf("metadata was not created: %v", err)
+	}
+	if len(saved.stacks) != 1 || saved.stacks[0].MetadataMissing {
+		t.Fatalf("saved stack still appears as draft: %+v", saved.stacks)
+	}
+}
+
+func newComposeOnlyStackManagerModel(t *testing.T) (profileSetupModel, string) {
+	t.Helper()
 	requireGit(t)
 	repository := t.TempDir()
 	runGitCommand(t, repository, "init")
@@ -1001,13 +1239,13 @@ func TestProfileStackManagerReviewsComposeOnlyStack(t *testing.T) {
 	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(stackDirectory, "compose.yaml"), []byte(testApplicationCompose), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(stackDirectory, setupTestComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
 		t.Fatal(err)
 	}
 	state := ProfileState{Runs: map[string]SetupRun{}}
 	model := newProfileSetupModel([]profileChoice{{
 		Profile: Profile{
-			ID: "profile-1", IP: "203.0.113.10", BaseDomain: "example.com",
+			ID: setupTestProfileID, IP: setupTestHost, BaseDomain: setupTestDomain,
 			ConfigRepositoryPath: repository,
 		},
 		State: state,
@@ -1018,6 +1256,11 @@ func TestProfileStackManagerReviewsComposeOnlyStack(t *testing.T) {
 	if model.err != "" {
 		t.Fatal(model.err)
 	}
+	return model, stackDirectory
+}
+
+func assertComposeOnlyStackDraft(t *testing.T, model profileSetupModel) {
+	t.Helper()
 	if len(model.stacks) != 1 || !model.stacks[0].MetadataMissing {
 		t.Fatalf("compose-only stack was not shown as a draft: %+v", model.stacks)
 	}
@@ -1030,7 +1273,11 @@ func TestProfileStackManagerReviewsComposeOnlyStack(t *testing.T) {
 	if command != nil || blocked.done || !strings.Contains(blocked.err, "needs review") {
 		t.Fatalf("draft deployment was not blocked: %+v", blocked)
 	}
-	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyEnter})
+}
+
+func reviewAndSaveComposeOnlyStack(t *testing.T, model profileSetupModel) profileSetupModel {
+	t.Helper()
+	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyEnter})
 	reviewing := updated.(profileSetupModel)
 	if command != nil || reviewing.screen != profileSetupScreenStackEditor || !reviewing.stackMetadataMissing {
 		t.Fatalf("draft stack did not open for review: %+v", reviewing)
@@ -1040,12 +1287,7 @@ func TestProfileStackManagerReviewsComposeOnlyStack(t *testing.T) {
 	if command != nil || saved.screen != profileSetupScreenStacks || saved.err != "" {
 		t.Fatalf("draft stack did not save: %+v", saved)
 	}
-	if _, err := os.Stat(filepath.Join(stackDirectory, stackMetadataFilename)); err != nil {
-		t.Fatalf("metadata was not created: %v", err)
-	}
-	if len(saved.stacks) != 1 || saved.stacks[0].MetadataMissing {
-		t.Fatalf("saved stack still appears as draft: %+v", saved.stacks)
-	}
+	return saved
 }
 
 func TestProfileSetupUsesAvailableTerminalHeight(t *testing.T) {
@@ -1060,10 +1302,421 @@ func TestProfileSetupUsesAvailableTerminalHeight(t *testing.T) {
 	}
 }
 
+func TestProfileSetupHelpCoversAllScreens(t *testing.T) {
+	helpMaps := []profileSetupHelp{
+		{screen: profileSetupScreenPicker},
+		{screen: profileSetupScreenDashboard, hasProfile: true, hasPangolinAccess: true, hasCloud: true},
+		{screen: profileSetupScreenIntake},
+		{screen: profileSetupScreenAdvanced},
+		{screen: profileSetupScreenRepository},
+		{screen: profileSetupScreenRepositoryDetails},
+		{screen: profileSetupScreenStacks},
+		{screen: profileSetupScreenStackCompose},
+		{screen: profileSetupScreenStackCompose, stackComposeManual: true},
+		{screen: profileSetupScreenStackServices},
+		{screen: profileSetupScreenStackEditor, stackEditorFocus: 0},
+		{screen: profileSetupScreenStackEditor, stackEditorFocus: 1},
+		{screen: profileSetupScreenStackResourceEditor},
+		{screen: profileSetupScreenStackEnvironment, stackEnvironmentMode: stackEnvironmentChoose},
+		{screen: profileSetupScreenStackEnvironment, stackEnvironmentMode: stackEnvironmentBrowse},
+		{screen: profileSetupScreenStackEnvironment, stackEnvironmentMode: stackEnvironmentManual},
+		{screen: profileSetupScreenStackReview},
+		{screen: profileSetupScreenStackDeleteConfirm},
+		{screen: profileSetupScreenStackDiff},
+		{screen: profileSetupScreenStackCommit},
+		{screen: profileSetupScreenCloud},
+		{screen: profileSetupScreenCloudConfirm},
+		{screen: profileSetupScreenCloudRunning},
+		{screen: profileSetupScreenReview},
+		{screen: profileSetupScreenDeleteConfirm},
+	}
+	for _, helpMap := range helpMaps {
+		if bindings := helpMap.ShortHelp(); len(bindings) == 0 {
+			t.Fatalf("screen %d returned no short help", helpMap.screen)
+		}
+		if full := helpMap.FullHelp(); len(full) != 1 || len(full[0]) == 0 {
+			t.Fatalf("screen %d returned empty full help", helpMap.screen)
+		}
+	}
+	if bindings := (profileSetupHelp{screen: profileSetupScreen(-1)}).ShortHelp(); bindings != nil {
+		t.Fatalf("unknown screen returned bindings: %+v", bindings)
+	}
+}
+
+func TestProfileSetupModelViewsRenderPopulatedScreens(t *testing.T) {
+	resource := stackPublicResource{
+		ID:        "web",
+		Service:   "web",
+		Name:      "Site",
+		Subdomain: "site",
+		Port:      80,
+		Protocol:  "http",
+		SSO:       true,
+		Healthcheck: stackResourceHealthcheck{
+			Enabled: true,
+			Path:    "/health",
+		},
+	}
+	services := []composeServiceSummary{
+		{Name: "web", ContainerPorts: []int{80}, PublishesPorts: true},
+		{Name: "worker"},
+	}
+	state := ProfileState{
+		ActiveRunID:           "run-1",
+		StackRepositoryCommit: "abc123",
+		Runs: map[string]SetupRun{
+			"run-1": {
+				ID:     "run-1",
+				Status: runStatusRunning,
+				Stages: map[string]SetupStageStatus{
+					"bootstrap": {Status: stageStatusComplete},
+					"harden":    {Status: stageStatusRunning, LastError: "waiting"},
+					"proxy":     {Status: stageStatusComplete},
+				},
+			},
+		},
+	}
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID:                   setupTestProfileID,
+			Name:                 "production",
+			IP:                   setupTestHost,
+			InitialSSHUser:       "root",
+			AdminUser:            "servestead",
+			PrivateKeyPath:       setupTestPrivateKey,
+			BaseDomain:           setupTestDomain,
+			LetsEncryptEmail:     setupTestEmail,
+			PangolinAdminEmail:   setupTestEmail,
+			ConfigRepositoryPath: filepath.Join(t.TempDir(), "config"),
+			Cloud: &ProfileCloud{
+				Provider:     digitalOceanProviderName,
+				ResourceID:   "do-1",
+				Name:         "production",
+				Region:       "nyc3",
+				Size:         "s-1vcpu-1gb",
+				Image:        "ubuntu-24-04-x64",
+				PriceMonthly: 6,
+			},
+		},
+		State: state,
+		Secrets: ProfileSecrets{
+			PangolinSetupToken:    "setup-token",
+			PangolinAdminPassword: "admin-password",
+			StackEnvironments:     map[string]string{"site": setupTestAPIKeyEnvironment},
+		},
+	}})
+	model.selectedIndex = 0
+	model.setInputsFromChoice(false)
+	model.pangolinStatus = pangolinRegistrationComplete
+	model.showPangolinAccess = true
+	model.stacks = []editableStack{{
+		Name:     "site",
+		Compose:  testApplicationCompose,
+		Services: services,
+		Metadata: stackMetadata{Version: 1, PublicResources: []stackPublicResource{resource}},
+	}}
+	model.stackResources = []stackPublicResource{resource}
+	model.stackServices = services
+	model.stackInputs = stackEditorInputs(stackAddOptions{Name: "site"})
+	model.stackOriginalName = "site"
+	model.stackResourceInputs = stackResourceInputs(resource)
+	model.stackResourceIndex = 0
+	model.stackEnvironmentKeys = []string{"API_KEY"}
+	model.stackEnvironmentOptions = []stackEnvironmentOption{
+		{kind: "none", label: "No runtime environment"},
+		{kind: "manual", label: "Type a path", detail: "enter manually"},
+	}
+	model.stackTable = newStackTable(model.stacks, setupTestDomain, &state)
+	model.stackServiceTable = newStackServiceTable(services, []stackPublicResource{resource})
+	model.stackResourceTable = newStackResourceTable([]stackPublicResource{resource})
+	model.stackComposePath = filepath.Join(t.TempDir(), setupTestComposeFilename)
+	model.stackDiffViewport.SetContent("diff --git a/stacks/site/compose.yaml b/stacks/site/compose.yaml")
+	model.stackCommitInput.SetValue("Update site")
+	model.cloudAction = "destroy"
+	model.cloudTokenInput.SetValue("token")
+	model.cloudConfirmInput.SetValue("destroy do-1")
+	model.repositoryMode = "github"
+	model.repositoryInputs[1].SetValue("https://github.com/enddzone/servestead-config.git")
+	model.screen = profileSetupScreenReview
+	model.refreshPlanPreview()
+
+	cases := []struct {
+		screen profileSetupScreen
+		want   string
+	}{
+		{profileSetupScreenPicker, "Servestead profiles"},
+		{profileSetupScreenDashboard, "Dashboard for production"},
+		{profileSetupScreenIntake, "Upfront setup intake"},
+		{profileSetupScreenAdvanced, "Advanced values"},
+		{profileSetupScreenRepository, "Observability configuration repository"},
+		{profileSetupScreenRepositoryDetails, "Clone a GitHub repository"},
+		{profileSetupScreenStacks, "Standalone stacks"},
+		{profileSetupScreenStackCompose, "Add application stack"},
+		{profileSetupScreenStackServices, "Choose public services"},
+		{profileSetupScreenStackEditor, "Edit stack"},
+		{profileSetupScreenStackResourceEditor, "Edit public resource"},
+		{profileSetupScreenStackEnvironment, "Runtime environment"},
+		{profileSetupScreenStackReview, "Review application stack"},
+		{profileSetupScreenStackDeleteConfirm, "Remove stack site"},
+		{profileSetupScreenStackDiff, "diff --git"},
+		{profileSetupScreenStackCommit, "Commit staged stack changes"},
+		{profileSetupScreenCloud, "DigitalOcean Droplet actions"},
+		{profileSetupScreenCloudConfirm, "Confirm DigitalOcean destroy"},
+		{profileSetupScreenCloudRunning, "Running DigitalOcean destroy action"},
+		{profileSetupScreenReview, "Review full setup plan"},
+		{profileSetupScreenDeleteConfirm, "Delete saved profile"},
+	}
+	for _, tc := range cases {
+		model.screen = tc.screen
+		if view := model.View(); !strings.Contains(view, tc.want) {
+			t.Fatalf("screen %d missing %q:\n%s", tc.screen, tc.want, view)
+		}
+	}
+
+	model.screen = profileSetupScreenStackCompose
+	model.stackComposeManual = true
+	if view := model.View(); !strings.Contains(view, "Docker Compose file") {
+		t.Fatalf("manual stack compose view missing input:\n%s", view)
+	}
+	for _, mode := range []stackEnvironmentMode{stackEnvironmentChoose, stackEnvironmentBrowse, stackEnvironmentManual} {
+		model.screen = profileSetupScreenStackEnvironment
+		model.stackEnvironmentMode = mode
+		if view := model.View(); !strings.Contains(view, "Runtime environment") {
+			t.Fatalf("environment mode %d did not render:\n%s", mode, view)
+		}
+	}
+}
+
+func TestStackDeleteRemovesSelectedStackAndEnvironmentSecret(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init")
+	stackDirectory := filepath.Join(repository, "stacks", "site")
+	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackMetadataFilename), []byte("version: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repository, "add", ".")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Add site")
+
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID:                   setupTestProfileID,
+			IP:                   setupTestHost,
+			BaseDomain:           setupTestDomain,
+			ConfigRepositoryPath: repository,
+		},
+		State:   ProfileState{Runs: map[string]SetupRun{}},
+		Secrets: ProfileSecrets{StackEnvironments: map[string]string{"site": setupTestAPIKeyEnvironment}},
+	}})
+	if err := model.deleteStackEnvironmentSecret("unused"); err != nil {
+		t.Fatal(err)
+	}
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenStacks
+	model.stacks = []editableStack{{Name: "site"}}
+	model.stackTable = newStackTable(model.stacks, setupTestDomain, nil)
+
+	updated, command := model.confirmSelectedStackDelete()
+	model = updated.(profileSetupModel)
+	if command != nil || model.screen != profileSetupScreenStackDeleteConfirm || model.err != "" {
+		t.Fatalf("selected stack did not open delete confirmation: %+v", model)
+	}
+
+	updated, command = model.deleteSelectedStack()
+	model = updated.(profileSetupModel)
+	if command != nil || model.screen != profileSetupScreenStacks || model.err != "" {
+		t.Fatalf("selected stack was not deleted cleanly: %+v", model)
+	}
+	if _, ok := model.profiles[0].Secrets.StackEnvironments["site"]; ok {
+		t.Fatal("deleted stack runtime environment secret was retained")
+	}
+	if _, err := os.Stat(stackDirectory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stack directory still exists or stat failed unexpectedly: %v", err)
+	}
+}
+
+func TestProfileStackManagerReviewsStagesAndCommitsCleanStack(t *testing.T) {
+	model := newCleanStackManagerModel(t)
+	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
+	withDiff := updated.(profileSetupModel)
+	if command != nil || withDiff.screen != profileSetupScreenStackDiff || withDiff.err != "" {
+		t.Fatalf("diff action failed: %+v", withDiff)
+	}
+
+	updated, _ = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	staged := updated.(profileSetupModel)
+	if staged.err != "" || !strings.Contains(staged.stackNotice, "staged") {
+		t.Fatalf("stage action failed: %+v", staged)
+	}
+
+	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	committing := updated.(profileSetupModel)
+	if command != nil || committing.screen != profileSetupScreenStackCommit || committing.err != "" {
+		t.Fatalf("commit action failed: %+v", committing)
+	}
+}
+
+func TestProfileStackManagerRunsSyncsAndReportsPushFailure(t *testing.T) {
+	model := newCleanStackManagerModel(t)
+	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	running := updated.(profileSetupModel)
+	if command == nil || !running.done || running.singleStage != setupStageStackPrefix+"site" {
+		t.Fatalf("stack run action failed: %+v", running)
+	}
+
+	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	syncing := updated.(profileSetupModel)
+	if command == nil || !syncing.done || syncing.singleStage != "stacks" {
+		t.Fatalf("stack sync action failed: %+v", syncing)
+	}
+
+	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	pushing := updated.(profileSetupModel)
+	if command != nil || pushing.err == "" {
+		t.Fatalf("push action without origin should report an error: %+v", pushing)
+	}
+}
+
+func newCleanStackManagerModel(t *testing.T) profileSetupModel {
+	t.Helper()
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init")
+	stackDirectory := filepath.Join(repository, "stacks", "site")
+	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackMetadataFilename), []byte("version: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repository, "add", ".")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Add site")
+
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID:                   setupTestProfileID,
+			IP:                   setupTestHost,
+			BaseDomain:           setupTestDomain,
+			ConfigRepositoryPath: repository,
+		},
+		State: ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenStacks
+	model.refreshStacks()
+	if model.err != "" || len(model.stacks) != 1 {
+		t.Fatalf("stack manager did not load clean stack: stacks=%+v err=%s", model.stacks, model.err)
+	}
+	model.stackGitStatus = "clean"
+	model.stackNeedsPush = false
+	return model
+}
+
+func TestProfileStackEnvironmentChoiceNavigation(t *testing.T) {
+	model := newStackEnvironmentOptionModel(t)
+	updated, _ := model.updateStackEnvironmentChoice(tea.WindowSizeMsg{Width: 80, Height: 24})
+	if result := updated.(profileSetupModel); result.stackEnvironmentCursor != 0 {
+		t.Fatalf("non-key message changed cursor: %+v", result)
+	}
+	updated, _ = model.updateStackEnvironmentChoice(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if result := updated.(profileSetupModel); result.stackEnvironmentCursor != 1 {
+		t.Fatalf("down key did not move cursor: %+v", result)
+	}
+	updated, _ = updated.(profileSetupModel).updateStackEnvironmentChoice(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	if result := updated.(profileSetupModel); result.stackEnvironmentCursor != 0 {
+		t.Fatalf("up key did not move cursor: %+v", result)
+	}
+}
+
+func TestProfileStackEnvironmentSelectsKeepNoneAndFile(t *testing.T) {
+	model := newStackEnvironmentOptionModel(t)
+	invalid := model
+	invalid.stackEnvironmentCursor = -1
+	updated, _ := invalid.selectStackEnvironmentOption()
+	if result := updated.(profileSetupModel); !strings.Contains(result.err, "no runtime environment option") {
+		t.Fatalf("invalid cursor returned unexpected result: %+v", result)
+	}
+
+	updated, _ = model.selectStackEnvironmentOption()
+	kept := updated.(profileSetupModel)
+	if kept.screen != profileSetupScreenStackEditor || kept.stackEnvironment != "OLD_KEY=old\n" || kept.stackEnvironmentDirty {
+		t.Fatalf("keep option returned unexpected result: %+v", kept)
+	}
+
+	none := model
+	none.stackEnvironmentCursor = 1
+	updated, _ = none.selectStackEnvironmentOption()
+	cleared := updated.(profileSetupModel)
+	if cleared.screen != profileSetupScreenStackEditor || cleared.stackEnvironment != "" || !cleared.stackEnvironmentDirty {
+		t.Fatalf("none option returned unexpected result: %+v", cleared)
+	}
+
+	fileOption := model
+	fileOption.stackEnvironmentCursor = 2
+	updated, _ = fileOption.selectStackEnvironmentOption()
+	loaded := updated.(profileSetupModel)
+	if loaded.stackEnvironment != setupTestAPIKeyEnvironment || len(loaded.stackEnvironmentKeys) != 1 || loaded.stackEnvironmentKeys[0] != "API_KEY" {
+		t.Fatalf("file option returned unexpected result: %+v", loaded)
+	}
+}
+
+func TestProfileStackEnvironmentBrowseAndManualFallback(t *testing.T) {
+	model := newStackEnvironmentOptionModel(t)
+	model.stackEnvironmentCursor = 3
+	updated, command := model.selectStackEnvironmentOption()
+	browsing := updated.(profileSetupModel)
+	if command == nil || browsing.stackEnvironmentMode != stackEnvironmentBrowse || browsing.err != "" {
+		t.Fatalf("browse option returned unexpected result: %+v", browsing)
+	}
+
+	updated, command = browsing.updateStackEnvironmentBrowse(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	manual := updated.(profileSetupModel)
+	if command == nil || manual.stackEnvironmentMode != stackEnvironmentManual || manual.err != "" {
+		t.Fatalf("manual environment fallback failed: %+v", manual)
+	}
+	updated, _ = manual.updateStackEnvironmentManual(tea.KeyMsg{Type: tea.KeyEnter})
+	if result := updated.(profileSetupModel); !strings.Contains(result.err, "path is required") {
+		t.Fatalf("blank manual path returned unexpected result: %+v", result)
+	}
+}
+
+func newStackEnvironmentOptionModel(t *testing.T) profileSetupModel {
+	t.Helper()
+	directory := t.TempDir()
+	composePath := filepath.Join(directory, setupTestComposeFilename)
+	if err := os.WriteFile(composePath, []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	environmentPath := filepath.Join(directory, ".env")
+	if err := os.WriteFile(environmentPath, []byte(setupTestAPIKeyEnvironment), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel(nil)
+	model.stackInputs = stackEditorInputs(stackAddOptions{Name: "site"})
+	model.stackComposePath = composePath
+	model.stackEnvironment = "OLD_KEY=old\n"
+	model.stackEnvironmentOriginal = model.stackEnvironment
+	model.stackEnvironmentKeys = []string{"OLD_KEY"}
+	model.openStackEnvironment(profileSetupScreenStackEditor)
+	if len(model.stackEnvironmentOptions) != 4 {
+		t.Fatalf("unexpected environment options: %+v", model.stackEnvironmentOptions)
+	}
+	return model
+}
+
 func TestProfileSetupModelCollectsNewProfileInputs(t *testing.T) {
 	model := newProfileSetupModel(nil)
 	model.setInputsFromOptions(setupCLIOptions{})
-	values := []string{"203.0.113.10", "/tmp/aegis-key", "example.com", "admin@example.com"}
+	values := []string{setupTestHost, setupTestPrivateKey, setupTestDomain, setupTestEmail}
 	for index, value := range values {
 		model.inputs[index].SetValue(value)
 	}
@@ -1075,7 +1728,7 @@ func TestProfileSetupModelCollectsNewProfileInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.ProfileID != "" || options.IP != "203.0.113.10" || options.Name != "production" {
+	if options.ProfileID != "" || options.IP != setupTestHost || options.Name != "production" {
 		t.Fatalf("unexpected new profile options: %+v", options)
 	}
 	if options.InitialSSHUser != "ubuntu" || options.AdminUser != "servestead" {
@@ -1117,13 +1770,13 @@ func TestProfileSetupRepositoryFlowDefaultsToCreateBeforeSSH(t *testing.T) {
 func TestProfileSetupPlatformReviewExplainsStageAndRepository(t *testing.T) {
 	model := newProfileSetupModel([]profileChoice{{
 		Profile: Profile{
-			ID:               "profile-1",
+			ID:               setupTestProfileID,
 			Name:             "production",
-			IP:               "203.0.113.10",
+			IP:               setupTestHost,
 			AdminUser:        "servestead",
-			PrivateKeyPath:   "/tmp/aegis-key",
-			BaseDomain:       "example.com",
-			LetsEncryptEmail: "admin@example.com",
+			PrivateKeyPath:   setupTestPrivateKey,
+			BaseDomain:       setupTestDomain,
+			LetsEncryptEmail: setupTestEmail,
 		},
 		State: ProfileState{Runs: map[string]SetupRun{}},
 	}})
@@ -1165,7 +1818,7 @@ func TestProfileSetupRepositoryFlowUsesExistingCheckout(t *testing.T) {
 	if result.screen != profileSetupScreenRepositoryDetails || result.repositoryMode != "existing" {
 		t.Fatalf("existing choice did not request details: %+v", result)
 	}
-	for index, value := range []string{"203.0.113.10", "/tmp/aegis-key", "example.com", "admin@example.com"} {
+	for index, value := range []string{setupTestHost, setupTestPrivateKey, setupTestDomain, setupTestEmail} {
 		result.inputs[index].SetValue(value)
 	}
 	result.repositoryInputs[0].SetValue(repository)
@@ -1197,14 +1850,14 @@ func TestProfileSetupRepositoryFlowRejectsMissingExistingCheckout(t *testing.T) 
 func TestProfileSetupModelFreshUsesAdminAsInitialUser(t *testing.T) {
 	choice := profileChoice{
 		Profile: Profile{
-			ID:               "profile-1",
+			ID:               setupTestProfileID,
 			Name:             "production",
-			IP:               "203.0.113.10",
+			IP:               setupTestHost,
 			InitialSSHUser:   "root",
 			AdminUser:        "servestead",
-			PrivateKeyPath:   "/tmp/aegis-key",
-			BaseDomain:       "example.com",
-			LetsEncryptEmail: "admin@example.com",
+			PrivateKeyPath:   setupTestPrivateKey,
+			BaseDomain:       setupTestDomain,
+			LetsEncryptEmail: setupTestEmail,
 		},
 		State: ProfileState{
 			ActiveRunID: "run-1",
@@ -1229,7 +1882,7 @@ func TestProfileSetupModelFreshUsesAdminAsInitialUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !options.Fresh || options.ProfileID != "profile-1" {
+	if !options.Fresh || options.ProfileID != setupTestProfileID {
 		t.Fatalf("fresh setup should keep source profile id for seeding: %+v", options)
 	}
 	if options.InitialSSHUser != "servestead" || options.AdminUser != "servestead" {
@@ -1240,8 +1893,8 @@ func TestProfileSetupModelFreshUsesAdminAsInitialUser(t *testing.T) {
 func TestProfileSetupModelDeleteConfirmation(t *testing.T) {
 	choice := profileChoice{
 		Profile: Profile{
-			ID: "profile-1",
-			IP: "203.0.113.10",
+			ID: setupTestProfileID,
+			IP: setupTestHost,
 		},
 		State: ProfileState{Runs: map[string]SetupRun{}},
 	}
@@ -1256,7 +1909,7 @@ func TestProfileSetupModelDeleteConfirmation(t *testing.T) {
 	}
 	updatedModel, _ = result.updateProfileDeleteConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 	result = updatedModel.(profileSetupModel)
-	if result.deleteProfileID != "profile-1" {
+	if result.deleteProfileID != setupTestProfileID {
 		t.Fatalf("delete confirmation did not capture profile id: %+v", result)
 	}
 }
@@ -1266,7 +1919,7 @@ func TestPrepareProfileSetupLoadsSelectedProfileID(t *testing.T) {
 	first, err := store.Create(Profile{
 		ID:               "first-profile",
 		Name:             "first",
-		IP:               "203.0.113.10",
+		IP:               setupTestHost,
 		PrivateKeyPath:   "/tmp/first-key",
 		BaseDomain:       "first.example.com",
 		LetsEncryptEmail: "first@example.com",
@@ -1277,7 +1930,7 @@ func TestPrepareProfileSetupLoadsSelectedProfileID(t *testing.T) {
 	second, err := store.Create(Profile{
 		ID:               "second-profile",
 		Name:             "second",
-		IP:               "203.0.113.10",
+		IP:               setupTestHost,
 		PrivateKeyPath:   "/tmp/second-key",
 		BaseDomain:       "second.example.com",
 		LetsEncryptEmail: "second@example.com",
@@ -1305,12 +1958,12 @@ func TestPrepareFreshProfileSeedsBootstrapFromExistingProfile(t *testing.T) {
 	source, err := store.Create(Profile{
 		ID:               "source-profile",
 		Name:             "source",
-		IP:               "203.0.113.10",
+		IP:               setupTestHost,
 		InitialSSHUser:   "root",
 		AdminUser:        "servestead",
-		PrivateKeyPath:   "/tmp/aegis-key",
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		PrivateKeyPath:   setupTestPrivateKey,
+		BaseDomain:       setupTestDomain,
+		LetsEncryptEmail: setupTestEmail,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1332,13 +1985,13 @@ func TestPrepareFreshProfileSeedsBootstrapFromExistingProfile(t *testing.T) {
 	}
 
 	profile, state, config, err := prepareProfileSetup(setupCLIOptions{
-		IP:               "203.0.113.10",
+		IP:               setupTestHost,
 		ProfileID:        source.ID,
 		Fresh:            true,
 		Name:             "fresh",
-		PrivateKeyPath:   "/tmp/aegis-key",
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		PrivateKeyPath:   setupTestPrivateKey,
+		BaseDomain:       setupTestDomain,
+		LetsEncryptEmail: setupTestEmail,
 	}, store, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -1359,25 +2012,25 @@ func TestPrepareFreshProfileKeepsInitialUserWhenBootstrapNotComplete(t *testing.
 	source, err := store.Create(Profile{
 		ID:               "source-profile",
 		Name:             "source",
-		IP:               "203.0.113.10",
+		IP:               setupTestHost,
 		InitialSSHUser:   "root",
 		AdminUser:        "servestead",
-		PrivateKeyPath:   "/tmp/aegis-key",
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		PrivateKeyPath:   setupTestPrivateKey,
+		BaseDomain:       setupTestDomain,
+		LetsEncryptEmail: setupTestEmail,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	_, state, config, err := prepareProfileSetup(setupCLIOptions{
-		IP:               "203.0.113.10",
+		IP:               setupTestHost,
 		ProfileID:        source.ID,
 		Fresh:            true,
 		Name:             "fresh",
-		PrivateKeyPath:   "/tmp/aegis-key",
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		PrivateKeyPath:   setupTestPrivateKey,
+		BaseDomain:       setupTestDomain,
+		LetsEncryptEmail: setupTestEmail,
 	}, store, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -1391,29 +2044,44 @@ func TestPrepareFreshProfileKeepsInitialUserWhenBootstrapNotComplete(t *testing.
 }
 
 func TestRunProfileSetupPlanExecutesFullRunAndPersistsState(t *testing.T) {
+	clients, restore := replaceSetupPlanRemoteClients()
+	defer restore()
+	privateKey := writeSetupPlanKeypair(t)
+	store := newFileProfileStore(t.TempDir())
+	profile, state, config := prepareFullRunTestProfile(t, store, privateKey)
+
+	var stdout, stderr bytes.Buffer
+	if err := runProfileSetupPlan(context.Background(), store, profile, state, config, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	assertSetupPlanCompleted(t, store, profile.ID, clients)
+	if strings.Contains(stdout.String(), config.ServerSecret) {
+		t.Fatalf("stdout exposed generated server secret")
+	}
+
+	commandCounts := setupPlanCommandCounts(clients)
+	profile, state, config = prepareFullRunTestProfile(t, store, privateKey)
+	stdout.Reset()
+	stderr.Reset()
+	if err := runProfileSetupPlan(context.Background(), store, profile, state, config, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	assertSetupPlanSkippedCompletedStages(t, stdout.String(), clients, commandCounts)
+}
+
+func replaceSetupPlanRemoteClients() ([]*recordingRemoteClient, func()) {
 	originalBootstrap := newBootstrapRemoteClient
 	originalHardening := newHardeningRemoteClient
 	originalNetwork := newNetworkRemoteClient
 	originalProxy := newProxyRemoteClient
 	originalObservability := newObservabilityRemoteClient
-	defer func() {
+	restore := func() {
 		newBootstrapRemoteClient = originalBootstrap
 		newHardeningRemoteClient = originalHardening
 		newNetworkRemoteClient = originalNetwork
 		newProxyRemoteClient = originalProxy
 		newObservabilityRemoteClient = originalObservability
-	}()
-
-	directory := t.TempDir()
-	privateKey := filepath.Join(directory, "id_ed25519")
-	publicKey := filepath.Join(directory, "id_ed25519.pub")
-	if err := os.WriteFile(privateKey, []byte("private"), 0600); err != nil {
-		t.Fatal(err)
 	}
-	if err := os.WriteFile(publicKey, []byte("ssh-ed25519 AAAATEST user@example\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
 	clients := []*recordingRemoteClient{
 		{}, {}, {}, {}, {},
 	}
@@ -1432,28 +2100,45 @@ func TestRunProfileSetupPlanExecutesFullRunAndPersistsState(t *testing.T) {
 	newObservabilityRemoteClient = func(_ context.Context, _ observabilityConfig, _, _ io.Writer) (remoteClient, error) {
 		return clients[4], nil
 	}
+	return clients, restore
+}
 
-	store := newFileProfileStore(t.TempDir())
+func writeSetupPlanKeypair(t *testing.T) string {
+	t.Helper()
+	directory := t.TempDir()
+	privateKey := filepath.Join(directory, "id_ed25519")
+	publicKey := filepath.Join(directory, "id_ed25519.pub")
+	if err := os.WriteFile(privateKey, []byte("private"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(publicKey, []byte("ssh-ed25519 AAAATEST user@example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return privateKey
+}
+
+func prepareFullRunTestProfile(t *testing.T, store ProfileStore, privateKey string) (Profile, ProfileState, setupConfig) {
+	t.Helper()
 	profile, state, config, err := prepareProfileSetup(setupCLIOptions{
-		IP:               "203.0.113.10",
+		IP:               setupTestHost,
 		PrivateKeyPath:   privateKey,
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		BaseDomain:       setupTestDomain,
+		LetsEncryptEmail: setupTestEmail,
 	}, store, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return profile, state, config
+}
 
-	var stdout, stderr bytes.Buffer
-	if err := runProfileSetupPlan(context.Background(), store, profile, state, config, &stdout, &stderr); err != nil {
-		t.Fatal(err)
-	}
+func assertSetupPlanCompleted(t *testing.T, store ProfileStore, profileID string, clients []*recordingRemoteClient) {
+	t.Helper()
 	for index, client := range clients {
 		if len(client.commands) == 0 {
 			t.Fatalf("stage %d did not run", index)
 		}
 	}
-	_, loadedState, err := store.Load(profile.ID)
+	_, loadedState, err := store.Load(profileID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1466,28 +2151,18 @@ func TestRunProfileSetupPlanExecutesFullRunAndPersistsState(t *testing.T) {
 			t.Fatalf("stage %s not complete: %+v", stage, run.Stages[stage])
 		}
 	}
-	if strings.Contains(stdout.String(), config.ServerSecret) {
-		t.Fatalf("stdout exposed generated server secret")
-	}
+}
 
+func setupPlanCommandCounts(clients []*recordingRemoteClient) []int {
 	commandCounts := make([]int, len(clients))
 	for index, client := range clients {
 		commandCounts[index] = len(client.commands)
 	}
-	profile, state, config, err = prepareProfileSetup(setupCLIOptions{
-		IP:               "203.0.113.10",
-		PrivateKeyPath:   privateKey,
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
-	}, store, io.Discard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout.Reset()
-	stderr.Reset()
-	if err := runProfileSetupPlan(context.Background(), store, profile, state, config, &stdout, &stderr); err != nil {
-		t.Fatal(err)
-	}
+	return commandCounts
+}
+
+func assertSetupPlanSkippedCompletedStages(t *testing.T, output string, clients []*recordingRemoteClient, commandCounts []int) {
+	t.Helper()
 	for index, client := range clients {
 		if len(client.commands) != commandCounts[index] {
 			t.Fatalf("stage %d reran on completed profile", index)
@@ -1500,30 +2175,32 @@ func TestRunProfileSetupPlanExecutesFullRunAndPersistsState(t *testing.T) {
 		"Step 4/5: deploy Pangolin and reverse proxy stack already complete; skipping.",
 		"Step 5/5: deploy observability stack already complete; skipping.",
 	} {
-		if !strings.Contains(stdout.String(), expected) {
-			t.Fatalf("second run output missing %q:\n%s", expected, stdout.String())
+		if !strings.Contains(output, expected) {
+			t.Fatalf("second run output missing %q:\n%s", expected, output)
 		}
 	}
 }
 
 func TestProfileRunModelRendersTaskProgressAndLogs(t *testing.T) {
 	model := newProfileRunModel(
-		Profile{Name: "production", IP: "203.0.113.10"},
+		Profile{Name: "production", IP: setupTestHost},
 		setupConfig{
-			Host:               "203.0.113.10",
+			Host:               setupTestHost,
 			InitialSSHUser:     "root",
 			AdminUser:          "servestead",
-			PrivateKeyPath:     "/tmp/aegis-key",
+			PrivateKeyPath:     setupTestPrivateKey,
 			AdminPublicKeyPath: "/tmp/aegis-key.pub",
-			BaseDomain:         "example.com",
-			LetsEncryptEmail:   "admin@example.com",
+			BaseDomain:         setupTestDomain,
+			LetsEncryptEmail:   setupTestEmail,
 			ServerSecret:       "secret",
 		},
 		"run-1",
 		map[string]bool{"bootstrap": true},
 		"",
 		make(chan tea.Msg),
-		func() {},
+		func() {
+			// The test only needs a non-nil cancel callback.
+		},
 	)
 	model.applyTaskEvent(TaskEvent{Type: TaskStarted, RunID: "run-1", Stage: "harden", TaskName: "Validate sysctl keys"})
 	model.applyTaskEvent(TaskEvent{Type: TaskLogLine, RunID: "run-1", Stage: "harden", Stream: "stdout", Line: "remote output"})
@@ -1550,8 +2227,8 @@ func TestProfileRunModelRendersTaskProgressAndLogs(t *testing.T) {
 func TestProfileRunFailureRemainsInTUIOnEscape(t *testing.T) {
 	runErr := errors.New("uncommitted changes under stacks/ block deployment")
 	model := newProfileRunFailureModel(
-		Profile{Name: "production", IP: "203.0.113.10"},
-		setupConfig{Host: "203.0.113.10", ConfigRepositoryPath: "/tmp/servestead-config"},
+		Profile{Name: "production", IP: setupTestHost},
+		setupConfig{Host: setupTestHost, ConfigRepositoryPath: "/tmp/servestead-config"},
 		nil,
 		"stacks",
 		"Preparing configuration repository: /tmp/servestead-config\n",
@@ -1596,13 +2273,15 @@ func TestProfileRunFailureRemainsInTUIOnEscape(t *testing.T) {
 
 func TestProfileRunCompletedEscapeReturnsWhenParentSetupExists(t *testing.T) {
 	model := newProfileRunModel(
-		Profile{Name: "production", IP: "203.0.113.10"},
-		setupConfig{Host: "203.0.113.10"},
+		Profile{Name: "production", IP: setupTestHost},
+		setupConfig{Host: setupTestHost},
 		"run-1",
 		nil,
 		"stacks",
 		make(chan tea.Msg),
-		func() {},
+		func() {
+			// The completed model never invokes cancellation.
+		},
 	)
 	model.done = true
 	model.allowReturn = true
@@ -1614,14 +2293,153 @@ func TestProfileRunCompletedEscapeReturnsWhenParentSetupExists(t *testing.T) {
 	}
 }
 
+func TestProfileRunModelUpdatesAndFinishMessages(t *testing.T) {
+	cancelled := false
+	messages := make(chan tea.Msg, 2)
+	model := newProfileRunModel(
+		Profile{Name: "production", IP: setupTestHost},
+		setupConfig{Host: setupTestHost},
+		"run-1",
+		nil,
+		"stacks",
+		messages,
+		func() { cancelled = true },
+	)
+
+	updated, command := model.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
+	model = updated.(profileRunModel)
+	if command != nil || model.width != 120 || model.logViewport.Height == 0 {
+		t.Fatalf("window resize did not update run model: %+v", model)
+	}
+
+	updated, command = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	model = updated.(profileRunModel)
+	if command == nil || !cancelled || !model.cancelled {
+		t.Fatalf("q did not cancel running setup: cancelled=%v model=%+v", cancelled, model)
+	}
+
+	model.cancelled = false
+	updated, _ = model.Update(spinner.TickMsg{})
+	model = updated.(profileRunModel)
+	updated, command = model.Update(profileRunFinishedMsg{})
+	model = updated.(profileRunModel)
+	if command != nil || !model.done || model.err != nil || !strings.Contains(strings.Join(model.logLines, "\n"), "Run complete.") {
+		t.Fatalf("successful finish was not recorded: %+v", model)
+	}
+
+	runErr := errors.New("remote failed")
+	model.done = false
+	updated, command = model.Update(profileRunFinishedMsg{err: runErr})
+	model = updated.(profileRunModel)
+	if command != nil || !model.done || !errors.Is(model.err, runErr) || !strings.Contains(strings.Join(model.logLines, "\n"), runErr.Error()) {
+		t.Fatalf("failed finish was not recorded: %+v", model)
+	}
+
+	messages <- profileRunFinishedMsg{err: runErr}
+	if waitForProfileRunMessage(messages)() == nil {
+		t.Fatal("waitForProfileRunMessage did not receive queued message")
+	}
+	close(messages)
+	if msg := waitForProfileRunMessage(messages)(); msg != nil {
+		t.Fatalf("closed message channel returned unexpected message: %#v", msg)
+	}
+}
+
+func TestProfileRunCommandFinishUpdatesState(t *testing.T) {
+	runErr := errors.New("remote failed")
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{IP: setupTestHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{Runs: map[string]SetupRun{"run-2": newSetupRunForStage("run-2", "stacks", nil)}}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	reporter := &profileRunReporter{store: store, profile: profile, state: &state, runID: "run-2"}
+	finished := make(chan tea.Msg, 1)
+	profileCommand := profileRunCommand{
+		stageRun:        setupStageRun{config: setupConfig{ConfigRepositoryCommit: "abc123"}, runID: "run-2"},
+		stage:           "stacks",
+		profileReporter: reporter,
+		messages:        finished,
+	}
+	profileCommand.finishStage(nil)
+	if msg := (<-finished).(profileRunFinishedMsg); msg.err != nil {
+		t.Fatalf("successful stage finish sent error: %v", msg.err)
+	}
+	if state.StackRepositoryCommit != "abc123" || state.Runs["run-2"].Status != runStatusComplete {
+		t.Fatalf("stage finish did not update state: %+v", state)
+	}
+
+	state = ProfileState{Runs: map[string]SetupRun{"run-3": newSetupRun("run-3", nil)}}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	reporter = &profileRunReporter{store: store, profile: profile, state: &state, runID: "run-3"}
+	finished = make(chan tea.Msg, 1)
+	profileCommand = profileRunCommand{profileReporter: reporter, messages: finished}
+	profileCommand.finish(runErr)
+	if msg := (<-finished).(profileRunFinishedMsg); !errors.Is(msg.err, runErr) || state.Runs["run-3"].Status != runStatusFailed {
+		t.Fatalf("failed run finish did not propagate error/status: msg=%+v state=%+v", msg, state)
+	}
+}
+
+func TestConfiguredStackStageRunsTasks(t *testing.T) {
+	originalObservability := newObservabilityRemoteClient
+	defer func() { newObservabilityRemoteClient = originalObservability }()
+	client := &recordingRemoteClient{}
+	var captured observabilityConfig
+	newObservabilityRemoteClient = func(_ context.Context, config observabilityConfig, _, _ io.Writer) (remoteClient, error) {
+		captured = config
+		return client, nil
+	}
+
+	stack := configuredStack{
+		Name:     "site",
+		Compose:  testApplicationCompose,
+		Metadata: "version: 1\n",
+		Override: "services: {}\n",
+		Resources: []stackPublicResource{{
+			ID: "web", Service: "web", Name: "Web", Subdomain: "site", Port: 80, Protocol: "http",
+			Healthcheck: stackResourceHealthcheck{Enabled: true, Path: "/"},
+		}},
+	}
+	run := setupStageRun{
+		profile: Profile{IP: setupTestHost},
+		config: setupConfig{
+			Host: setupTestHost, AdminUser: "servestead", PrivateKeyPath: setupTestPrivateKey,
+			BaseDomain: setupTestDomain, PangolinAdminEmail: setupTestEmail, PangolinAdminPassword: setupTestNewPassword,
+			ConfigRepositoryCommit: "abc123", ConfigRepositoryBranch: "main", ConfigRepositoryOrigin: "https://github.com/example/config.git",
+			Stacks: []configuredStack{stack},
+		},
+		runID:    "run-1",
+		reporter: TaskReporterFunc(func(TaskEvent) {}),
+		stdout:   io.Discard,
+		stderr:   io.Discard,
+	}
+	if _, ok := configuredStackForStage(run.config.Stacks, "stack:site"); !ok {
+		t.Fatal("configured stack stage was not resolved")
+	}
+	if err := runSetupStage(context.Background(), run, "stack:site"); err != nil {
+		t.Fatal(err)
+	}
+	if captured.BaseDomain != setupTestDomain || captured.RepositoryCommit != "abc123" {
+		t.Fatalf("configured stack stage built unexpected observability config: %+v", captured)
+	}
+	if len(client.commands) == 0 || !strings.Contains(strings.Join(client.commands, "\n"), "servestead-site") {
+		t.Fatalf("configured stack stage did not run expected tasks: %#v", client.commands)
+	}
+}
+
 func TestProfileSetupModelSelectsSingleStageRun(t *testing.T) {
 	model := newProfileSetupModel([]profileChoice{{
 		Profile: Profile{
-			ID:             "profile-1",
+			ID:             setupTestProfileID,
 			Name:           "production",
-			IP:             "203.0.113.10",
+			IP:             setupTestHost,
 			AdminUser:      "servestead",
-			PrivateKeyPath: "/tmp/aegis-key",
+			PrivateKeyPath: setupTestPrivateKey,
 		},
 		State: ProfileState{
 			ActiveRunID: "run-1",
@@ -1654,7 +2472,7 @@ func TestProfileSetupModelSelectsSingleStageRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.ProfileID != "profile-1" || options.IP != "203.0.113.10" {
+	if options.ProfileID != setupTestProfileID || options.IP != setupTestHost {
 		t.Fatalf("unexpected profile options: %+v", options)
 	}
 }
@@ -1702,12 +2520,16 @@ func TestPlatformStageRunsNetworkProxyAndObservability(t *testing.T) {
 		return clients[2], nil
 	}
 	config := setupConfig{
-		Host: "203.0.113.10", AdminUser: "servestead", PrivateKeyPath: "/tmp/key",
-		BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com",
+		Host: setupTestHost, AdminUser: "servestead", PrivateKeyPath: "/tmp/key",
+		BaseDomain: setupTestDomain, LetsEncryptEmail: setupTestEmail,
 		ServerSecret: "secret", PangolinSetupToken: "00000000000000000000000000000000",
-		PangolinAdminEmail: "admin@example.com",
+		PangolinAdminEmail: setupTestEmail,
 	}
-	if err := runSetupStage(context.Background(), Profile{IP: config.Host}, config, "run-1", "platform", nil, io.Discard, io.Discard); err != nil {
+	stageRun := setupStageRun{
+		profile: Profile{IP: config.Host}, config: config, runID: "run-1",
+		stdout: io.Discard, stderr: io.Discard,
+	}
+	if err := runSetupStage(context.Background(), stageRun, "platform"); err != nil {
 		t.Fatal(err)
 	}
 	for index, client := range clients {
@@ -1725,10 +2547,14 @@ func TestStackRepositoryStageRunsWhenAllStacksWereDeleted(t *testing.T) {
 		return client, nil
 	}
 	config := setupConfig{
-		Host: "203.0.113.10", AdminUser: "servestead", PrivateKeyPath: "/tmp/key",
-		BaseDomain: "example.com", PangolinAdminEmail: "admin@example.com",
+		Host: setupTestHost, AdminUser: "servestead", PrivateKeyPath: "/tmp/key",
+		BaseDomain: setupTestDomain, PangolinAdminEmail: setupTestEmail,
 	}
-	if err := runSetupStage(context.Background(), Profile{IP: config.Host}, config, "run-1", "stacks", nil, io.Discard, io.Discard); err != nil {
+	stageRun := setupStageRun{
+		profile: Profile{IP: config.Host}, config: config, runID: "run-1",
+		stdout: io.Discard, stderr: io.Discard,
+	}
+	if err := runSetupStage(context.Background(), stageRun, "stacks"); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.commands) != 1 || !strings.Contains(client.commands[0], ".stack-*.deployment") {
@@ -1751,9 +2577,9 @@ func TestSuccessfulStackRepositorySyncRecordsCommit(t *testing.T) {
 	}
 	store := newFileProfileStore(filepath.Join(directory, "profiles"))
 	profile, err := store.Create(Profile{
-		IP: "203.0.113.10", AdminUser: "servestead", PrivateKeyPath: privateKey,
-		BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com",
-		PangolinAdminEmail:   "admin@example.com",
+		IP: setupTestHost, AdminUser: "servestead", PrivateKeyPath: privateKey,
+		BaseDomain: setupTestDomain, LetsEncryptEmail: setupTestEmail,
+		PangolinAdminEmail:   setupTestEmail,
 		ConfigRepositoryPath: filepath.Join(directory, "repository"),
 	})
 	if err != nil {
@@ -1763,7 +2589,10 @@ func TestSuccessfulStackRepositorySyncRecordsCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runProfileSetupStagePlan(context.Background(), store, profile, state, config, "stacks", io.Discard, io.Discard); err != nil {
+	if err := runProfileSetupStagePlan(context.Background(), profileSetupPlanRun{
+		store: store, profile: profile, state: state, config: config,
+		stdout: io.Discard, stderr: io.Discard,
+	}, "stacks"); err != nil {
 		t.Fatal(err)
 	}
 	_, state, err = store.Load(profile.ID)
@@ -1785,14 +2614,14 @@ func TestSuccessfulStackRepositorySyncRecordsCommit(t *testing.T) {
 func TestProfileSetupModelDashboardUsesVForReview(t *testing.T) {
 	model := newProfileSetupModel([]profileChoice{{
 		Profile: Profile{
-			ID:               "profile-1",
+			ID:               setupTestProfileID,
 			Name:             "production",
-			IP:               "203.0.113.10",
+			IP:               setupTestHost,
 			InitialSSHUser:   "root",
 			AdminUser:        "servestead",
-			PrivateKeyPath:   "/tmp/aegis-key",
-			BaseDomain:       "example.com",
-			LetsEncryptEmail: "admin@example.com",
+			PrivateKeyPath:   setupTestPrivateKey,
+			BaseDomain:       setupTestDomain,
+			LetsEncryptEmail: setupTestEmail,
 		},
 		State: ProfileState{Runs: map[string]SetupRun{}},
 	}})
@@ -1817,10 +2646,10 @@ func TestProfileSetupModelDashboardUsesVForReview(t *testing.T) {
 func TestProfileSetupModelEscapeBackAndQQuit(t *testing.T) {
 	model := newProfileSetupModel([]profileChoice{{
 		Profile: Profile{
-			ID:             "profile-1",
+			ID:             setupTestProfileID,
 			Name:           "production",
-			IP:             "203.0.113.10",
-			PrivateKeyPath: "/tmp/aegis-key",
+			IP:             setupTestHost,
+			PrivateKeyPath: setupTestPrivateKey,
 		},
 		State: ProfileState{Runs: map[string]SetupRun{}},
 	}})
@@ -1849,11 +2678,11 @@ func TestProfileSetupModelEscapeBackAndQQuit(t *testing.T) {
 func TestPrepareProfileStageSetupDoesNotRequireProxyFieldsForHarden(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
 	profile, err := store.Create(Profile{
-		ID:             "profile-1",
+		ID:             setupTestProfileID,
 		Name:           "production",
-		IP:             "203.0.113.10",
+		IP:             setupTestHost,
 		AdminUser:      "servestead",
-		PrivateKeyPath: "/tmp/aegis-key",
+		PrivateKeyPath: setupTestPrivateKey,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1876,13 +2705,13 @@ func TestPrepareProfileStageSetupGeneratesPlatformSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	profile, err := store.Create(Profile{
-		ID:               "profile-1",
+		ID:               setupTestProfileID,
 		Name:             "production",
-		IP:               "203.0.113.10",
+		IP:               setupTestHost,
 		AdminUser:        "servestead",
 		PrivateKeyPath:   privateKey,
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		BaseDomain:       setupTestDomain,
+		LetsEncryptEmail: setupTestEmail,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1895,7 +2724,7 @@ func TestPrepareProfileStageSetupGeneratesPlatformSecrets(t *testing.T) {
 	if config.Mode != setupModeProxy {
 		t.Fatalf("platform stage should use proxy-style preflight mode, got %v", config.Mode)
 	}
-	if config.ServerSecret == "" || config.PangolinSetupToken == "" || config.PangolinAdminEmail != "admin@example.com" {
+	if config.ServerSecret == "" || config.PangolinSetupToken == "" || config.PangolinAdminEmail != setupTestEmail {
 		t.Fatalf("platform stage did not hydrate generated secrets: %+v", config)
 	}
 	var output bytes.Buffer
@@ -1922,7 +2751,7 @@ func TestRunProfileSetupStagePlanRerunsCompletedHardenStage(t *testing.T) {
 	}
 	client := &recordingRemoteClient{}
 	newHardeningRemoteClient = func(_ context.Context, config hardeningConfig, _, _ io.Writer) (remoteClient, error) {
-		if config.Host != "203.0.113.10" || config.SSHUser != "servestead" || config.PrivateKeyPath != privateKey {
+		if config.Host != setupTestHost || config.SSHUser != "servestead" || config.PrivateKeyPath != privateKey {
 			t.Fatalf("unexpected hardening config: %+v", config)
 		}
 		return client, nil
@@ -1930,9 +2759,9 @@ func TestRunProfileSetupStagePlanRerunsCompletedHardenStage(t *testing.T) {
 
 	store := newFileProfileStore(t.TempDir())
 	profile, err := store.Create(Profile{
-		ID:             "profile-1",
+		ID:             setupTestProfileID,
 		Name:           "production",
-		IP:             "203.0.113.10",
+		IP:             setupTestHost,
 		AdminUser:      "servestead",
 		PrivateKeyPath: privateKey,
 	})
@@ -1960,7 +2789,10 @@ func TestRunProfileSetupStagePlanRerunsCompletedHardenStage(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if err := runProfileSetupStagePlan(context.Background(), store, profile, state, config, "harden", &stdout, &stderr); err != nil {
+	if err := runProfileSetupStagePlan(context.Background(), profileSetupPlanRun{
+		store: store, profile: profile, state: state, config: config,
+		stdout: &stdout, stderr: &stderr,
+	}, "harden"); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.commands) != len(hardeningTasks()) {

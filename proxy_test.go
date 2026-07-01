@@ -10,11 +10,20 @@ import (
 	"testing"
 )
 
+const (
+	proxyTestHost            = "203.0.113.10"
+	proxyTestDomain          = "example.com"
+	proxyTestAdminEmail      = "admin@example.com"
+	proxyTestSetupToken      = "0123456789abcdefghijklmnopqrstuv"
+	proxyTestUnexpectedError = "unexpected error: %v"
+	proxyTestHostRulePrefix  = "rule: \"Host(`pangolin."
+)
+
 func TestProxyCommandsDeployPhase4Stack(t *testing.T) {
 	config := proxyConfig{
 		SSHUser:          "servestead",
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		BaseDomain:       proxyTestDomain,
+		LetsEncryptEmail: proxyTestAdminEmail,
 		ServerSecret:     "secret password",
 	}
 	tasks := proxyTasks(config)
@@ -69,14 +78,14 @@ func TestProxyCommandsDeployPhase4Stack(t *testing.T) {
 
 func TestPangolinComposeFileContainsConfiguredServices(t *testing.T) {
 	compose := pangolinComposeFile(proxyConfig{
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		BaseDomain:       proxyTestDomain,
+		LetsEncryptEmail: proxyTestAdminEmail,
 		ServerSecret:     "secret password",
-		SetupToken:       "0123456789abcdefghijklmnopqrstuv",
+		SetupToken:       proxyTestSetupToken,
 	})
 	for _, expected := range []string{
 		"image: docker.io/fosrl/pangolin:1.19.4",
-		"PANGOLIN_SETUP_TOKEN: \"0123456789abcdefghijklmnopqrstuv\"",
+		"PANGOLIN_SETUP_TOKEN: \"" + proxyTestSetupToken + "\"",
 		"image: docker.io/fosrl/gerbil:1.4.2",
 		"image: docker.io/traefik:v3.6.4",
 		"image: docker.io/fosrl/newt:1.13.0",
@@ -113,12 +122,12 @@ func TestPangolinComposeFileContainsConfiguredServices(t *testing.T) {
 
 func TestTraefikConfigFilesContainPangolinRoutes(t *testing.T) {
 	staticConfig := traefikStaticConfigFile(proxyConfig{
-		LetsEncryptEmail: "admin@example.com",
+		LetsEncryptEmail: proxyTestAdminEmail,
 	})
 	for _, expected := range []string{
 		"endpoint: \"http://pangolin:3001/api/v1/traefik-config\"",
 		"filename: \"/etc/traefik/dynamic_config.yml\"",
-		"email: \"admin@example.com\"",
+		"email: \"" + proxyTestAdminEmail + "\"",
 		"storage: \"/letsencrypt/acme.json\"",
 		"moduleName: \"github.com/fosrl/badger\"",
 	} {
@@ -127,11 +136,11 @@ func TestTraefikConfigFilesContainPangolinRoutes(t *testing.T) {
 		}
 	}
 
-	dynamicConfig := traefikDynamicConfigFile(proxyConfig{BaseDomain: "example.com"})
+	dynamicConfig := traefikDynamicConfigFile(proxyConfig{BaseDomain: proxyTestDomain})
 	for _, expected := range []string{
-		"rule: \"Host(`pangolin.example.com`)\"",
-		"rule: \"Host(`pangolin.example.com`) && !PathPrefix(`/api/v1`)\"",
-		"rule: \"Host(`pangolin.example.com`) && PathPrefix(`/api/v1`)\"",
+		proxyTestHostRulePrefix + proxyTestDomain + "`)\"",
+		proxyTestHostRulePrefix + proxyTestDomain + "`) && !PathPrefix(`/api/v1`)\"",
+		proxyTestHostRulePrefix + proxyTestDomain + "`) && PathPrefix(`/api/v1`)\"",
 		"url: \"http://pangolin:3002\"",
 		"url: \"http://pangolin:3000\"",
 		"disableForwardAuth: true",
@@ -144,15 +153,15 @@ func TestTraefikConfigFilesContainPangolinRoutes(t *testing.T) {
 
 func TestPangolinConfigFileContainsDashboardSettings(t *testing.T) {
 	config := pangolinConfigFile(proxyConfig{
-		BaseDomain:   "example.com",
+		BaseDomain:   proxyTestDomain,
 		ServerSecret: "secret",
 	})
 	for _, expected := range []string{
-		"base_endpoint: 'pangolin.example.com'",
-		"dashboard_url: 'https://pangolin.example.com'",
-		"base_domain: 'example.com'",
+		"base_endpoint: 'pangolin." + proxyTestDomain + "'",
+		"dashboard_url: 'https://pangolin." + proxyTestDomain + "'",
+		"base_domain: '" + proxyTestDomain + "'",
 		"secret: 'secret'",
-		"- 'https://pangolin.example.com'",
+		"- 'https://pangolin." + proxyTestDomain + "'",
 		"disable_signup_without_invite: true",
 	} {
 		if !strings.Contains(config, expected) {
@@ -163,9 +172,9 @@ func TestPangolinConfigFileContainsDashboardSettings(t *testing.T) {
 
 func TestPangolinBootstrapUsesCSRFProtectedIdempotentAPI(t *testing.T) {
 	script := pangolinBootstrapCommand(proxyConfig{
-		AdminEmail:    "admin@example.com",
+		AdminEmail:    proxyTestAdminEmail,
 		AdminPassword: "Aa1!password",
-		SetupToken:    "0123456789abcdefghijklmnopqrstuv",
+		SetupToken:    proxyTestSetupToken,
 		NewtID:        "newtidentifier1",
 		NewtSecret:    "newt-secret",
 	})
@@ -188,8 +197,8 @@ func TestRunProxyStepsUsesPrivilegedCommands(t *testing.T) {
 	client := &recordingRemoteClient{}
 	config := proxyConfig{
 		SSHUser:          "servestead",
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		BaseDomain:       proxyTestDomain,
+		LetsEncryptEmail: proxyTestAdminEmail,
 		ServerSecret:     "secret",
 	}
 	if err := runProxySteps(context.Background(), client, config, nil); err != nil {
@@ -219,42 +228,47 @@ func TestRunProxyUsesRemoteClientAndPrintsDNSGuidance(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	err := runProxy(context.Background(), []string{
-		"--host", "203.0.113.10",
+		"--host", proxyTestHost,
 		"--private-key", privateKey,
-		"--domain", "example.com",
-		"--email", "admin@example.com",
+		"--domain", proxyTestDomain,
+		"--email", proxyTestAdminEmail,
 		"--server-secret", "secret",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
-		"proxy deployment complete: https://pangolin.example.com",
-		"Required DNS: A pangolin.example.com -> 203.0.113.10, A beszel.example.com -> 203.0.113.10, A dozzle.example.com -> 203.0.113.10, A dockhand.example.com -> 203.0.113.10",
-		"Pangolin administrator: admin@example.com",
+		"proxy deployment complete: https://pangolin." + proxyTestDomain,
+		"Required DNS: A pangolin." + proxyTestDomain + " -> " + proxyTestHost +
+			", A beszel." + proxyTestDomain + " -> " + proxyTestHost +
+			", A dozzle." + proxyTestDomain + " -> " + proxyTestHost +
+			", A dockhand." + proxyTestDomain + " -> " + proxyTestHost,
+		"Pangolin administrator: " + proxyTestAdminEmail,
 		"Pangolin password:",
 	} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("proxy output missing %q:\n%s", expected, stdout.String())
 		}
 	}
-	if len(client.commands) != len(proxyTasks(proxyConfig{SSHUser: "servestead", BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com", ServerSecret: "secret"})) {
+	if len(client.commands) != len(proxyTasks(proxyConfig{
+		SSHUser: "servestead", BaseDomain: proxyTestDomain, LetsEncryptEmail: proxyTestAdminEmail, ServerSecret: "secret",
+	})) {
 		t.Fatalf("unexpected command count: %d", len(client.commands))
 	}
 }
 
 func TestValidateProxyConfigRejectsInvalidSetupToken(t *testing.T) {
 	err := validateProxyConfig(proxyConfig{
-		Host:             "203.0.113.10",
+		Host:             proxyTestHost,
 		SSHUser:          "servestead",
 		PrivateKeyPath:   "/tmp/key",
-		BaseDomain:       "example.com",
-		LetsEncryptEmail: "admin@example.com",
+		BaseDomain:       proxyTestDomain,
+		LetsEncryptEmail: proxyTestAdminEmail,
 		ServerSecret:     "secret",
 		SetupToken:       "not-valid",
 	})
 	if err == nil || err.Error() != "Pangolin setup token must contain exactly 32 lowercase letters or digits" {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf(proxyTestUnexpectedError, err)
 	}
 }
 
@@ -262,20 +276,20 @@ func TestProxyRequiresAllDeploymentInputs(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := run(context.Background(), []string{"proxy"}, &stdout, &stderr, func(string) string { return "" })
 	if err == nil || err.Error() != "--host, --private-key, --domain, --email, and --server-secret are required" {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf(proxyTestUnexpectedError, err)
 	}
 }
 
 func TestValidateProxyConfigRejectsInvalidDomain(t *testing.T) {
 	err := validateProxyConfig(proxyConfig{
-		Host:             "203.0.113.10",
+		Host:             proxyTestHost,
 		SSHUser:          "servestead",
 		PrivateKeyPath:   "/tmp/key",
-		BaseDomain:       "https://example.com",
-		LetsEncryptEmail: "admin@example.com",
+		BaseDomain:       "https://" + proxyTestDomain,
+		LetsEncryptEmail: proxyTestAdminEmail,
 		ServerSecret:     "secret",
 	})
 	if err == nil || err.Error() != "--domain must be a valid base domain such as example.com" {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf(proxyTestUnexpectedError, err)
 	}
 }
