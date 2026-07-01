@@ -104,7 +104,7 @@ func hardeningTasks() []Task {
 }
 
 func configureSwapCommand() string {
-	return commandScript(mustReadResource(resources.HardeningConfigureSwapScript))
+	return bashCommandScript(mustReadResource(resources.HardeningConfigureSwapScript))
 }
 
 func systemUpgradeCommand() string {
@@ -120,7 +120,11 @@ func sshdHardeningConfig() string {
 }
 
 func supportedUbuntuCommand() string {
-	return commandScript(mustReadResource(resources.HardeningSupportedUbuntu))
+	return bashCommandScript(mustReadResource(resources.HardeningSupportedUbuntu))
+}
+
+func bashCommandScript(lines ...string) string {
+	return commandScript("bash -c " + shellQuote(commandScript(lines...)))
 }
 
 func validateSysctlKeysCommand() string {

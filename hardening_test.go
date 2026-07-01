@@ -26,6 +26,7 @@ func TestHardeningCommandsContainBaseline(t *testing.T) {
 		"Install CrowdSec and firewall bouncer",
 	})
 	for _, expected := range []string{
+		`bash -c 'set -e`,
 		`[[ "$ID" = "ubuntu" ]]`,
 		`dpkg --compare-versions "$VERSION_ID" ge 22.04`,
 		"sysctl -n 'net.ipv4.conf.all.rp_filter'",

@@ -1,11 +1,15 @@
 api='http://127.0.0.1:3000/api/v1'
 cookie_file="$(mktemp)"
-trap 'rm -f "$cookie_file"' EXIT
+specs_file="$(mktemp)"
+cat > "$specs_file" <<'SERVESTEAD_OBSERVABILITY_SPECS'
+{{ .Specs }}
+SERVESTEAD_OBSERVABILITY_SPECS
+trap 'rm -f "$cookie_file" "$specs_file"' EXIT
 {{ range .PangolinLoginCommands }}{{ . }}
 {{ end -}}
 for attempt in $(seq 1 30); do
   resources="$(curl -fsS -b "$cookie_file" "$api/org/servestead/resources?pageSize=100")"
-  if resource_ids="$(printf '%s' "$resources" | python3 -c {{ shellQuote .VerifyResources }} {{ shellQuote .Specs }})"; then
+  if resource_ids="$(printf '%s' "$resources" | python3 -c {{ shellQuote .VerifyResources }} "$specs_file")"; then
     healthchecks_enabled=1
     for resource_id in $resource_ids; do
       targets="$(curl -fsS -b "$cookie_file" "$api/resource/$resource_id/targets")"

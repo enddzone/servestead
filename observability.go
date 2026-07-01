@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -595,7 +596,7 @@ func stackResourceVerifyCommand(config observabilityConfig, stack configuredStac
 		jsonString(config.AdminEmail), jsonString(config.PangolinPassword))
 	verify := `import json,sys
 resources=json.load(sys.stdin)["data"]["resources"]
-specs=json.loads(sys.argv[1])
+specs=json.load(open(sys.argv[1], encoding="utf-8"))
 ok=True
 for spec in specs:
  matches=[r for r in resources if r.get("niceId")==spec["nice_id"] and r.get("fullDomain")==spec["domain"]]
@@ -749,7 +750,7 @@ func observabilityResourceReconcileCommand(config observabilityConfig, composeCo
 	specs := observabilityResourceSpecs(config.BaseDomain)
 	selectDeletes := `import json,sys
 data=json.load(sys.stdin)["data"]["resources"]
-specs=json.loads(sys.argv[1])
+specs=json.load(open(sys.argv[1], encoding="utf-8"))
 for spec in specs:
  matches=[r for r in data if r.get("name")==spec["name"] and r.get("fullDomain")==spec["domain"]]
  canonical=[r for r in matches if r.get("niceId")==spec["nice_id"]]
@@ -776,7 +777,7 @@ func observabilityResourceVerifyCommand(config observabilityConfig) string {
 	specs := observabilityResourceSpecs(config.BaseDomain)
 	verifyResources := `import json,sys
 data=json.load(sys.stdin)["data"]["resources"]
-specs=json.loads(sys.argv[1])
+specs=json.load(open(sys.argv[1], encoding="utf-8"))
 ok=True
 for spec in specs:
  matches=[r for r in data if r.get("name")==spec["name"] and r.get("fullDomain")==spec["domain"]]
@@ -804,13 +805,20 @@ sys.exit(0 if ok else 1)`
 }
 
 func observabilityResourceSpecs(baseDomain string) string {
-	return fmt.Sprintf(
-		`[{"name":"Beszel","domain":%s,"nice_id":%s},{"name":"Dozzle","domain":%s,"nice_id":%s},{"name":"Dockhand","domain":%s,"nice_id":%s}]`,
-		jsonString("beszel."+baseDomain),
-		jsonString(observabilityBeszelID),
-		jsonString("dozzle."+baseDomain),
-		jsonString(observabilityDozzleID),
-		jsonString("dockhand."+baseDomain),
-		jsonString(observabilityDockhandID),
-	)
+	specs := []observabilityResourceSpec{
+		{Name: "Beszel", Domain: "beszel." + baseDomain, NiceID: observabilityBeszelID},
+		{Name: "Dozzle", Domain: "dozzle." + baseDomain, NiceID: observabilityDozzleID},
+		{Name: "Dockhand", Domain: "dockhand." + baseDomain, NiceID: observabilityDockhandID},
+	}
+	data, err := json.Marshal(specs)
+	if err != nil {
+		panic(err)
+	}
+	return string(data)
+}
+
+type observabilityResourceSpec struct {
+	Name   string `json:"name"`
+	Domain string `json:"domain"`
+	NiceID string `json:"nice_id"`
 }

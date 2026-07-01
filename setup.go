@@ -1472,7 +1472,6 @@ func (model profileSetupModel) updateStacks(key tea.KeyMsg) (tea.Model, tea.Cmd)
 		model.stackTable, command = model.stackTable.Update(key)
 		return model, command
 	}
-	return model, nil
 }
 
 func (model profileSetupModel) openStackComposePicker() (tea.Model, tea.Cmd) {

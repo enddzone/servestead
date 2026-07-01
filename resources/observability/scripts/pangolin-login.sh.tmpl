@@ -1,6 +1,9 @@
 login_response="$(mktemp)"
 set +e
-login_status="$(curl -sS -o "$login_response" -w '%{http_code}' -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data {{ shellQuote .LoginPayload }})"
+login_status="$(curl -sS -o "$login_response" -w '%{http_code}' -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data-binary @- <<'SERVESTEAD_LOGIN_PAYLOAD'
+{{ .LoginPayload }}
+SERVESTEAD_LOGIN_PAYLOAD
+)"
 login_result=$?
 set -e
 if [ "$login_result" -ne 0 ]; then
