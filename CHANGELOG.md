@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/enddzone/servestead/compare/v0.2.0...v0.2.1) (2026-07-01)
+
+
+### Bug Fixes
+
+* sonar findings across provisioning, hardening, and cloud flows ([#15](https://github.com/enddzone/servestead/issues/15)) ([21f8bdd](https://github.com/enddzone/servestead/commit/21f8bdd21ef3c5ba233645c6c78b67ba11cd58ee))
+
 ## [0.2.0](https://github.com/enddzone/servestead/compare/v0.1.1...v0.2.0) (2026-06-30)
 
 
