@@ -112,3 +112,11 @@ func TestPrintSavedPangolinCredentialsRejectsAmbiguousIP(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestResolvePangolinCredentialProfileIDRejectsMissingIP(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	_, err := resolvePangolinCredentialProfileID(store, pangolinCredentialsTestHost)
+	if err == nil || !strings.Contains(err.Error(), "no saved profile") {
+		t.Fatalf("unexpected missing profile error: %v", err)
+	}
+}

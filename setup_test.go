@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -82,6 +83,149 @@ func TestRunSetupWithoutIPRequiresTerminal(t *testing.T) {
 	err := runSetup(context.Background(), nil, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "interactive setup requires a terminal") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSetupRequestFromResultHandlesTerminalStates(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		IP:               setupTestHost,
+		AdminUser:        "servestead",
+		PrivateKeyPath:   setupTestPrivateKey,
+		BaseDomain:       setupTestDomain,
+		LetsEncryptEmail: setupTestEmail,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, err = setupRequestFromResult(context.Background(), store, io.Discard, profileSetupModel{cancelled: true})
+	if err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("cancelled setup returned unexpected error: %v", err)
+	}
+
+	_, _, repeat, err := setupRequestFromResult(context.Background(), store, io.Discard, profileSetupModel{deleteProfileID: profile.ID})
+	if err != nil || !repeat {
+		t.Fatalf("delete result should repeat without error: repeat=%v err=%v", repeat, err)
+	}
+	if _, _, err := store.Load(profile.ID); err == nil {
+		t.Fatal("deleted profile still loads")
+	}
+
+	_, _, _, err = setupRequestFromResult(context.Background(), store, io.Discard, profileSetupModel{})
+	if err == nil || !strings.Contains(err.Error(), "did not complete") {
+		t.Fatalf("incomplete setup returned unexpected error: %v", err)
+	}
+
+	profile, err = store.Create(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageModel := newProfileSetupModel([]profileChoice{{Profile: profile, State: ProfileState{Runs: map[string]SetupRun{}}}})
+	stageModel.selectedIndex = 0
+	stageModel.done = true
+	stageModel.singleStage = "harden"
+	request, _, repeat, err := setupRequestFromResult(context.Background(), store, io.Discard, stageModel)
+	if err != nil || repeat || request.Stage != "harden" || request.ProfileOptions.ProfileID != profile.ID {
+		t.Fatalf("unexpected one-time stage request: request=%+v repeat=%v err=%v", request, repeat, err)
+	}
+
+	fullModel := newProfileSetupModel(nil)
+	fullModel.inputs[0].SetValue(setupTestHost)
+	fullModel.inputs[1].SetValue(setupTestPrivateKey)
+	fullModel.inputs[2].SetValue(setupTestDomain)
+	fullModel.inputs[3].SetValue(setupTestEmail)
+	fullModel.done = true
+	request, _, repeat, err = setupRequestFromResult(context.Background(), store, io.Discard, fullModel)
+	if err != nil || repeat || request.Stage != "" || request.ProfileOptions.IP != setupTestHost {
+		t.Fatalf("unexpected full setup request: request=%+v repeat=%v err=%v", request, repeat, err)
+	}
+}
+
+//nolint:gocognit // Scenario test intentionally exercises a complete legacy TUI flow.
+func TestLegacySetupModelNavigationAndViews(t *testing.T) {
+	t.Setenv("SERVESTEAD_TEST_HOME", setupTestHome)
+	model := newSetupModel()
+	if model.Init() == nil {
+		t.Fatal("setup model should blink the active input")
+	}
+	if !strings.Contains(model.View(), "Servestead setup") {
+		t.Fatalf("mode view missing title:\n%s", model.View())
+	}
+
+	updated, command := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	model = updated.(setupModel)
+	if command != nil || model.step != setupStepMode {
+		t.Fatalf("non-key message changed setup state: %+v", model)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	model = updated.(setupModel)
+	if model.selected != 1 {
+		t.Fatalf("down key did not advance mode selection: %d", model.selected)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(setupModel)
+	if model.step != setupStepInput || model.mode != setupModeBootstrapHarden || len(model.inputs) == 0 {
+		t.Fatalf("enter did not open bootstrap input step: %+v", model)
+	}
+	if !strings.Contains(model.View(), "Set up an existing Ubuntu VPS") {
+		t.Fatalf("input view missing selected mode:\n%s", model.View())
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(setupModel)
+	if model.focus != 1 {
+		t.Fatalf("tab did not advance input focus: %d", model.focus)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	model = updated.(setupModel)
+	if model.focus != 0 {
+		t.Fatalf("shift+tab did not move input focus back: %d", model.focus)
+	}
+
+	values := []string{setupTestHost, "root", "servestead", setupTestEnvPrivateKey}
+	for index, value := range values {
+		model.inputs[index].SetValue(value)
+	}
+	model.focus = len(model.inputs) - 1
+	updated, command = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(setupModel)
+	if command != nil || model.step != setupStepConfirm || model.config.Host != setupTestHost {
+		t.Fatalf("valid inputs did not open confirmation: %+v", model)
+	}
+	if !strings.Contains(model.View(), "Review plan") {
+		t.Fatalf("confirm view missing review:\n%s", model.View())
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	model = updated.(setupModel)
+	if model.step != setupStepInput {
+		t.Fatalf("edit key did not return to input: %+v", model)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(setupModel)
+	if model.step != setupStepMode {
+		t.Fatalf("escape from input did not return to mode: %+v", model)
+	}
+
+	model.selected = int(setupModeDoctor)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(setupModel)
+	if model.step != setupStepConfirm || model.config.Mode != setupModeDoctor {
+		t.Fatalf("doctor mode did not skip to confirmation: %+v", model)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	model = updated.(setupModel)
+	if model.step != setupStepMode {
+		t.Fatalf("editing doctor mode should return to mode selection: %+v", model)
+	}
+
+	updated, command = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	model = updated.(setupModel)
+	if command == nil || !model.cancelled {
+		t.Fatalf("q from mode should cancel setup: %+v", model)
 	}
 }
 
@@ -1145,6 +1289,401 @@ func TestProfileSetupUsesAvailableTerminalHeight(t *testing.T) {
 	}
 }
 
+func TestProfileSetupHelpCoversAllScreens(t *testing.T) {
+	helpMaps := []profileSetupHelp{
+		{screen: profileSetupScreenPicker},
+		{screen: profileSetupScreenDashboard, hasProfile: true, hasPangolinAccess: true, hasCloud: true},
+		{screen: profileSetupScreenIntake},
+		{screen: profileSetupScreenAdvanced},
+		{screen: profileSetupScreenRepository},
+		{screen: profileSetupScreenRepositoryDetails},
+		{screen: profileSetupScreenStacks},
+		{screen: profileSetupScreenStackCompose},
+		{screen: profileSetupScreenStackCompose, stackComposeManual: true},
+		{screen: profileSetupScreenStackServices},
+		{screen: profileSetupScreenStackEditor, stackEditorFocus: 0},
+		{screen: profileSetupScreenStackEditor, stackEditorFocus: 1},
+		{screen: profileSetupScreenStackResourceEditor},
+		{screen: profileSetupScreenStackEnvironment, stackEnvironmentMode: stackEnvironmentChoose},
+		{screen: profileSetupScreenStackEnvironment, stackEnvironmentMode: stackEnvironmentBrowse},
+		{screen: profileSetupScreenStackEnvironment, stackEnvironmentMode: stackEnvironmentManual},
+		{screen: profileSetupScreenStackReview},
+		{screen: profileSetupScreenStackDeleteConfirm},
+		{screen: profileSetupScreenStackDiff},
+		{screen: profileSetupScreenStackCommit},
+		{screen: profileSetupScreenCloud},
+		{screen: profileSetupScreenCloudConfirm},
+		{screen: profileSetupScreenCloudRunning},
+		{screen: profileSetupScreenReview},
+		{screen: profileSetupScreenDeleteConfirm},
+	}
+	for _, helpMap := range helpMaps {
+		if bindings := helpMap.ShortHelp(); len(bindings) == 0 {
+			t.Fatalf("screen %d returned no short help", helpMap.screen)
+		}
+		if full := helpMap.FullHelp(); len(full) != 1 || len(full[0]) == 0 {
+			t.Fatalf("screen %d returned empty full help", helpMap.screen)
+		}
+	}
+	if bindings := (profileSetupHelp{screen: profileSetupScreen(-1)}).ShortHelp(); bindings != nil {
+		t.Fatalf("unknown screen returned bindings: %+v", bindings)
+	}
+}
+
+func TestProfileSetupModelViewsRenderPopulatedScreens(t *testing.T) {
+	resource := stackPublicResource{
+		ID:        "web",
+		Service:   "web",
+		Name:      "Site",
+		Subdomain: "site",
+		Port:      80,
+		Protocol:  "http",
+		SSO:       true,
+		Healthcheck: stackResourceHealthcheck{
+			Enabled: true,
+			Path:    "/health",
+		},
+	}
+	services := []composeServiceSummary{
+		{Name: "web", ContainerPorts: []int{80}, PublishesPorts: true},
+		{Name: "worker"},
+	}
+	state := ProfileState{
+		ActiveRunID:           "run-1",
+		StackRepositoryCommit: "abc123",
+		Runs: map[string]SetupRun{
+			"run-1": {
+				ID:     "run-1",
+				Status: runStatusRunning,
+				Stages: map[string]SetupStageStatus{
+					"bootstrap": {Status: stageStatusComplete},
+					"harden":    {Status: stageStatusRunning, LastError: "waiting"},
+					"proxy":     {Status: stageStatusComplete},
+				},
+			},
+		},
+	}
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID:                   setupTestProfileID,
+			Name:                 "production",
+			IP:                   setupTestHost,
+			InitialSSHUser:       "root",
+			AdminUser:            "servestead",
+			PrivateKeyPath:       setupTestPrivateKey,
+			BaseDomain:           setupTestDomain,
+			LetsEncryptEmail:     setupTestEmail,
+			PangolinAdminEmail:   setupTestEmail,
+			ConfigRepositoryPath: filepath.Join(t.TempDir(), "config"),
+			Cloud: &ProfileCloud{
+				Provider:     digitalOceanProviderName,
+				ResourceID:   "do-1",
+				Name:         "production",
+				Region:       "nyc3",
+				Size:         "s-1vcpu-1gb",
+				Image:        "ubuntu-24-04-x64",
+				PriceMonthly: 6,
+			},
+		},
+		State: state,
+		Secrets: ProfileSecrets{
+			PangolinSetupToken:    "setup-token",
+			PangolinAdminPassword: "admin-password",
+			StackEnvironments:     map[string]string{"site": setupTestAPIKeyEnvironment},
+		},
+	}})
+	model.selectedIndex = 0
+	model.setInputsFromChoice(false)
+	model.pangolinStatus = pangolinRegistrationComplete
+	model.showPangolinAccess = true
+	model.stacks = []editableStack{{
+		Name:     "site",
+		Compose:  testApplicationCompose,
+		Services: services,
+		Metadata: stackMetadata{Version: 1, PublicResources: []stackPublicResource{resource}},
+	}}
+	model.stackResources = []stackPublicResource{resource}
+	model.stackServices = services
+	model.stackInputs = stackEditorInputs(stackAddOptions{Name: "site"})
+	model.stackOriginalName = "site"
+	model.stackResourceInputs = stackResourceInputs(resource)
+	model.stackResourceIndex = 0
+	model.stackEnvironmentKeys = []string{"API_KEY"}
+	model.stackEnvironmentOptions = []stackEnvironmentOption{
+		{kind: "none", label: "No runtime environment"},
+		{kind: "manual", label: "Type a path", detail: "enter manually"},
+	}
+	model.stackTable = newStackTable(model.stacks, setupTestDomain, &state)
+	model.stackServiceTable = newStackServiceTable(services, []stackPublicResource{resource})
+	model.stackResourceTable = newStackResourceTable([]stackPublicResource{resource})
+	model.stackComposePath = filepath.Join(t.TempDir(), setupTestComposeFilename)
+	model.stackDiffViewport.SetContent("diff --git a/stacks/site/compose.yaml b/stacks/site/compose.yaml")
+	model.stackCommitInput.SetValue("Update site")
+	model.cloudAction = "destroy"
+	model.cloudTokenInput.SetValue("token")
+	model.cloudConfirmInput.SetValue("destroy do-1")
+	model.repositoryMode = "github"
+	model.repositoryInputs[1].SetValue("https://github.com/enddzone/servestead-config.git")
+	model.screen = profileSetupScreenReview
+	model.refreshPlanPreview()
+
+	cases := []struct {
+		screen profileSetupScreen
+		want   string
+	}{
+		{profileSetupScreenPicker, "Servestead profiles"},
+		{profileSetupScreenDashboard, "Dashboard for production"},
+		{profileSetupScreenIntake, "Upfront setup intake"},
+		{profileSetupScreenAdvanced, "Advanced values"},
+		{profileSetupScreenRepository, "Observability configuration repository"},
+		{profileSetupScreenRepositoryDetails, "Clone a GitHub repository"},
+		{profileSetupScreenStacks, "Standalone stacks"},
+		{profileSetupScreenStackCompose, "Add application stack"},
+		{profileSetupScreenStackServices, "Choose public services"},
+		{profileSetupScreenStackEditor, "Edit stack"},
+		{profileSetupScreenStackResourceEditor, "Edit public resource"},
+		{profileSetupScreenStackEnvironment, "Runtime environment"},
+		{profileSetupScreenStackReview, "Review application stack"},
+		{profileSetupScreenStackDeleteConfirm, "Remove stack site"},
+		{profileSetupScreenStackDiff, "diff --git"},
+		{profileSetupScreenStackCommit, "Commit staged stack changes"},
+		{profileSetupScreenCloud, "DigitalOcean Droplet actions"},
+		{profileSetupScreenCloudConfirm, "Confirm DigitalOcean destroy"},
+		{profileSetupScreenCloudRunning, "Running DigitalOcean destroy action"},
+		{profileSetupScreenReview, "Review full setup plan"},
+		{profileSetupScreenDeleteConfirm, "Delete saved profile"},
+	}
+	for _, tc := range cases {
+		model.screen = tc.screen
+		if view := model.View(); !strings.Contains(view, tc.want) {
+			t.Fatalf("screen %d missing %q:\n%s", tc.screen, tc.want, view)
+		}
+	}
+
+	model.screen = profileSetupScreenStackCompose
+	model.stackComposeManual = true
+	if view := model.View(); !strings.Contains(view, "Docker Compose file") {
+		t.Fatalf("manual stack compose view missing input:\n%s", view)
+	}
+	for _, mode := range []stackEnvironmentMode{stackEnvironmentChoose, stackEnvironmentBrowse, stackEnvironmentManual} {
+		model.screen = profileSetupScreenStackEnvironment
+		model.stackEnvironmentMode = mode
+		if view := model.View(); !strings.Contains(view, "Runtime environment") {
+			t.Fatalf("environment mode %d did not render:\n%s", mode, view)
+		}
+	}
+}
+
+func TestStackDeleteRemovesSelectedStackAndEnvironmentSecret(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init")
+	stackDirectory := filepath.Join(repository, "stacks", "site")
+	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackMetadataFilename), []byte("version: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repository, "add", ".")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Add site")
+
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID:                   setupTestProfileID,
+			IP:                   setupTestHost,
+			BaseDomain:           setupTestDomain,
+			ConfigRepositoryPath: repository,
+		},
+		State:   ProfileState{Runs: map[string]SetupRun{}},
+		Secrets: ProfileSecrets{StackEnvironments: map[string]string{"site": setupTestAPIKeyEnvironment}},
+	}})
+	if err := model.deleteStackEnvironmentSecret("unused"); err != nil {
+		t.Fatal(err)
+	}
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenStacks
+	model.stacks = []editableStack{{Name: "site"}}
+	model.stackTable = newStackTable(model.stacks, setupTestDomain, nil)
+
+	updated, command := model.confirmSelectedStackDelete()
+	model = updated.(profileSetupModel)
+	if command != nil || model.screen != profileSetupScreenStackDeleteConfirm || model.err != "" {
+		t.Fatalf("selected stack did not open delete confirmation: %+v", model)
+	}
+
+	updated, command = model.deleteSelectedStack()
+	model = updated.(profileSetupModel)
+	if command != nil || model.screen != profileSetupScreenStacks || model.err != "" {
+		t.Fatalf("selected stack was not deleted cleanly: %+v", model)
+	}
+	if _, ok := model.profiles[0].Secrets.StackEnvironments["site"]; ok {
+		t.Fatal("deleted stack runtime environment secret was retained")
+	}
+	if _, err := os.Stat(stackDirectory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stack directory still exists or stat failed unexpectedly: %v", err)
+	}
+}
+
+//nolint:gocognit // Scenario test intentionally covers the stack manager action matrix.
+func TestProfileStackManagerRunsCleanStackActions(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init")
+	stackDirectory := filepath.Join(repository, "stacks", "site")
+	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackMetadataFilename), []byte("version: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repository, "add", ".")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Add site")
+
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{
+			ID:                   setupTestProfileID,
+			IP:                   setupTestHost,
+			BaseDomain:           setupTestDomain,
+			ConfigRepositoryPath: repository,
+		},
+		State: ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenStacks
+	model.refreshStacks()
+	if model.err != "" || len(model.stacks) != 1 {
+		t.Fatalf("stack manager did not load clean stack: stacks=%+v err=%s", model.stacks, model.err)
+	}
+	model.stackGitStatus = "clean"
+	model.stackNeedsPush = false
+
+	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
+	withDiff := updated.(profileSetupModel)
+	if command != nil || withDiff.screen != profileSetupScreenStackDiff || withDiff.err != "" {
+		t.Fatalf("diff action failed: %+v", withDiff)
+	}
+
+	updated, _ = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	staged := updated.(profileSetupModel)
+	if staged.err != "" || !strings.Contains(staged.stackNotice, "staged") {
+		t.Fatalf("stage action failed: %+v", staged)
+	}
+
+	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	committing := updated.(profileSetupModel)
+	if command != nil || committing.screen != profileSetupScreenStackCommit || committing.err != "" {
+		t.Fatalf("commit action failed: %+v", committing)
+	}
+
+	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	running := updated.(profileSetupModel)
+	if command == nil || !running.done || running.singleStage != setupStageStackPrefix+"site" {
+		t.Fatalf("stack run action failed: %+v", running)
+	}
+
+	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	syncing := updated.(profileSetupModel)
+	if command == nil || !syncing.done || syncing.singleStage != "stacks" {
+		t.Fatalf("stack sync action failed: %+v", syncing)
+	}
+
+	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	pushing := updated.(profileSetupModel)
+	if command != nil || pushing.err == "" {
+		t.Fatalf("push action without origin should report an error: %+v", pushing)
+	}
+}
+
+//nolint:gocognit // Scenario test intentionally covers runtime environment option branches together.
+func TestProfileStackEnvironmentOptionBranches(t *testing.T) {
+	directory := t.TempDir()
+	composePath := filepath.Join(directory, setupTestComposeFilename)
+	if err := os.WriteFile(composePath, []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	environmentPath := filepath.Join(directory, ".env")
+	if err := os.WriteFile(environmentPath, []byte(setupTestAPIKeyEnvironment), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel(nil)
+	model.stackInputs = stackEditorInputs(stackAddOptions{Name: "site"})
+	model.stackComposePath = composePath
+	model.stackEnvironment = "OLD_KEY=old\n"
+	model.stackEnvironmentOriginal = model.stackEnvironment
+	model.stackEnvironmentKeys = []string{"OLD_KEY"}
+	model.openStackEnvironment(profileSetupScreenStackEditor)
+	if len(model.stackEnvironmentOptions) != 4 {
+		t.Fatalf("unexpected environment options: %+v", model.stackEnvironmentOptions)
+	}
+
+	updated, _ := model.updateStackEnvironmentChoice(tea.WindowSizeMsg{Width: 80, Height: 24})
+	if result := updated.(profileSetupModel); result.stackEnvironmentCursor != 0 {
+		t.Fatalf("non-key message changed cursor: %+v", result)
+	}
+	updated, _ = model.updateStackEnvironmentChoice(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if result := updated.(profileSetupModel); result.stackEnvironmentCursor != 1 {
+		t.Fatalf("down key did not move cursor: %+v", result)
+	}
+	updated, _ = updated.(profileSetupModel).updateStackEnvironmentChoice(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	if result := updated.(profileSetupModel); result.stackEnvironmentCursor != 0 {
+		t.Fatalf("up key did not move cursor: %+v", result)
+	}
+
+	invalid := model
+	invalid.stackEnvironmentCursor = -1
+	updated, _ = invalid.selectStackEnvironmentOption()
+	if result := updated.(profileSetupModel); !strings.Contains(result.err, "no runtime environment option") {
+		t.Fatalf("invalid cursor returned unexpected result: %+v", result)
+	}
+
+	updated, _ = model.selectStackEnvironmentOption()
+	kept := updated.(profileSetupModel)
+	if kept.screen != profileSetupScreenStackEditor || kept.stackEnvironment != "OLD_KEY=old\n" || kept.stackEnvironmentDirty {
+		t.Fatalf("keep option returned unexpected result: %+v", kept)
+	}
+
+	none := model
+	none.stackEnvironmentCursor = 1
+	updated, _ = none.selectStackEnvironmentOption()
+	cleared := updated.(profileSetupModel)
+	if cleared.screen != profileSetupScreenStackEditor || cleared.stackEnvironment != "" || !cleared.stackEnvironmentDirty {
+		t.Fatalf("none option returned unexpected result: %+v", cleared)
+	}
+
+	fileOption := model
+	fileOption.stackEnvironmentCursor = 2
+	updated, _ = fileOption.selectStackEnvironmentOption()
+	loaded := updated.(profileSetupModel)
+	if loaded.stackEnvironment != setupTestAPIKeyEnvironment || len(loaded.stackEnvironmentKeys) != 1 || loaded.stackEnvironmentKeys[0] != "API_KEY" {
+		t.Fatalf("file option returned unexpected result: %+v", loaded)
+	}
+
+	browse := model
+	browse.stackEnvironmentCursor = 3
+	updated, command := browse.selectStackEnvironmentOption()
+	browsing := updated.(profileSetupModel)
+	if command == nil || browsing.stackEnvironmentMode != stackEnvironmentBrowse || browsing.err != "" {
+		t.Fatalf("browse option returned unexpected result: %+v", browsing)
+	}
+
+	updated, command = browsing.updateStackEnvironmentBrowse(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	manual := updated.(profileSetupModel)
+	if command == nil || manual.stackEnvironmentMode != stackEnvironmentManual || manual.err != "" {
+		t.Fatalf("manual environment fallback failed: %+v", manual)
+	}
+	updated, _ = manual.updateStackEnvironmentManual(tea.KeyMsg{Type: tea.KeyEnter})
+	if result := updated.(profileSetupModel); !strings.Contains(result.err, "path is required") {
+		t.Fatalf("blank manual path returned unexpected result: %+v", result)
+	}
+}
+
 func TestProfileSetupModelCollectsNewProfileInputs(t *testing.T) {
 	model := newProfileSetupModel(nil)
 	model.setInputsFromOptions(setupCLIOptions{})
@@ -1722,6 +2261,143 @@ func TestProfileRunCompletedEscapeReturnsWhenParentSetupExists(t *testing.T) {
 	result := updated.(profileRunModel)
 	if command == nil || !result.returnToSetup {
 		t.Fatalf("escape did not request return from completed result: %+v", result)
+	}
+}
+
+//nolint:gocognit // Scenario test intentionally drives run-model updates and command completion paths.
+func TestProfileRunModelUpdatesAndCommandFinish(t *testing.T) {
+	cancelled := false
+	messages := make(chan tea.Msg, 2)
+	model := newProfileRunModel(
+		Profile{Name: "production", IP: setupTestHost},
+		setupConfig{Host: setupTestHost},
+		"run-1",
+		nil,
+		"stacks",
+		messages,
+		func() { cancelled = true },
+	)
+
+	updated, command := model.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
+	model = updated.(profileRunModel)
+	if command != nil || model.width != 120 || model.logViewport.Height == 0 {
+		t.Fatalf("window resize did not update run model: %+v", model)
+	}
+
+	updated, command = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	model = updated.(profileRunModel)
+	if command == nil || !cancelled || !model.cancelled {
+		t.Fatalf("q did not cancel running setup: cancelled=%v model=%+v", cancelled, model)
+	}
+
+	model.cancelled = false
+	updated, _ = model.Update(spinner.TickMsg{})
+	model = updated.(profileRunModel)
+	updated, command = model.Update(profileRunFinishedMsg{})
+	model = updated.(profileRunModel)
+	if command != nil || !model.done || model.err != nil || !strings.Contains(strings.Join(model.logLines, "\n"), "Run complete.") {
+		t.Fatalf("successful finish was not recorded: %+v", model)
+	}
+
+	runErr := errors.New("remote failed")
+	model.done = false
+	updated, command = model.Update(profileRunFinishedMsg{err: runErr})
+	model = updated.(profileRunModel)
+	if command != nil || !model.done || !errors.Is(model.err, runErr) || !strings.Contains(strings.Join(model.logLines, "\n"), runErr.Error()) {
+		t.Fatalf("failed finish was not recorded: %+v", model)
+	}
+
+	messages <- profileRunFinishedMsg{err: runErr}
+	if msg := waitForProfileRunMessage(messages)(); msg == nil {
+		t.Fatal("waitForProfileRunMessage did not receive queued message")
+	}
+	close(messages)
+	if msg := waitForProfileRunMessage(messages)(); msg != nil {
+		t.Fatalf("closed message channel returned unexpected message: %#v", msg)
+	}
+
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{IP: setupTestHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{Runs: map[string]SetupRun{"run-2": newSetupRunForStage("run-2", "stacks", nil)}}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	reporter := &profileRunReporter{store: store, profile: profile, state: &state, runID: "run-2"}
+	finished := make(chan tea.Msg, 1)
+	profileCommand := profileRunCommand{
+		stageRun:        setupStageRun{config: setupConfig{ConfigRepositoryCommit: "abc123"}, runID: "run-2"},
+		stage:           "stacks",
+		profileReporter: reporter,
+		messages:        finished,
+	}
+	profileCommand.finishStage(nil)
+	if msg := (<-finished).(profileRunFinishedMsg); msg.err != nil {
+		t.Fatalf("successful stage finish sent error: %v", msg.err)
+	}
+	if state.StackRepositoryCommit != "abc123" || state.Runs["run-2"].Status != runStatusComplete {
+		t.Fatalf("stage finish did not update state: %+v", state)
+	}
+
+	state = ProfileState{Runs: map[string]SetupRun{"run-3": newSetupRun("run-3", nil)}}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	reporter = &profileRunReporter{store: store, profile: profile, state: &state, runID: "run-3"}
+	finished = make(chan tea.Msg, 1)
+	profileCommand = profileRunCommand{profileReporter: reporter, messages: finished}
+	profileCommand.finish(runErr)
+	if msg := (<-finished).(profileRunFinishedMsg); !errors.Is(msg.err, runErr) || state.Runs["run-3"].Status != runStatusFailed {
+		t.Fatalf("failed run finish did not propagate error/status: msg=%+v state=%+v", msg, state)
+	}
+}
+
+func TestConfiguredStackStageRunsTasks(t *testing.T) {
+	originalObservability := newObservabilityRemoteClient
+	defer func() { newObservabilityRemoteClient = originalObservability }()
+	client := &recordingRemoteClient{}
+	var captured observabilityConfig
+	newObservabilityRemoteClient = func(_ context.Context, config observabilityConfig, _, _ io.Writer) (remoteClient, error) {
+		captured = config
+		return client, nil
+	}
+
+	stack := configuredStack{
+		Name:     "site",
+		Compose:  testApplicationCompose,
+		Metadata: "version: 1\n",
+		Override: "services: {}\n",
+		Resources: []stackPublicResource{{
+			ID: "web", Service: "web", Name: "Web", Subdomain: "site", Port: 80, Protocol: "http",
+			Healthcheck: stackResourceHealthcheck{Enabled: true, Path: "/"},
+		}},
+	}
+	run := setupStageRun{
+		profile: Profile{IP: setupTestHost},
+		config: setupConfig{
+			Host: setupTestHost, AdminUser: "servestead", PrivateKeyPath: setupTestPrivateKey,
+			BaseDomain: setupTestDomain, PangolinAdminEmail: setupTestEmail, PangolinAdminPassword: setupTestNewPassword,
+			ConfigRepositoryCommit: "abc123", ConfigRepositoryBranch: "main", ConfigRepositoryOrigin: "https://github.com/example/config.git",
+			Stacks: []configuredStack{stack},
+		},
+		runID:    "run-1",
+		reporter: TaskReporterFunc(func(TaskEvent) {}),
+		stdout:   io.Discard,
+		stderr:   io.Discard,
+	}
+	if _, ok := configuredStackForStage(run.config.Stacks, "stack:site"); !ok {
+		t.Fatal("configured stack stage was not resolved")
+	}
+	if err := runSetupStage(context.Background(), run, "stack:site"); err != nil {
+		t.Fatal(err)
+	}
+	if captured.BaseDomain != setupTestDomain || captured.RepositoryCommit != "abc123" {
+		t.Fatalf("configured stack stage built unexpected observability config: %+v", captured)
+	}
+	if len(client.commands) == 0 || !strings.Contains(strings.Join(client.commands, "\n"), "servestead-site") {
+		t.Fatalf("configured stack stage did not run expected tasks: %#v", client.commands)
 	}
 }
 

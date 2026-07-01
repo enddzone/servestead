@@ -199,3 +199,17 @@ func TestEnsureComposeWiringSecretsIsStable(t *testing.T) {
 		t.Fatalf("invalid Beszel Hub public key: %v", err)
 	}
 }
+
+func TestEnsureGeneratedSecretPropagatesGeneratorError(t *testing.T) {
+	expected := errors.New("generator failed")
+	value := ""
+	err := ensureGeneratedSecret(&value, 32, func(int) (string, error) {
+		return "", expected
+	})
+	if !errors.Is(err, expected) {
+		t.Fatalf("expected generator error, got %v", err)
+	}
+	if value != "" {
+		t.Fatalf("secret was set after generator failure: %q", value)
+	}
+}

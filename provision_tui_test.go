@@ -44,6 +44,67 @@ func TestProvisionTUIHandlesInitialResizeBeforeCatalog(t *testing.T) {
 	}
 }
 
+//nolint:gocognit // Scenario test intentionally covers message and global-key branches together.
+func TestProvisionTUIHandlesMessagesAndGlobalKeys(t *testing.T) {
+	model := newDigitalOceanProvisionModel(context.Background(), newFileProfileStore(t.TempDir()))
+	updated, command := model.Update(struct{}{})
+	result := updated.(digitalOceanProvisionModel)
+	if command != nil || result.screen != provisionScreenInput {
+		t.Fatalf("unexpected non-key update result: %+v", result)
+	}
+
+	updated, command = model.Update(provisionCreateMsg{err: errors.New("create failed")})
+	result = updated.(digitalOceanProvisionModel)
+	if command != nil || result.screen != provisionScreenReview || !strings.Contains(result.err, "create failed") {
+		t.Fatalf("create error was not shown on review screen: %+v", result)
+	}
+
+	updated, command = model.Update(provisionCreateMsg{profile: Profile{ID: provisionTestProfileID, IP: provisionTestIPv4}})
+	result = updated.(digitalOceanProvisionModel)
+	if command != nil || !result.done || result.screen != provisionScreenDone || result.createdProfile.ID != provisionTestProfileID {
+		t.Fatalf("created profile message returned unexpected result: %+v", result)
+	}
+
+	updated, command, handled := model.updateGlobalKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	result = updated.(digitalOceanProvisionModel)
+	if !handled || command == nil || !result.cancelled {
+		t.Fatalf("ctrl+c did not cancel: handled=%v result=%+v", handled, result)
+	}
+
+	model.screen = provisionScreenRegion
+	updated, command, handled = model.updateGlobalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	result = updated.(digitalOceanProvisionModel)
+	if !handled || command == nil || !result.cancelled {
+		t.Fatalf("q did not cancel list screen: handled=%v result=%+v", handled, result)
+	}
+
+	model.screen = provisionScreenDone
+	updated, command, handled = model.updateGlobalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	result = updated.(digitalOceanProvisionModel)
+	if !handled || command == nil || result.cancelled {
+		t.Fatalf("q did not quit done screen cleanly: handled=%v result=%+v", handled, result)
+	}
+
+	model.screen = provisionScreenRegion
+	model.err = "stale"
+	updated, command, handled = model.updateGlobalKey(tea.KeyMsg{Type: tea.KeyEsc})
+	result = updated.(digitalOceanProvisionModel)
+	if !handled || command != nil || result.err != "" {
+		t.Fatalf("esc did not go back cleanly: handled=%v result=%+v", handled, result)
+	}
+
+	model.screen = provisionScreenDone
+	updated, command = model.updateScreenKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatalf("enter did not quit done screen: %+v", updated)
+	}
+	updated, command = model.updateScreenKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	result = updated.(digitalOceanProvisionModel)
+	if command != nil || result.screen != provisionScreenDone {
+		t.Fatalf("non-enter done key changed state: %+v", result)
+	}
+}
+
 func TestProvisionTUIHappyPathUploadsKeyAndSavesProfile(t *testing.T) {
 	model, store, fake, restore := newProvisionHappyPathFixture(t)
 	defer restore()

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +46,15 @@ func TestInspectComposeServicesFindsContainerPorts(t *testing.T) {
 	assertServiceSummary(t, services, "web", []int{80}, true)
 	assertServiceSummary(t, services, "api", []int{3000}, false)
 	assertServiceSummary(t, services, "worker", nil, false)
+}
+
+func TestRunStackDispatchRejectsInvalidCommands(t *testing.T) {
+	if err := runStack(context.Background(), nil, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("missing stack subcommand returned unexpected error: %v", err)
+	}
+	if err := runStack(context.Background(), []string{"unknown"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "unknown stack command") {
+		t.Fatalf("unknown stack subcommand returned unexpected error: %v", err)
+	}
 }
 
 func TestGenerateStackPangolinOverrideOwnsLabelsWithoutRewritingCompose(t *testing.T) {
@@ -241,6 +252,132 @@ func TestRunStackAddImportsMultiplePublicationsAndEnvironment(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), " add stacks\n") || strings.Contains(stdout.String(), "add stacks/suite") {
 		t.Fatalf("stack add did not recommend one complete repository commit:\n%s", stdout.String())
+	}
+}
+
+func TestStackAddInputsRejectsInvalidInputs(t *testing.T) {
+	directory := t.TempDir()
+	composePath := filepath.Join(directory, stackTestComposeFilename)
+	if err := os.WriteFile(composePath, []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	invalidComposePath := filepath.Join(directory, "invalid.yaml")
+	if err := os.WriteFile(invalidComposePath, []byte("services: ["), 0600); err != nil {
+		t.Fatal(err)
+	}
+	missingPath := filepath.Join(directory, "missing.yaml")
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "bad flag", args: []string{"--unknown"}, want: "flag provided but not defined"},
+		{name: "required flags", args: nil, want: "--profile and --compose are required"},
+		{name: "missing compose", args: []string{"--profile", "profile-1", "--compose", missingPath}, want: "read Compose file"},
+		{name: "invalid compose", args: []string{"--profile", "profile-1", "--compose", invalidComposePath}, want: "yaml"},
+		{name: "invalid publication", args: []string{"--profile", "profile-1", "--compose", composePath, "--publish", "web:not-a-port:site"}, want: "invalid port"},
+		{name: "missing env file", args: []string{"--profile", "profile-1", "--compose", composePath, "--env-file", filepath.Join(directory, "missing.env")}, want: "read environment file"},
+		{name: "invalid name", args: []string{"--profile", "profile-1", "--compose", composePath, "--name", "Bad_Name"}, want: "stack name"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, _, _, err := stackAddInputs(tc.args, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestLoadStackAddProfileAndRepositoryDefaults(t *testing.T) {
+	requireGit(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	store, err := newDefaultProfileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := loadStackAddProfile(stackAddOptions{ProfileID: "missing"}); err == nil || !strings.Contains(err.Error(), "load profile") {
+		t.Fatalf("missing profile returned unexpected error: %v", err)
+	}
+
+	profile, err := store.Create(Profile{IP: stackTestHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err = loadStackAddProfile(stackAddOptions{
+		ProfileID: profile.ID,
+		Resources: []stackPublicResource{{
+			ID: "web", Service: "web", Name: "Web", Subdomain: "web", Port: 80, Protocol: "http",
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "base domain") {
+		t.Fatalf("public stack without base domain returned unexpected error: %v", err)
+	}
+
+	profile.BaseDomain = stackTestDomain
+	profile.LetsEncryptEmail = stackTestAdminEmail
+	var stdout strings.Builder
+	revision, scaffoldCreated, err := prepareStackAddRepository(context.Background(), store, profile, ProfileState{Runs: map[string]SetupRun{}}, &stdout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revision.Path == "" || scaffoldCreated {
+		t.Fatalf("unexpected repository preparation: revision=%+v scaffoldCreated=%v", revision, scaffoldCreated)
+	}
+	if _, err := os.Stat(filepath.Join(revision.Path, filepath.FromSlash(observabilityComposeRepositoryPath))); err != nil {
+		t.Fatalf("default repository scaffold was not prepared: %v", err)
+	}
+}
+
+func TestWriteStackAddFilesHandlesInPlaceComposeAndExistingFiles(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{IP: stackTestHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := t.TempDir()
+	stackDirectory := filepath.Join(repository, "stacks", "site")
+	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	composePath := filepath.Join(stackDirectory, stackComposeFilename)
+	if err := os.WriteFile(composePath, []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	directory, copied, err := writeStackAddFiles(store, profile.ID, repository, stackAddOptions{
+		Name: "site", Compose: composePath,
+	}, stackMetadata{Version: 1}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if directory != stackDirectory || copied {
+		t.Fatalf("unexpected in-place write result: directory=%s copied=%v", directory, copied)
+	}
+	if _, _, err := writeStackAddFiles(store, profile.ID, repository, stackAddOptions{
+		Name: "site", Compose: composePath,
+	}, stackMetadata{Version: 1}, ""); err == nil || !strings.Contains(err.Error(), "already configured") {
+		t.Fatalf("existing metadata returned unexpected error: %v", err)
+	}
+
+	sourcePath := filepath.Join(t.TempDir(), stackComposeFilename)
+	if err := os.WriteFile(sourcePath, []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	otherDirectory := filepath.Join(repository, "stacks", "other")
+	if err := os.MkdirAll(otherDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(otherDirectory, stackComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = writeStackAddFiles(store, profile.ID, repository, stackAddOptions{
+		Name: "other", Compose: sourcePath,
+	}, stackMetadata{Version: 1}, "")
+	if err == nil || !strings.Contains(err.Error(), "already has") {
+		t.Fatalf("existing compose returned unexpected error: %v", err)
 	}
 }
 
@@ -478,6 +615,139 @@ public_resources:
 	}
 	if len(config.Stacks) != 1 || config.Stacks[0].Environment != stackTestEnvironment {
 		t.Fatalf("stack environment was not attached: %+v", config.Stacks)
+	}
+}
+
+//nolint:gocognit // Scenario test intentionally covers validation, save, and remove together.
+func TestStackEnvironmentInputsAndSaveRemove(t *testing.T) {
+	if _, _, _, _, err := stackEnvironmentInputs(nil, io.Discard); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("missing env action returned unexpected error: %v", err)
+	}
+	if !isStackEnvironmentAction("set") || !isStackEnvironmentAction("remove") || isStackEnvironmentAction("show") {
+		t.Fatal("stack environment action validation is inconsistent")
+	}
+	action, profileID, stackName, path, err := stackEnvironmentInputs([]string{"set", "--profile", "profile-1", "--stack", "site", "--file", "app.env"}, io.Discard)
+	if err != nil || action != "set" || profileID != "profile-1" || stackName != "site" || path != "app.env" {
+		t.Fatalf("unexpected env inputs: action=%q profile=%q stack=%q path=%q err=%v", action, profileID, stackName, path, err)
+	}
+
+	store := newFileProfileStore(t.TempDir())
+	repository := t.TempDir()
+	profile, err := store.Create(Profile{IP: stackTestHost, ConfigRepositoryPath: repository})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureStackEnvironmentTarget(store, profile.ID, "site"); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("missing stack target returned unexpected error: %v", err)
+	}
+	stackDirectory := filepath.Join(repository, "stacks", "site")
+	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackMetadataFilename), []byte("version: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureStackEnvironmentTarget(store, profile.ID, "site"); err != nil {
+		t.Fatal(err)
+	}
+
+	environmentPath := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(environmentPath, []byte(stackTestEnvironment), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := setStackEnvironment(store, profile.ID, "site", "", &output); err == nil || !strings.Contains(err.Error(), "--file is required") {
+		t.Fatalf("missing env file returned unexpected error: %v", err)
+	}
+	if err := setStackEnvironment(store, profile.ID, "site", environmentPath, &output); err != nil {
+		t.Fatal(err)
+	}
+	secrets, err := store.LoadSecrets(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secrets.StackEnvironments["site"] != stackTestEnvironment || !strings.Contains(output.String(), "API_KEY") {
+		t.Fatalf("runtime environment was not saved: secrets=%+v output=%s", secrets, output.String())
+	}
+	if err := removeStackEnvironment(store, profile.ID, "site", environmentPath, io.Discard); err == nil || !strings.Contains(err.Error(), "--file cannot") {
+		t.Fatalf("remove with file returned unexpected error: %v", err)
+	}
+	if err := removeStackEnvironment(store, profile.ID, "site", "", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	secrets, err = store.LoadSecrets(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := secrets.StackEnvironments["site"]; ok {
+		t.Fatal("runtime environment was not removed")
+	}
+}
+
+func TestStackAddInputsReadsEnvironmentAndPublications(t *testing.T) {
+	directory := t.TempDir()
+	composePath := filepath.Join(directory, stackTestComposeFilename)
+	if err := os.WriteFile(composePath, []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	environmentPath := filepath.Join(directory, ".env")
+	if err := os.WriteFile(environmentPath, []byte(stackTestEnvironment), 0600); err != nil {
+		t.Fatal(err)
+	}
+	options, services, metadata, environment, keys, err := stackAddInputs([]string{
+		"--profile", "profile-1",
+		"--compose", composePath,
+		"--name", "site",
+		"--publish", "web:80:site:web",
+		"--env-file", environmentPath,
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Name != "site" || len(services) != 3 || len(metadata.PublicResources) != 1 ||
+		environment != stackTestEnvironment || len(keys) != 1 || keys[0] != "API_KEY" {
+		t.Fatalf("unexpected stack add inputs: options=%+v services=%+v metadata=%+v environment=%q keys=%+v", options, services, metadata, environment, keys)
+	}
+	if _, _, _, _, _, err := stackAddInputs([]string{"--profile", "profile-1", "--compose", composePath, "extra"}, io.Discard); err == nil || !strings.Contains(err.Error(), "unexpected arguments") {
+		t.Fatalf("unexpected argument was not rejected: %v", err)
+	}
+}
+
+func TestValidateStackMetadataResourceRejectsInvalidResources(t *testing.T) {
+	services, err := inspectComposeServices([]byte(testApplicationCompose))
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := stackPublicResource{
+		ID: "web", Service: "web", Name: "Web", Subdomain: "site", Port: 80, Protocol: "http",
+		Healthcheck: stackResourceHealthcheck{Enabled: true, Path: "/"},
+	}
+	cases := []struct {
+		name     string
+		resource stackPublicResource
+		want     string
+	}{
+		{name: "bad id", resource: stackPublicResource{ID: "Bad", Service: "web", Name: "Web", Subdomain: "bad", Port: 80, Protocol: "http"}, want: "lowercase DNS label"},
+		{name: "bad protocol", resource: stackPublicResource{ID: "bad", Service: "web", Name: "Web", Subdomain: "bad", Port: 80, Protocol: "tcp"}, want: "protocol"},
+		{name: "missing health path", resource: stackPublicResource{ID: "bad", Service: "web", Name: "Web", Subdomain: "bad", Port: 80, Protocol: "http", Healthcheck: stackResourceHealthcheck{Enabled: true}}, want: "health checks"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateStackMetadata("site", stackMetadata{Version: 1, PublicResources: []stackPublicResource{tc.resource}}, services)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+		})
+	}
+	err = validateStackMetadata("site", stackMetadata{Version: 1, PublicResources: []stackPublicResource{valid, valid}}, services)
+	if err == nil || !strings.Contains(err.Error(), "duplicated") {
+		t.Fatalf("duplicate resource was not rejected: %v", err)
+	}
+	other := valid
+	other.ID = "api"
+	err = validateStackMetadata("site", stackMetadata{Version: 1, PublicResources: []stackPublicResource{valid, other}}, services)
+	if err == nil || !strings.Contains(err.Error(), "subdomain") {
+		t.Fatalf("duplicate subdomain was not rejected: %v", err)
 	}
 }
 

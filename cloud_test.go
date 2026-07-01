@@ -61,6 +61,21 @@ func TestDigitalOceanCreate(t *testing.T) {
 	}
 }
 
+func TestLessDigitalOceanImagePrefersDefaultThenSlug(t *testing.T) {
+	defaultImage := cloudImage{Slug: defaultDigitalOceanImage}
+	olderImage := cloudImage{Slug: "ubuntu-22-04-x64"}
+	newerImage := cloudImage{Slug: "ubuntu-26-04-x64"}
+	if !lessDigitalOceanImage(defaultImage, olderImage) {
+		t.Fatal("default image should sort first")
+	}
+	if lessDigitalOceanImage(olderImage, defaultImage) {
+		t.Fatal("non-default image should not sort before default")
+	}
+	if !lessDigitalOceanImage(olderImage, newerImage) {
+		t.Fatal("non-default images should sort by slug")
+	}
+}
+
 func TestDigitalOceanCatalogIncludesCostAndKeys(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch {
