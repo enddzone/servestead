@@ -56,7 +56,7 @@ jobs:
           syft version
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7.2.2
+        uses: goreleaser/goreleaser-action@v7.2.3
         with:
           version: ${{ env.GORELEASER_VERSION }}
           args: release --clean
