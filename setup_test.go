@@ -1819,10 +1819,10 @@ func TestPlatformStageRunsNetworkProxyAndObservability(t *testing.T) {
 		PangolinAdminEmail: setupTestEmail,
 	}
 	stageRun := setupStageRun{
-		ctx: context.Background(), profile: Profile{IP: config.Host}, config: config, runID: "run-1",
+		profile: Profile{IP: config.Host}, config: config, runID: "run-1",
 		stdout: io.Discard, stderr: io.Discard,
 	}
-	if err := runSetupStage(stageRun, "platform"); err != nil {
+	if err := runSetupStage(context.Background(), stageRun, "platform"); err != nil {
 		t.Fatal(err)
 	}
 	for index, client := range clients {
@@ -1844,10 +1844,10 @@ func TestStackRepositoryStageRunsWhenAllStacksWereDeleted(t *testing.T) {
 		BaseDomain: setupTestDomain, PangolinAdminEmail: setupTestEmail,
 	}
 	stageRun := setupStageRun{
-		ctx: context.Background(), profile: Profile{IP: config.Host}, config: config, runID: "run-1",
+		profile: Profile{IP: config.Host}, config: config, runID: "run-1",
 		stdout: io.Discard, stderr: io.Discard,
 	}
-	if err := runSetupStage(stageRun, "stacks"); err != nil {
+	if err := runSetupStage(context.Background(), stageRun, "stacks"); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.commands) != 1 || !strings.Contains(client.commands[0], ".stack-*.deployment") {
@@ -1882,8 +1882,8 @@ func TestSuccessfulStackRepositorySyncRecordsCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runProfileSetupStagePlan(profileSetupPlanRun{
-		ctx: context.Background(), store: store, profile: profile, state: state, config: config,
+	if err := runProfileSetupStagePlan(context.Background(), profileSetupPlanRun{
+		store: store, profile: profile, state: state, config: config,
 		stdout: io.Discard, stderr: io.Discard,
 	}, "stacks"); err != nil {
 		t.Fatal(err)
@@ -2082,8 +2082,8 @@ func TestRunProfileSetupStagePlanRerunsCompletedHardenStage(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if err := runProfileSetupStagePlan(profileSetupPlanRun{
-		ctx: context.Background(), store: store, profile: profile, state: state, config: config,
+	if err := runProfileSetupStagePlan(context.Background(), profileSetupPlanRun{
+		store: store, profile: profile, state: state, config: config,
 		stdout: &stdout, stderr: &stderr,
 	}, "harden"); err != nil {
 		t.Fatal(err)

@@ -183,8 +183,8 @@ func runSetupFromOptions(ctx context.Context, options setupCLIOptions, stdout, s
 		return err
 	}
 	if shouldUseProfileRunView(options, stderr) {
-		return runProfileSetupPlanWithRunView(profileSetupPlanRun{
-			ctx: ctx, store: store, profile: profile, state: state, config: config,
+		return runProfileSetupPlanWithRunView(ctx, profileSetupPlanRun{
+			store: store, profile: profile, state: state, config: config,
 			stdout: stdout, stderr: stderr,
 		}, false)
 	}
@@ -230,8 +230,8 @@ func runInteractiveSetupStage(ctx context.Context, store ProfileStore, request s
 	if err != nil {
 		return setupResume{}, err
 	}
-	err = runProfileSetupStagePlanWithRunView(profileSetupPlanRun{
-		ctx: ctx, store: store, profile: profile, state: state, config: config,
+	err = runProfileSetupStagePlanWithRunView(ctx, profileSetupPlanRun{
+		store: store, profile: profile, state: state, config: config,
 		stdout: stdout, stderr: stderr,
 	}, request.Stage, true)
 	return resumeAfterStage(request.ProfileOptions.ProfileID, request.Stage), err
@@ -243,8 +243,8 @@ func runInteractiveSetupPlan(ctx context.Context, store ProfileStore, request se
 		return setupResume{}, err
 	}
 	if shouldUseProfileRunView(request.ProfileOptions, stderr) {
-		err = runProfileSetupPlanWithRunView(profileSetupPlanRun{
-			ctx: ctx, store: store, profile: profile, state: state, config: config,
+		err = runProfileSetupPlanWithRunView(ctx, profileSetupPlanRun{
+			store: store, profile: profile, state: state, config: config,
 			stdout: stdout, stderr: stderr,
 		}, true)
 		return setupResume{ProfileID: profile.ID, Screen: profileSetupScreenDashboard}, err
@@ -4242,10 +4242,10 @@ func runProfileSetupPlan(ctx context.Context, store ProfileStore, profile Profil
 	}
 
 	stageRun := setupStageRun{
-		ctx: ctx, profile: profile, config: config, runID: runID,
+		profile: profile, config: config, runID: runID,
 		reporter: reporter, stdout: stdout, stderr: stderr,
 	}
-	if err := runFullSetupStages(stageRun, completedStages); err != nil {
+	if err := runFullSetupStages(ctx, stageRun, completedStages); err != nil {
 		reporter.finishRun(runStatusFailed)
 		if reporter.err != nil {
 			return reporter.err
@@ -4265,7 +4265,6 @@ func runProfileSetupPlan(ctx context.Context, store ProfileStore, profile Profil
 }
 
 type profileSetupPlanRun struct {
-	ctx     context.Context
 	store   ProfileStore
 	profile Profile
 	state   ProfileState
@@ -4274,7 +4273,7 @@ type profileSetupPlanRun struct {
 	stderr  io.Writer
 }
 
-func runProfileSetupPlanWithRunView(run profileSetupPlanRun, allowReturn bool) error {
+func runProfileSetupPlanWithRunView(ctx context.Context, run profileSetupPlanRun, allowReturn bool) error {
 	var preparation bytes.Buffer
 	fmt.Fprintln(&preparation, setupSelectedPlanHeader)
 	fmt.Fprint(&preparation, setupPlanSummary(run.config))
@@ -4284,7 +4283,7 @@ func runProfileSetupPlanWithRunView(run profileSetupPlanRun, allowReturn bool) e
 	}
 	fmt.Fprintf(&preparation, "Preparing configuration repository: %s\n", firstNonEmpty(run.config.ConfigRepositoryPath, run.profile.ConfigRepositoryPath, "profile default"))
 	var err error
-	run.profile, run.config, err = prepareDeclarativeSetup(run.ctx, run.store, run.profile, run.state, run.config)
+	run.profile, run.config, err = prepareDeclarativeSetup(ctx, run.store, run.profile, run.state, run.config)
 	if err != nil {
 		return runProfileFailureView(newProfileFailureView(run, "", preparation.String(), err, allowReturn))
 	}
@@ -4304,7 +4303,7 @@ func runProfileSetupPlanWithRunView(run profileSetupPlanRun, allowReturn bool) e
 		state:   &run.state,
 		runID:   runID,
 	}
-	runContext, cancel := context.WithCancel(run.ctx)
+	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	messages := make(chan tea.Msg, 256)
@@ -4313,9 +4312,9 @@ func runProfileSetupPlanWithRunView(run profileSetupPlanRun, allowReturn bool) e
 	model := newProfileRunModel(run.profile, run.config, runID, completedStages, "", messages, cancel)
 	model.allowReturn = allowReturn
 	appendProfileRunOutput(&model, preparation.String())
-	model.start = startProfileRunCommand(profileRunCommand{
+	model.start = startProfileRunCommand(runContext, profileRunCommand{
 		stageRun: setupStageRun{
-			ctx: runContext, profile: run.profile, config: run.config, runID: runID,
+			profile: run.profile, config: run.config, runID: runID,
 			reporter: reporter,
 		},
 		completedStages: completedStages,
@@ -4351,7 +4350,7 @@ func runProfileSetupPlanWithRunView(run profileSetupPlanRun, allowReturn bool) e
 	return nil
 }
 
-func runProfileSetupStagePlan(run profileSetupPlanRun, stage string) error {
+func runProfileSetupStagePlan(ctx context.Context, run profileSetupPlanRun, stage string) error {
 	fmt.Fprintf(run.stdout, "Selected one-time stage: %s\n\n", profileRunStageLabel(stage))
 	if err := runPreflight(run.config, run.stdout); err != nil {
 		return err
@@ -4359,7 +4358,7 @@ func runProfileSetupStagePlan(run profileSetupPlanRun, stage string) error {
 	if stage == "observability" || stage == "platform" || stage == "stacks" || strings.HasPrefix(stage, setupStageStackPrefix) {
 		fmt.Fprintln(run.stdout, "Preparing the configuration repository before SSH execution...")
 		var err error
-		run.profile, run.config, err = prepareDeclarativeSetup(run.ctx, run.store, run.profile, run.state, run.config)
+		run.profile, run.config, err = prepareDeclarativeSetup(ctx, run.store, run.profile, run.state, run.config)
 		if err != nil {
 			return err
 		}
@@ -4380,10 +4379,10 @@ func runProfileSetupStagePlan(run profileSetupPlanRun, stage string) error {
 		runID:   runID,
 	}
 	stageRun := setupStageRun{
-		ctx: run.ctx, profile: run.profile, config: run.config, runID: runID,
+		profile: run.profile, config: run.config, runID: runID,
 		reporter: reporter, stdout: run.stdout, stderr: run.stderr,
 	}
-	if err := runSetupStage(stageRun, stage); err != nil {
+	if err := runSetupStage(ctx, stageRun, stage); err != nil {
 		reporter.finishRun(runStatusFailed)
 		if reporter.err != nil {
 			return reporter.err
@@ -4401,7 +4400,7 @@ func runProfileSetupStagePlan(run profileSetupPlanRun, stage string) error {
 	return nil
 }
 
-func runProfileSetupStagePlanWithRunView(run profileSetupPlanRun, stage string, allowReturn bool) error {
+func runProfileSetupStagePlanWithRunView(ctx context.Context, run profileSetupPlanRun, stage string, allowReturn bool) error {
 	var preparation bytes.Buffer
 	fmt.Fprintf(&preparation, "Selected one-time stage: %s\n\n", profileRunStageLabel(stage))
 	if err := runPreflight(run.config, &preparation); err != nil {
@@ -4410,7 +4409,7 @@ func runProfileSetupStagePlanWithRunView(run profileSetupPlanRun, stage string, 
 	if stage == "observability" || stage == "platform" || stage == "stacks" || strings.HasPrefix(stage, setupStageStackPrefix) {
 		fmt.Fprintf(&preparation, "Preparing configuration repository: %s\n", firstNonEmpty(run.config.ConfigRepositoryPath, run.profile.ConfigRepositoryPath, "profile default"))
 		var err error
-		run.profile, run.config, err = prepareDeclarativeSetup(run.ctx, run.store, run.profile, run.state, run.config)
+		run.profile, run.config, err = prepareDeclarativeSetup(ctx, run.store, run.profile, run.state, run.config)
 		if err != nil {
 			return runProfileFailureView(newProfileFailureView(run, stage, preparation.String(), err, allowReturn))
 		}
@@ -4430,7 +4429,7 @@ func runProfileSetupStagePlanWithRunView(run profileSetupPlanRun, stage string, 
 		state:   &run.state,
 		runID:   runID,
 	}
-	runContext, cancel := context.WithCancel(run.ctx)
+	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	messages := make(chan tea.Msg, 256)
@@ -4439,9 +4438,9 @@ func runProfileSetupStagePlanWithRunView(run profileSetupPlanRun, stage string, 
 	model := newProfileRunModel(run.profile, run.config, runID, completedSetupStages(run.state), stage, messages, cancel)
 	model.allowReturn = allowReturn
 	appendProfileRunOutput(&model, preparation.String())
-	model.start = startProfileStageRunCommand(profileRunCommand{
+	model.start = startProfileStageRunCommand(runContext, profileRunCommand{
 		stageRun: setupStageRun{
-			ctx: runContext, profile: run.profile, config: run.config, runID: runID,
+			profile: run.profile, config: run.config, runID: runID,
 			reporter: reporter,
 		},
 		stage:           stage,
@@ -4534,7 +4533,6 @@ func appendProfileRunOutput(model *profileRunModel, output string) {
 }
 
 type setupStageRun struct {
-	ctx      context.Context
 	profile  Profile
 	config   setupConfig
 	runID    string
@@ -4543,22 +4541,22 @@ type setupStageRun struct {
 	stderr   io.Writer
 }
 
-func runFullSetupStages(run setupStageRun, completedStages map[string]bool) error {
+func runFullSetupStages(ctx context.Context, run setupStageRun, completedStages map[string]bool) error {
 	stages := []fullSetupStage{
 		{key: "bootstrap", skip: "Step 1/5: bootstrap administrative access already complete; skipping.", run: func() error {
-			return runBootstrapSetupStage(run, "Step 1/5: bootstrap administrative access.")
+			return runBootstrapSetupStage(ctx, run, "Step 1/5: bootstrap administrative access.")
 		}},
 		{key: "harden", skip: "Step 2/5: harden server already complete; skipping.", run: func() error {
-			return runHardeningSetupStage(run, "Step 2/5: harden server.")
+			return runHardeningSetupStage(ctx, run, "Step 2/5: harden server.")
 		}},
 		{key: "network", skip: "Step 3/5: configure Docker networking and UFW already complete; skipping.", run: func() error {
-			return runNetworkSetupStage(run, "Step 3/5: configure Docker networking and UFW.")
+			return runNetworkSetupStage(ctx, run, "Step 3/5: configure Docker networking and UFW.")
 		}},
 		{key: "proxy", skip: "Step 4/5: deploy Pangolin and reverse proxy stack already complete; skipping.", run: func() error {
-			return runProxySetupStage(run, "Step 4/5: deploy Pangolin and reverse proxy stack.")
+			return runProxySetupStage(ctx, run, "Step 4/5: deploy Pangolin and reverse proxy stack.")
 		}},
 		{key: "observability", skip: "Step 5/5: deploy observability stack already complete; skipping.", run: func() error {
-			return runObservabilitySetupStage(run, "Step 5/5: deploy observability stack.", false)
+			return runObservabilitySetupStage(ctx, run, "Step 5/5: deploy observability stack.", false)
 		}},
 	}
 	for _, stage := range stages {
@@ -4566,29 +4564,29 @@ func runFullSetupStages(run setupStageRun, completedStages map[string]bool) erro
 			return err
 		}
 	}
-	return runFullConfiguredStackStages(run, completedStages)
+	return runFullConfiguredStackStages(ctx, run, completedStages)
 }
 
-func runSetupStage(run setupStageRun, stage string) error {
+func runSetupStage(ctx context.Context, run setupStageRun, stage string) error {
 	switch stage {
 	case "stacks":
-		return runStackRepositorySyncStage(run)
+		return runStackRepositorySyncStage(ctx, run)
 	case "platform":
-		return runPlatformSetupStage(run)
+		return runPlatformSetupStage(ctx, run)
 	case "bootstrap":
-		return runBootstrapSetupStage(run, "One-time stage: bootstrap administrative access.")
+		return runBootstrapSetupStage(ctx, run, "One-time stage: bootstrap administrative access.")
 	case "harden":
-		return runHardeningSetupStage(run, "One-time stage: harden server.")
+		return runHardeningSetupStage(ctx, run, "One-time stage: harden server.")
 	case "network":
-		return runNetworkSetupStage(run, "One-time stage: configure Docker networking and UFW.")
+		return runNetworkSetupStage(ctx, run, "One-time stage: configure Docker networking and UFW.")
 	case "proxy":
-		return runProxySetupStage(run, "One-time stage: deploy Pangolin and reverse proxy stack.")
+		return runProxySetupStage(ctx, run, "One-time stage: deploy Pangolin and reverse proxy stack.")
 	case "observability":
-		return runObservabilitySetupStage(run, "One-time stage: deploy observability stack.", true)
+		return runObservabilitySetupStage(ctx, run, "One-time stage: deploy observability stack.", true)
 	default:
 		stack, ok := configuredStackForStage(run.config.Stacks, stage)
 		if ok {
-			return runConfiguredStackStage(run, stack)
+			return runConfiguredStackStage(ctx, run, stack)
 		}
 		if strings.HasPrefix(stage, setupStageStackPrefix) {
 			return fmt.Errorf("stack %q is not present in the committed configuration", strings.TrimPrefix(stage, setupStageStackPrefix))
@@ -4611,21 +4609,21 @@ func runFullSetupStage(stage fullSetupStage, completedStages map[string]bool, st
 	return stage.run()
 }
 
-func runFullConfiguredStackStages(run setupStageRun, completedStages map[string]bool) error {
+func runFullConfiguredStackStages(ctx context.Context, run setupStageRun, completedStages map[string]bool) error {
 	for _, stack := range run.config.Stacks {
 		stackStage := setupStageStackPrefix + stack.Name
 		if completedStages[stackStage] {
 			fmt.Fprintf(setupStageWriter(run.stdout, stackStage, "stdout"), "Standalone %s stack already complete; skipping.\n", stack.Name)
 			continue
 		}
-		if err := runConfiguredStackStage(run, stack); err != nil {
+		if err := runConfiguredStackStage(ctx, run, stack); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func runBootstrapSetupStage(run setupStageRun, message string) error {
+func runBootstrapSetupStage(ctx context.Context, run setupStageRun, message string) error {
 	adminPublicKey, err := os.ReadFile(run.config.AdminPublicKeyPath)
 	if err != nil {
 		return fmt.Errorf("read admin public key: %w", err)
@@ -4640,34 +4638,34 @@ func runBootstrapSetupStage(run setupStageRun, message string) error {
 		PrivateKeyPath:     run.config.PrivateKeyPath,
 	}
 	fmt.Fprintln(stageStdout, message)
-	client, err := newBootstrapRemoteClient(run.ctx, bootstrapConfig, stageStdout, stageStderr)
+	client, err := newBootstrapRemoteClient(ctx, bootstrapConfig, stageStdout, stageStderr)
 	if err != nil {
 		return err
 	}
-	if err := runBootstrapStepsWithReporter(run.ctx, client, bootstrapConfig, strings.TrimSpace(string(adminPublicKey)), run.runID, run.reporter, stageStdout); err != nil {
+	if err := runBootstrapStepsWithReporter(ctx, client, bootstrapConfig, strings.TrimSpace(string(adminPublicKey)), run.runID, run.reporter, stageStdout); err != nil {
 		_ = client.Close()
 		return fmt.Errorf("bootstrap failed: %w", err)
 	}
 	return client.Close()
 }
 
-func runHardeningSetupStage(run setupStageRun, message string) error {
+func runHardeningSetupStage(ctx context.Context, run setupStageRun, message string) error {
 	stageStdout := setupStageWriter(run.stdout, "harden", "stdout")
 	stageStderr := setupStageWriter(run.stderr, "harden", "stderr")
 	hardeningConfig := hardeningConfig{Host: run.profile.IP, SSHUser: run.config.AdminUser, PrivateKeyPath: run.config.PrivateKeyPath}
 	fmt.Fprintln(stageStdout, message)
-	client, err := newHardeningRemoteClient(run.ctx, hardeningConfig, stageStdout, stageStderr)
+	client, err := newHardeningRemoteClient(ctx, hardeningConfig, stageStdout, stageStderr)
 	if err != nil {
 		return err
 	}
-	if err := runHardeningStepsWithReporter(run.ctx, client, hardeningConfig, run.runID, run.reporter, stageStdout); err != nil {
+	if err := runHardeningStepsWithReporter(ctx, client, hardeningConfig, run.runID, run.reporter, stageStdout); err != nil {
 		_ = client.Close()
 		return fmt.Errorf("hardening failed: %w", err)
 	}
 	return client.Close()
 }
 
-func runNetworkSetupStage(run setupStageRun, message string) error {
+func runNetworkSetupStage(ctx context.Context, run setupStageRun, message string) error {
 	sshPort, err := sshPortForHost(run.config.Host)
 	if err != nil {
 		return err
@@ -4676,27 +4674,27 @@ func runNetworkSetupStage(run setupStageRun, message string) error {
 	stageStderr := setupStageWriter(run.stderr, "network", "stderr")
 	networkConfig := networkConfig{Host: run.profile.IP, SSHUser: run.config.AdminUser, SSHPort: sshPort, PrivateKeyPath: run.config.PrivateKeyPath}
 	fmt.Fprintln(stageStdout, message)
-	client, err := newNetworkRemoteClient(run.ctx, networkConfig, stageStdout, stageStderr)
+	client, err := newNetworkRemoteClient(ctx, networkConfig, stageStdout, stageStderr)
 	if err != nil {
 		return err
 	}
-	if err := runNetworkStepsWithReporter(run.ctx, client, networkConfig, run.runID, run.reporter, stageStdout); err != nil {
+	if err := runNetworkStepsWithReporter(ctx, client, networkConfig, run.runID, run.reporter, stageStdout); err != nil {
 		_ = client.Close()
 		return fmt.Errorf("network configuration failed: %w", err)
 	}
 	return client.Close()
 }
 
-func runProxySetupStage(run setupStageRun, message string) error {
+func runProxySetupStage(ctx context.Context, run setupStageRun, message string) error {
 	stageStdout := setupStageWriter(run.stdout, "proxy", "stdout")
 	stageStderr := setupStageWriter(run.stderr, "proxy", "stderr")
 	proxyConfig := setupProxyConfig(run.profile, run.config)
 	fmt.Fprintln(stageStdout, message)
-	client, err := newProxyRemoteClient(run.ctx, proxyConfig, stageStdout, stageStderr)
+	client, err := newProxyRemoteClient(ctx, proxyConfig, stageStdout, stageStderr)
 	if err != nil {
 		return err
 	}
-	if err := runProxyStepsWithReporter(run.ctx, client, proxyConfig, run.runID, run.reporter, stageStdout); err != nil {
+	if err := runProxyStepsWithReporter(ctx, client, proxyConfig, run.runID, run.reporter, stageStdout); err != nil {
 		_ = client.Close()
 		return fmt.Errorf("proxy deployment failed: %w", err)
 	}
@@ -4719,16 +4717,16 @@ func setupProxyConfig(profile Profile, config setupConfig) proxyConfig {
 	}
 }
 
-func runObservabilitySetupStage(run setupStageRun, message string, includeStacks bool) error {
+func runObservabilitySetupStage(ctx context.Context, run setupStageRun, message string, includeStacks bool) error {
 	stageStdout := setupStageWriter(run.stdout, "observability", "stdout")
 	stageStderr := setupStageWriter(run.stderr, "observability", "stderr")
 	observabilityConfig := setupObservabilityConfig(run.profile, run.config, includeStacks)
 	fmt.Fprintln(stageStdout, message)
-	client, err := newObservabilityRemoteClient(run.ctx, observabilityConfig, stageStdout, stageStderr)
+	client, err := newObservabilityRemoteClient(ctx, observabilityConfig, stageStdout, stageStderr)
 	if err != nil {
 		return err
 	}
-	if err := runObservabilityStepsWithReporter(run.ctx, client, observabilityConfig, run.runID, run.reporter, stageStdout); err != nil {
+	if err := runObservabilityStepsWithReporter(ctx, client, observabilityConfig, run.runID, run.reporter, stageStdout); err != nil {
 		_ = client.Close()
 		return fmt.Errorf("observability deployment failed: %w", err)
 	}
@@ -4750,34 +4748,34 @@ func setupObservabilityConfig(profile Profile, config setupConfig, includeStacks
 	return observabilityConfig
 }
 
-func runStackRepositorySyncStage(run setupStageRun) error {
+func runStackRepositorySyncStage(ctx context.Context, run setupStageRun) error {
 	stage := "stacks"
 	stageStdout := setupStageWriter(run.stdout, stage, "stdout")
 	stageStderr := setupStageWriter(run.stderr, stage, "stderr")
 	syncConfig := setupObservabilityConfig(run.profile, run.config, true)
 	fmt.Fprintln(stageStdout, "One-time action: synchronize committed stack configuration.")
-	client, err := newObservabilityRemoteClient(run.ctx, syncConfig, stageStdout, stageStderr)
+	client, err := newObservabilityRemoteClient(ctx, syncConfig, stageStdout, stageStderr)
 	if err != nil {
 		return err
 	}
 	tasks := stackRepositoryReconcileTasks(syncConfig, firstNonEmpty(run.config.AdminUser, "root"))
-	if err := runTasksWithReporter(run.ctx, client, run.config.AdminUser, run.runID, stage, tasks, stageStdout, run.reporter); err != nil {
+	if err := runTasksWithReporter(ctx, client, run.config.AdminUser, run.runID, stage, tasks, stageStdout, run.reporter); err != nil {
 		_ = client.Close()
 		return fmt.Errorf("stack repository synchronization failed: %w", err)
 	}
 	return client.Close()
 }
 
-func runPlatformSetupStage(run setupStageRun) error {
+func runPlatformSetupStage(ctx context.Context, run setupStageRun) error {
 	fmt.Fprintln(setupStageWriter(run.stdout, "platform", "stdout"), "One-time action: configure Network, Proxy, and Observability.")
-	if err := runNetworkSetupStage(run, "One-time stage: configure Docker networking and UFW."); err != nil {
+	if err := runNetworkSetupStage(ctx, run, "One-time stage: configure Docker networking and UFW."); err != nil {
 		return err
 	}
-	if err := runProxySetupStage(run, "One-time stage: deploy Pangolin and reverse proxy stack."); err != nil {
+	if err := runProxySetupStage(ctx, run, "One-time stage: deploy Pangolin and reverse proxy stack."); err != nil {
 		return err
 	}
 	run.config.Stacks = nil
-	return runObservabilitySetupStage(run, "One-time stage: deploy observability stack.", false)
+	return runObservabilitySetupStage(ctx, run, "One-time stage: deploy observability stack.", false)
 }
 
 func configuredStackForStage(stacks []configuredStack, stage string) (configuredStack, bool) {
@@ -4793,7 +4791,7 @@ func configuredStackForStage(stacks []configuredStack, stage string) (configured
 	return configuredStack{}, false
 }
 
-func runConfiguredStackStage(run setupStageRun, stack configuredStack) error {
+func runConfiguredStackStage(ctx context.Context, run setupStageRun, stack configuredStack) error {
 	stage := setupStageStackPrefix + stack.Name
 	stageStdout := setupStageWriter(run.stdout, stage, "stdout")
 	stageStderr := setupStageWriter(run.stderr, stage, "stderr")
@@ -4804,12 +4802,12 @@ func runConfiguredStackStage(run setupStageRun, stack configuredStack) error {
 		RepositoryBranch: run.config.ConfigRepositoryBranch, RepositoryOrigin: run.config.ConfigRepositoryOrigin,
 	}
 	fmt.Fprintf(stageStdout, "One-time action: deploy standalone %s stack.\n", stack.Name)
-	client, err := newObservabilityRemoteClient(run.ctx, observabilityConfig, stageStdout, stageStderr)
+	client, err := newObservabilityRemoteClient(ctx, observabilityConfig, stageStdout, stageStderr)
 	if err != nil {
 		return err
 	}
 	tasks := configuredStackTasks(observabilityConfig, stack, firstNonEmpty(run.config.AdminUser, "root"))
-	if err := runTasksWithReporter(run.ctx, client, run.config.AdminUser, run.runID, stage, tasks, stageStdout, run.reporter); err != nil {
+	if err := runTasksWithReporter(ctx, client, run.config.AdminUser, run.runID, stage, tasks, stageStdout, run.reporter); err != nil {
 		_ = client.Close()
 		return fmt.Errorf("%s stack deployment failed: %w", stack.Name, err)
 	}
@@ -5246,28 +5244,28 @@ type profileRunCommand struct {
 	messages        chan<- tea.Msg
 }
 
-func startProfileRunCommand(command profileRunCommand) tea.Cmd {
+func startProfileRunCommand(ctx context.Context, command profileRunCommand) tea.Cmd {
 	return func() tea.Msg {
 		go func() {
 			output := profileRunOutput{reporter: command.stageRun.reporter, runID: command.stageRun.runID}
 			stageRun := command.stageRun
 			stageRun.stdout = output
 			stageRun.stderr = output
-			err := runFullSetupStages(stageRun, command.completedStages)
+			err := runFullSetupStages(ctx, stageRun, command.completedStages)
 			command.finish(err)
 		}()
 		return nil
 	}
 }
 
-func startProfileStageRunCommand(command profileRunCommand) tea.Cmd {
+func startProfileStageRunCommand(ctx context.Context, command profileRunCommand) tea.Cmd {
 	return func() tea.Msg {
 		go func() {
 			output := profileRunOutput{reporter: command.stageRun.reporter, runID: command.stageRun.runID}
 			stageRun := command.stageRun
 			stageRun.stdout = output
 			stageRun.stderr = output
-			err := runSetupStage(stageRun, command.stage)
+			err := runSetupStage(ctx, stageRun, command.stage)
 			command.finishStage(err)
 		}()
 		return nil
