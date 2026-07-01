@@ -44,8 +44,7 @@ func TestProvisionTUIHandlesInitialResizeBeforeCatalog(t *testing.T) {
 	}
 }
 
-//nolint:gocognit // Scenario test intentionally covers message and global-key branches together.
-func TestProvisionTUIHandlesMessagesAndGlobalKeys(t *testing.T) {
+func TestProvisionTUIHandlesMessages(t *testing.T) {
 	model := newDigitalOceanProvisionModel(context.Background(), newFileProfileStore(t.TempDir()))
 	updated, command := model.Update(struct{}{})
 	result := updated.(digitalOceanProvisionModel)
@@ -64,9 +63,12 @@ func TestProvisionTUIHandlesMessagesAndGlobalKeys(t *testing.T) {
 	if command != nil || !result.done || result.screen != provisionScreenDone || result.createdProfile.ID != provisionTestProfileID {
 		t.Fatalf("created profile message returned unexpected result: %+v", result)
 	}
+}
 
+func TestProvisionTUIHandlesGlobalKeys(t *testing.T) {
+	model := newDigitalOceanProvisionModel(context.Background(), newFileProfileStore(t.TempDir()))
 	updated, command, handled := model.updateGlobalKey(tea.KeyMsg{Type: tea.KeyCtrlC})
-	result = updated.(digitalOceanProvisionModel)
+	result := updated.(digitalOceanProvisionModel)
 	if !handled || command == nil || !result.cancelled {
 		t.Fatalf("ctrl+c did not cancel: handled=%v result=%+v", handled, result)
 	}

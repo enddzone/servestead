@@ -618,8 +618,7 @@ public_resources:
 	}
 }
 
-//nolint:gocognit // Scenario test intentionally covers validation, save, and remove together.
-func TestStackEnvironmentInputsAndSaveRemove(t *testing.T) {
+func TestStackEnvironmentInputsValidateActions(t *testing.T) {
 	if _, _, _, _, err := stackEnvironmentInputs(nil, io.Discard); err == nil || !strings.Contains(err.Error(), "usage") {
 		t.Fatalf("missing env action returned unexpected error: %v", err)
 	}
@@ -630,7 +629,9 @@ func TestStackEnvironmentInputsAndSaveRemove(t *testing.T) {
 	if err != nil || action != "set" || profileID != "profile-1" || stackName != "site" || path != "app.env" {
 		t.Fatalf("unexpected env inputs: action=%q profile=%q stack=%q path=%q err=%v", action, profileID, stackName, path, err)
 	}
+}
 
+func TestStackEnvironmentTargetValidation(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
 	repository := t.TempDir()
 	profile, err := store.Create(Profile{IP: stackTestHost, ConfigRepositoryPath: repository})
@@ -650,7 +651,14 @@ func TestStackEnvironmentInputsAndSaveRemove(t *testing.T) {
 	if err := ensureStackEnvironmentTarget(store, profile.ID, "site"); err != nil {
 		t.Fatal(err)
 	}
+}
 
+func TestStackEnvironmentSaveRemove(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{IP: stackTestHost})
+	if err != nil {
+		t.Fatal(err)
+	}
 	environmentPath := filepath.Join(t.TempDir(), ".env")
 	if err := os.WriteFile(environmentPath, []byte(stackTestEnvironment), 0600); err != nil {
 		t.Fatal(err)

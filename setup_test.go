@@ -142,8 +142,7 @@ func TestSetupRequestFromResultHandlesTerminalStates(t *testing.T) {
 	}
 }
 
-//nolint:gocognit // Scenario test intentionally exercises a complete legacy TUI flow.
-func TestLegacySetupModelNavigationAndViews(t *testing.T) {
+func TestLegacySetupModelNavigationAndConfirmation(t *testing.T) {
 	t.Setenv("SERVESTEAD_TEST_HOME", setupTestHome)
 	model := newSetupModel()
 	if model.Init() == nil {
@@ -198,7 +197,21 @@ func TestLegacySetupModelNavigationAndViews(t *testing.T) {
 	if !strings.Contains(model.View(), "Review plan") {
 		t.Fatalf("confirm view missing review:\n%s", model.View())
 	}
+}
 
+func TestLegacySetupModelEditDoctorAndCancel(t *testing.T) {
+	t.Setenv("SERVESTEAD_TEST_HOME", setupTestHome)
+	model := newSetupModel()
+	model.selected = int(setupModeBootstrapHarden)
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(setupModel)
+	values := []string{setupTestHost, "root", "servestead", setupTestEnvPrivateKey}
+	for index, value := range values {
+		model.inputs[index].SetValue(value)
+	}
+	model.focus = len(model.inputs) - 1
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(setupModel)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
 	model = updated.(setupModel)
 	if model.step != setupStepInput {
@@ -222,7 +235,7 @@ func TestLegacySetupModelNavigationAndViews(t *testing.T) {
 		t.Fatalf("editing doctor mode should return to mode selection: %+v", model)
 	}
 
-	updated, command = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	model = updated.(setupModel)
 	if command == nil || !model.cancelled {
 		t.Fatalf("q from mode should cancel setup: %+v", model)
@@ -1528,8 +1541,50 @@ func TestStackDeleteRemovesSelectedStackAndEnvironmentSecret(t *testing.T) {
 	}
 }
 
-//nolint:gocognit // Scenario test intentionally covers the stack manager action matrix.
-func TestProfileStackManagerRunsCleanStackActions(t *testing.T) {
+func TestProfileStackManagerReviewsStagesAndCommitsCleanStack(t *testing.T) {
+	model := newCleanStackManagerModel(t)
+	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
+	withDiff := updated.(profileSetupModel)
+	if command != nil || withDiff.screen != profileSetupScreenStackDiff || withDiff.err != "" {
+		t.Fatalf("diff action failed: %+v", withDiff)
+	}
+
+	updated, _ = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	staged := updated.(profileSetupModel)
+	if staged.err != "" || !strings.Contains(staged.stackNotice, "staged") {
+		t.Fatalf("stage action failed: %+v", staged)
+	}
+
+	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	committing := updated.(profileSetupModel)
+	if command != nil || committing.screen != profileSetupScreenStackCommit || committing.err != "" {
+		t.Fatalf("commit action failed: %+v", committing)
+	}
+}
+
+func TestProfileStackManagerRunsSyncsAndReportsPushFailure(t *testing.T) {
+	model := newCleanStackManagerModel(t)
+	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	running := updated.(profileSetupModel)
+	if command == nil || !running.done || running.singleStage != setupStageStackPrefix+"site" {
+		t.Fatalf("stack run action failed: %+v", running)
+	}
+
+	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	syncing := updated.(profileSetupModel)
+	if command == nil || !syncing.done || syncing.singleStage != "stacks" {
+		t.Fatalf("stack sync action failed: %+v", syncing)
+	}
+
+	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	pushing := updated.(profileSetupModel)
+	if command != nil || pushing.err == "" {
+		t.Fatalf("push action without origin should report an error: %+v", pushing)
+	}
+}
+
+func newCleanStackManagerModel(t *testing.T) profileSetupModel {
+	t.Helper()
 	requireGit(t)
 	repository := t.TempDir()
 	runGitCommand(t, repository, "init")
@@ -1563,66 +1618,11 @@ func TestProfileStackManagerRunsCleanStackActions(t *testing.T) {
 	}
 	model.stackGitStatus = "clean"
 	model.stackNeedsPush = false
-
-	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
-	withDiff := updated.(profileSetupModel)
-	if command != nil || withDiff.screen != profileSetupScreenStackDiff || withDiff.err != "" {
-		t.Fatalf("diff action failed: %+v", withDiff)
-	}
-
-	updated, _ = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
-	staged := updated.(profileSetupModel)
-	if staged.err != "" || !strings.Contains(staged.stackNotice, "staged") {
-		t.Fatalf("stage action failed: %+v", staged)
-	}
-
-	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
-	committing := updated.(profileSetupModel)
-	if command != nil || committing.screen != profileSetupScreenStackCommit || committing.err != "" {
-		t.Fatalf("commit action failed: %+v", committing)
-	}
-
-	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
-	running := updated.(profileSetupModel)
-	if command == nil || !running.done || running.singleStage != setupStageStackPrefix+"site" {
-		t.Fatalf("stack run action failed: %+v", running)
-	}
-
-	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
-	syncing := updated.(profileSetupModel)
-	if command == nil || !syncing.done || syncing.singleStage != "stacks" {
-		t.Fatalf("stack sync action failed: %+v", syncing)
-	}
-
-	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
-	pushing := updated.(profileSetupModel)
-	if command != nil || pushing.err == "" {
-		t.Fatalf("push action without origin should report an error: %+v", pushing)
-	}
+	return model
 }
 
-//nolint:gocognit // Scenario test intentionally covers runtime environment option branches together.
-func TestProfileStackEnvironmentOptionBranches(t *testing.T) {
-	directory := t.TempDir()
-	composePath := filepath.Join(directory, setupTestComposeFilename)
-	if err := os.WriteFile(composePath, []byte(testApplicationCompose), 0600); err != nil {
-		t.Fatal(err)
-	}
-	environmentPath := filepath.Join(directory, ".env")
-	if err := os.WriteFile(environmentPath, []byte(setupTestAPIKeyEnvironment), 0600); err != nil {
-		t.Fatal(err)
-	}
-	model := newProfileSetupModel(nil)
-	model.stackInputs = stackEditorInputs(stackAddOptions{Name: "site"})
-	model.stackComposePath = composePath
-	model.stackEnvironment = "OLD_KEY=old\n"
-	model.stackEnvironmentOriginal = model.stackEnvironment
-	model.stackEnvironmentKeys = []string{"OLD_KEY"}
-	model.openStackEnvironment(profileSetupScreenStackEditor)
-	if len(model.stackEnvironmentOptions) != 4 {
-		t.Fatalf("unexpected environment options: %+v", model.stackEnvironmentOptions)
-	}
-
+func TestProfileStackEnvironmentChoiceNavigation(t *testing.T) {
+	model := newStackEnvironmentOptionModel(t)
 	updated, _ := model.updateStackEnvironmentChoice(tea.WindowSizeMsg{Width: 80, Height: 24})
 	if result := updated.(profileSetupModel); result.stackEnvironmentCursor != 0 {
 		t.Fatalf("non-key message changed cursor: %+v", result)
@@ -1635,10 +1635,13 @@ func TestProfileStackEnvironmentOptionBranches(t *testing.T) {
 	if result := updated.(profileSetupModel); result.stackEnvironmentCursor != 0 {
 		t.Fatalf("up key did not move cursor: %+v", result)
 	}
+}
 
+func TestProfileStackEnvironmentSelectsKeepNoneAndFile(t *testing.T) {
+	model := newStackEnvironmentOptionModel(t)
 	invalid := model
 	invalid.stackEnvironmentCursor = -1
-	updated, _ = invalid.selectStackEnvironmentOption()
+	updated, _ := invalid.selectStackEnvironmentOption()
 	if result := updated.(profileSetupModel); !strings.Contains(result.err, "no runtime environment option") {
 		t.Fatalf("invalid cursor returned unexpected result: %+v", result)
 	}
@@ -1664,10 +1667,12 @@ func TestProfileStackEnvironmentOptionBranches(t *testing.T) {
 	if loaded.stackEnvironment != setupTestAPIKeyEnvironment || len(loaded.stackEnvironmentKeys) != 1 || loaded.stackEnvironmentKeys[0] != "API_KEY" {
 		t.Fatalf("file option returned unexpected result: %+v", loaded)
 	}
+}
 
-	browse := model
-	browse.stackEnvironmentCursor = 3
-	updated, command := browse.selectStackEnvironmentOption()
+func TestProfileStackEnvironmentBrowseAndManualFallback(t *testing.T) {
+	model := newStackEnvironmentOptionModel(t)
+	model.stackEnvironmentCursor = 3
+	updated, command := model.selectStackEnvironmentOption()
 	browsing := updated.(profileSetupModel)
 	if command == nil || browsing.stackEnvironmentMode != stackEnvironmentBrowse || browsing.err != "" {
 		t.Fatalf("browse option returned unexpected result: %+v", browsing)
@@ -1682,6 +1687,30 @@ func TestProfileStackEnvironmentOptionBranches(t *testing.T) {
 	if result := updated.(profileSetupModel); !strings.Contains(result.err, "path is required") {
 		t.Fatalf("blank manual path returned unexpected result: %+v", result)
 	}
+}
+
+func newStackEnvironmentOptionModel(t *testing.T) profileSetupModel {
+	t.Helper()
+	directory := t.TempDir()
+	composePath := filepath.Join(directory, setupTestComposeFilename)
+	if err := os.WriteFile(composePath, []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	environmentPath := filepath.Join(directory, ".env")
+	if err := os.WriteFile(environmentPath, []byte(setupTestAPIKeyEnvironment), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel(nil)
+	model.stackInputs = stackEditorInputs(stackAddOptions{Name: "site"})
+	model.stackComposePath = composePath
+	model.stackEnvironment = "OLD_KEY=old\n"
+	model.stackEnvironmentOriginal = model.stackEnvironment
+	model.stackEnvironmentKeys = []string{"OLD_KEY"}
+	model.openStackEnvironment(profileSetupScreenStackEditor)
+	if len(model.stackEnvironmentOptions) != 4 {
+		t.Fatalf("unexpected environment options: %+v", model.stackEnvironmentOptions)
+	}
+	return model
 }
 
 func TestProfileSetupModelCollectsNewProfileInputs(t *testing.T) {
@@ -2264,8 +2293,7 @@ func TestProfileRunCompletedEscapeReturnsWhenParentSetupExists(t *testing.T) {
 	}
 }
 
-//nolint:gocognit // Scenario test intentionally drives run-model updates and command completion paths.
-func TestProfileRunModelUpdatesAndCommandFinish(t *testing.T) {
+func TestProfileRunModelUpdatesAndFinishMessages(t *testing.T) {
 	cancelled := false
 	messages := make(chan tea.Msg, 2)
 	model := newProfileRunModel(
@@ -2308,14 +2336,17 @@ func TestProfileRunModelUpdatesAndCommandFinish(t *testing.T) {
 	}
 
 	messages <- profileRunFinishedMsg{err: runErr}
-	if msg := waitForProfileRunMessage(messages)(); msg == nil {
+	if waitForProfileRunMessage(messages)() == nil {
 		t.Fatal("waitForProfileRunMessage did not receive queued message")
 	}
 	close(messages)
 	if msg := waitForProfileRunMessage(messages)(); msg != nil {
 		t.Fatalf("closed message channel returned unexpected message: %#v", msg)
 	}
+}
 
+func TestProfileRunCommandFinishUpdatesState(t *testing.T) {
+	runErr := errors.New("remote failed")
 	store := newFileProfileStore(t.TempDir())
 	profile, err := store.Create(Profile{IP: setupTestHost})
 	if err != nil {
