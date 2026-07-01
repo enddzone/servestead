@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
-	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/charmbracelet/lipgloss/v2 v2.0.4
 	github.com/digitalocean/godo v1.197.0
 	github.com/mattn/go-isatty v0.0.20
 	golang.org/x/crypto v0.53.0
