@@ -15,17 +15,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/bubbles/filepicker"
-	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/progress"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/table"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/filepicker"
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/progress"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/table"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-isatty"
 )
 
@@ -298,7 +298,7 @@ func runProfileSetupRequestTUI(store ProfileStore, output io.Writer, resume setu
 	model := newProfileSetupModel(profiles)
 	model.profileStore = store
 	applySetupResume(&model, resume)
-	program := tea.NewProgram(model, tea.WithOutput(output), tea.WithAltScreen())
+	program := tea.NewProgram(model, tea.WithOutput(output))
 	finalModel, err := program.Run()
 	if err != nil {
 		return profileSetupModel{}, fmt.Errorf("run setup TUI: %w", err)
@@ -329,6 +329,26 @@ func setupRequestFromResult(ctx context.Context, store ProfileStore, output io.W
 		return setupRequest{}, setupResume{}, false, errors.New("setup did not complete")
 	}
 	return completedSetupRequest(result)
+}
+
+func collectDigitalOceanProvisionProfile(ctx context.Context, store ProfileStore, output io.Writer) (Profile, error) {
+	model := newDigitalOceanProvisionModel(ctx, store)
+	program := tea.NewProgram(model, tea.WithOutput(output))
+	finalModel, err := program.Run()
+	if err != nil {
+		return Profile{}, fmt.Errorf("run provisioning TUI: %w", err)
+	}
+	result, ok := finalModel.(digitalOceanProvisionModel)
+	if !ok {
+		return Profile{}, errors.New("provisioning TUI returned an unexpected model")
+	}
+	if result.cancelled {
+		return Profile{}, errors.New("provisioning cancelled")
+	}
+	if !result.done {
+		return Profile{}, errors.New("provisioning did not complete")
+	}
+	return result.createdProfile, nil
 }
 
 func completedSetupRequest(result profileSetupModel) (setupRequest, setupResume, bool, error) {
@@ -379,7 +399,7 @@ func applySetupResume(model *profileSetupModel, resume setupResume) {
 
 func collectLegacySetupConfig(output io.Writer) (setupConfig, error) {
 	model := newSetupModel()
-	program := tea.NewProgram(model, tea.WithOutput(output), tea.WithAltScreen())
+	program := tea.NewProgram(model, tea.WithOutput(output))
 	finalModel, err := program.Run()
 	if err != nil {
 		return setupConfig{}, fmt.Errorf("run setup TUI: %w", err)
@@ -629,9 +649,9 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 		stageTable:        newProfileStageTable(nil),
 		stackTable:        newStackTable(nil, "", nil),
 		stackServiceTable: newStackServiceTable(nil, nil),
-		stackDiffViewport: viewport.New(100, 18),
+		stackDiffViewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(18)),
 		progress:          progress.New(progress.WithWidth(42)),
-		planViewport:      viewport.New(82, 10),
+		planViewport:      viewport.New(viewport.WithWidth(82), viewport.WithHeight(10)),
 		help:              help.New(),
 		selectedIndex:     -1,
 		width:             82,
@@ -901,11 +921,11 @@ func (model profileSetupModel) updateWindowSize(msg tea.WindowSizeMsg) (tea.Mode
 	navigationHeight := max(8, msg.Height-7)
 	model.profileList.SetSize(contentWidth, navigationHeight)
 	model.repositoryList.SetSize(contentWidth, navigationHeight)
-	model.planViewport.Width = contentWidth
-	model.planViewport.Height = max(6, msg.Height-14)
-	model.stackDiffViewport.Width = contentWidth
-	model.stackDiffViewport.Height = max(6, msg.Height-10)
-	model.progress.Width = clampInt(msg.Width-8, 24, 64)
+	model.planViewport.SetWidth(contentWidth)
+	model.planViewport.SetHeight(max(6, msg.Height-14))
+	model.stackDiffViewport.SetWidth(contentWidth)
+	model.stackDiffViewport.SetHeight(max(6, msg.Height-10))
+	model.progress.SetWidth(clampInt(msg.Width-8, 24, 64))
 	model.stackComposePicker.SetHeight(max(4, msg.Height-13))
 	model.stackEnvironmentPicker.SetHeight(max(4, msg.Height-13))
 	model.resizeStackTable()
@@ -2922,7 +2942,7 @@ func (model profileSetupModel) selectedDashboardStage() (string, error) {
 	return dashboardStageOrder[cursor], nil
 }
 
-func (model profileSetupModel) View() string {
+func (model profileSetupModel) View() tea.View {
 	var builder strings.Builder
 	builder.WriteString(setupTitleStyle.Render("Servestead setup"))
 	builder.WriteString("\n")
@@ -3000,7 +3020,7 @@ func (model profileSetupModel) View() string {
 		stackEnvironmentMode: model.stackEnvironmentMode,
 		stackEditorFocus:     model.focus,
 	}))
-	return builder.String()
+	return altScreenView(builder.String())
 }
 
 func (model profileSetupModel) dashboardView() string {
@@ -3684,7 +3704,7 @@ func clampInt(value, minimum, maximum int) int {
 
 func collectFullRunConfig(output io.Writer, config setupConfig) (setupConfig, error) {
 	model := newFullRunModel(config)
-	program := tea.NewProgram(model, tea.WithOutput(output), tea.WithAltScreen())
+	program := tea.NewProgram(model, tea.WithOutput(output))
 	finalModel, err := program.Run()
 	if err != nil {
 		return setupConfig{}, fmt.Errorf("run setup intake TUI: %w", err)
@@ -3766,7 +3786,7 @@ func (model fullRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return model, cmd
 }
 
-func (model fullRunModel) View() string {
+func (model fullRunModel) View() tea.View {
 	var builder strings.Builder
 	builder.WriteString(setupTitleStyle.Render("Servestead full setup"))
 	builder.WriteString("\n\n")
@@ -3783,7 +3803,7 @@ func (model fullRunModel) View() string {
 	}
 	builder.WriteString("\n")
 	builder.WriteString(setupHelpStyle.Render("Enter advances. Tab changes field. Esc cancels."))
-	return builder.String()
+	return altScreenView(builder.String())
 }
 
 func (model fullRunModel) configFromInputs() (setupConfig, error) {
@@ -4321,7 +4341,7 @@ func runProfileSetupPlanWithRunView(ctx context.Context, run profileSetupPlanRun
 		profileReporter: profileReporter,
 		messages:        messages,
 	})
-	program := tea.NewProgram(model, tea.WithOutput(run.stderr), tea.WithAltScreen())
+	program := tea.NewProgram(model, tea.WithOutput(run.stderr))
 	finalModel, err := program.Run()
 	if err != nil {
 		return fmt.Errorf("run setup TUI: %w", err)
@@ -4447,7 +4467,7 @@ func runProfileSetupStagePlanWithRunView(ctx context.Context, run profileSetupPl
 		profileReporter: profileReporter,
 		messages:        messages,
 	})
-	program := tea.NewProgram(model, tea.WithOutput(run.stderr), tea.WithAltScreen())
+	program := tea.NewProgram(model, tea.WithOutput(run.stderr))
 	finalModel, err := program.Run()
 	if err != nil {
 		return fmt.Errorf("run setup TUI: %w", err)
@@ -4498,7 +4518,7 @@ func newProfileFailureView(run profileSetupPlanRun, stage, output string, runErr
 
 func runProfileFailureView(view profileFailureView) error {
 	model := newProfileRunFailureModel(view.profile, view.config, view.completedStages, view.stage, view.output, view.err, view.allowReturn)
-	program := tea.NewProgram(model, tea.WithOutput(view.tuiOutput), tea.WithAltScreen())
+	program := tea.NewProgram(model, tea.WithOutput(view.tuiOutput))
 	finalModel, err := program.Run()
 	if err != nil {
 		return fmt.Errorf("run setup TUI: %w", err)
@@ -4986,7 +5006,7 @@ func newProfileRunModel(profile Profile, config setupConfig, runID string, compl
 		cancel:         cancel,
 		spinner:        runSpinner,
 		progress:       progress.New(progress.WithWidth(48)),
-		logViewport:    viewport.New(88, 10),
+		logViewport:    viewport.New(viewport.WithWidth(88), viewport.WithHeight(10)),
 		stages:         stages,
 		totalTasks:     totalTasks,
 		completedTasks: completedTasks,
@@ -5158,9 +5178,9 @@ func (model profileRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (model profileRunModel) updateWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	model.width = msg.Width
 	model.height = msg.Height
-	model.progress.Width = clampInt(msg.Width-12, 24, 72)
-	model.logViewport.Width = clampInt(msg.Width-4, 40, 100)
-	model.logViewport.Height = clampInt(msg.Height-16, 6, 18)
+	model.progress.SetWidth(clampInt(msg.Width-12, 24, 72))
+	model.logViewport.SetWidth(clampInt(msg.Width-4, 40, 100))
+	model.logViewport.SetHeight(clampInt(msg.Height-16, 6, 18))
 	return model, nil
 }
 
@@ -5386,7 +5406,7 @@ func (model *profileRunModel) appendRunLog(line string) {
 	model.logViewport.GotoBottom()
 }
 
-func (model profileRunModel) View() string {
+func (model profileRunModel) View() tea.View {
 	var builder strings.Builder
 	builder.WriteString(setupTitleStyle.Render("Servestead setup run"))
 	builder.WriteString("\n")
@@ -5431,7 +5451,7 @@ func (model profileRunModel) View() string {
 	} else {
 		builder.WriteString(setupHelpStyle.Render("q quits. Ctrl+C cancels. j/k or up/down scroll logs."))
 	}
-	return builder.String()
+	return altScreenView(builder.String())
 }
 
 func (model profileRunModel) taskProgress() float64 {
@@ -5765,6 +5785,12 @@ var (
 	setupErrorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 )
 
+func altScreenView(content string) tea.View {
+	view := tea.NewView(content)
+	view.AltScreen = true
+	return view
+}
+
 func newSetupModel() setupModel {
 	return setupModel{step: setupStepMode}
 }
@@ -5904,7 +5930,7 @@ func (model setupModel) updateConfirm(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return model, nil
 }
 
-func (model setupModel) View() string {
+func (model setupModel) View() tea.View {
 	var builder strings.Builder
 	builder.WriteString(setupTitleStyle.Render("Servestead setup"))
 	builder.WriteString("\n\n")
@@ -5917,7 +5943,7 @@ func (model setupModel) View() string {
 	case setupStepConfirm:
 		builder.WriteString(model.confirmStepView())
 	}
-	return builder.String()
+	return altScreenView(builder.String())
 }
 
 func (model setupModel) modeStepView() string {
@@ -6066,7 +6092,7 @@ func newSetupInputs(fields []setupInputField) []textinput.Model {
 		input.Placeholder = field.placeholder
 		input.SetValue(field.value)
 		input.CharLimit = 256
-		input.Width = 72
+		input.SetWidth(72)
 		if field.secret {
 			input.EchoMode = textinput.EchoPassword
 		}

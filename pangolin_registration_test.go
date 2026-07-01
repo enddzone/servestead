@@ -6,8 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 const (
@@ -94,7 +92,7 @@ func TestProfileDashboardHighlightsIncompletePangolinAndRevealsSetupToken(t *tes
 
 	updated, _ := model.Update(pangolinRegistrationStatusMsg{profileID: pangolinRegistrationTestProfileID, complete: false})
 	model = updated.(profileSetupModel)
-	view := model.View()
+	view := model.View().Content
 	for _, expected := range []string{
 		"ACTION REQUIRED: Pangolin initial admin registration is incomplete.",
 		"Press p to reveal the saved setup token and initial-setup URL.",
@@ -110,8 +108,8 @@ func TestProfileDashboardHighlightsIncompletePangolinAndRevealsSetupToken(t *tes
 		t.Fatalf("dashboard exposed setup token before reveal:\n%s", view)
 	}
 
-	updated, _ = model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
-	view = updated.(profileSetupModel).View()
+	updated, _ = model.updateProfileDashboard(keyRunes("p"))
+	view = updated.(profileSetupModel).View().Content
 	for _, expected := range []string{
 		"https://pangolin." + pangolinRegistrationTestDomain + "/auth/initial-setup",
 		"Setup token: " + pangolinRegistrationTestSetupToken,
@@ -157,8 +155,8 @@ func TestProfileDashboardRevealsPangolinCredentialsWhenRegistrationComplete(t *t
 
 	updated, _ := model.Update(pangolinRegistrationStatusMsg{profileID: pangolinRegistrationTestProfileID, complete: true})
 	model = updated.(profileSetupModel)
-	updated, _ = model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
-	view := updated.(profileSetupModel).View()
+	updated, _ = model.updateProfileDashboard(keyRunes("p"))
+	view := updated.(profileSetupModel).View().Content
 	for _, expected := range []string{
 		"Pangolin URL: https://pangolin." + pangolinRegistrationTestDomain,
 		"Username: " + pangolinRegistrationTestOwnerEmail,

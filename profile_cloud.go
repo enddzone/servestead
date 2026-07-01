@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 const profileCloudNoActiveDropletMessage = "this profile does not have an active DigitalOcean Droplet"
