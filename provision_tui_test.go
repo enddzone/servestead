@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/list"
+	tea "charm.land/bubbletea/v2"
 )
 
 const (
@@ -67,21 +67,21 @@ func TestProvisionTUIHandlesMessages(t *testing.T) {
 
 func TestProvisionTUIHandlesGlobalKeys(t *testing.T) {
 	model := newDigitalOceanProvisionModel(context.Background(), newFileProfileStore(t.TempDir()))
-	updated, command, handled := model.updateGlobalKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	updated, command, handled := model.updateGlobalKey(keyCtrl('c'))
 	result := updated.(digitalOceanProvisionModel)
 	if !handled || command == nil || !result.cancelled {
 		t.Fatalf("ctrl+c did not cancel: handled=%v result=%+v", handled, result)
 	}
 
 	model.screen = provisionScreenRegion
-	updated, command, handled = model.updateGlobalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	updated, command, handled = model.updateGlobalKey(keyRunes("q"))
 	result = updated.(digitalOceanProvisionModel)
 	if !handled || command == nil || !result.cancelled {
 		t.Fatalf("q did not cancel list screen: handled=%v result=%+v", handled, result)
 	}
 
 	model.screen = provisionScreenDone
-	updated, command, handled = model.updateGlobalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	updated, command, handled = model.updateGlobalKey(keyRunes("q"))
 	result = updated.(digitalOceanProvisionModel)
 	if !handled || command == nil || result.cancelled {
 		t.Fatalf("q did not quit done screen cleanly: handled=%v result=%+v", handled, result)
@@ -89,18 +89,18 @@ func TestProvisionTUIHandlesGlobalKeys(t *testing.T) {
 
 	model.screen = provisionScreenRegion
 	model.err = "stale"
-	updated, command, handled = model.updateGlobalKey(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, command, handled = model.updateGlobalKey(keyCode(tea.KeyEsc))
 	result = updated.(digitalOceanProvisionModel)
 	if !handled || command != nil || result.err != "" {
 		t.Fatalf("esc did not go back cleanly: handled=%v result=%+v", handled, result)
 	}
 
 	model.screen = provisionScreenDone
-	updated, command = model.updateScreenKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, command = model.updateScreenKey(keyCode(tea.KeyEnter))
 	if command == nil {
 		t.Fatalf("enter did not quit done screen: %+v", updated)
 	}
-	updated, command = model.updateScreenKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	updated, command = model.updateScreenKey(keyRunes("x"))
 	result = updated.(digitalOceanProvisionModel)
 	if command != nil || result.screen != provisionScreenDone {
 		t.Fatalf("non-enter done key changed state: %+v", result)
@@ -145,21 +145,21 @@ func newProvisionHappyPathFixture(t *testing.T) (digitalOceanProvisionModel, Pro
 	model.inputs[2].SetValue(privateKeyPath)
 	model.focus = 2
 	model.inputs[2].Focus()
-	if !containsAll(model.View(), "Provision a DigitalOcean VPS", "token") {
-		t.Fatalf("input view missing expected guidance:\n%s", model.View())
+	if !containsAll(model.View().Content, "Provision a DigitalOcean VPS", "token") {
+		t.Fatalf("input view missing expected guidance:\n%s", model.View().Content)
 	}
 	return model, store, fake, restore
 }
 
 func loadProvisionCatalog(t *testing.T, model digitalOceanProvisionModel) digitalOceanProvisionModel {
 	t.Helper()
-	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, command := model.Update(keyCode(tea.KeyEnter))
 	model = updated.(digitalOceanProvisionModel)
 	if model.screen != provisionScreenLoading || command == nil {
 		t.Fatalf("enter should load catalog: screen=%d command=%v err=%q", model.screen, command, model.err)
 	}
-	if !strings.Contains(model.View(), "Loading DigitalOcean") {
-		t.Fatalf("loading view missing catalog message:\n%s", model.View())
+	if !strings.Contains(model.View().Content, "Loading DigitalOcean") {
+		t.Fatalf("loading view missing catalog message:\n%s", model.View().Content)
 	}
 	updated, _ = model.Update(command())
 	model = updated.(digitalOceanProvisionModel)
@@ -183,46 +183,46 @@ func completeProvisionSelections(t *testing.T, model digitalOceanProvisionModel)
 		if model.screen != step.screen {
 			t.Fatalf("expected screen %d, got %d", step.screen, model.screen)
 		}
-		if !strings.Contains(model.View(), step.text) {
-			t.Fatalf("view for screen %d missing %q:\n%s", step.screen, step.text, model.View())
+		if !strings.Contains(model.View().Content, step.text) {
+			t.Fatalf("view for screen %d missing %q:\n%s", step.screen, step.text, model.View().Content)
 		}
-		updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		updated, _ := model.Update(keyRunes("j"))
 		model = updated.(digitalOceanProvisionModel)
-		updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated, _ = model.Update(keyCode(tea.KeyEnter))
 		model = updated.(digitalOceanProvisionModel)
 	}
 	if model.screen != provisionScreenReview || !model.selectedKey.Upload {
 		t.Fatalf("SSH key selection should review an upload choice: screen=%d key=%+v", model.screen, model.selectedKey)
 	}
-	if !containsAll(model.View(), "Review billable Droplet", "$6.00/month", "upload local public key") {
-		t.Fatalf("review missing billable Droplet details:\n%s", model.View())
+	if !containsAll(model.View().Content, "Review billable Droplet", "$6.00/month", "upload local public key") {
+		t.Fatalf("review missing billable Droplet details:\n%s", model.View().Content)
 	}
 	return model
 }
 
 func confirmProvisionCreate(t *testing.T, model digitalOceanProvisionModel) digitalOceanProvisionModel {
 	t.Helper()
-	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, command := model.Update(keyCode(tea.KeyEnter))
 	model = updated.(digitalOceanProvisionModel)
 	if !strings.Contains(model.err, "type \"provision "+provisionTestDropletName+"\"") {
 		t.Fatalf("wrong confirmation was not rejected: %q", model.err)
 	}
 	model.confirmInput.SetValue(provisionConfirmPhrase(provisionTestDropletName))
-	updated, command = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, command = model.Update(keyCode(tea.KeyEnter))
 	model = updated.(digitalOceanProvisionModel)
 	if model.screen != provisionScreenCreating || command == nil {
 		t.Fatalf("confirmed review should create: screen=%d command=%v err=%q", model.screen, command, model.err)
 	}
-	if !strings.Contains(model.View(), "Creating the Droplet") {
-		t.Fatalf("creating view missing wait message:\n%s", model.View())
+	if !strings.Contains(model.View().Content, "Creating the Droplet") {
+		t.Fatalf("creating view missing wait message:\n%s", model.View().Content)
 	}
 	updated, _ = model.Update(command())
 	model = updated.(digitalOceanProvisionModel)
 	if !model.done || model.screen != provisionScreenDone {
 		t.Fatalf("create did not finish: screen=%d done=%v err=%q", model.screen, model.done, model.err)
 	}
-	if !strings.Contains(model.View(), provisionTestIPv4) {
-		t.Fatalf("done view missing created IP:\n%s", model.View())
+	if !strings.Contains(model.View().Content, provisionTestIPv4) {
+		t.Fatalf("done view missing created IP:\n%s", model.View().Content)
 	}
 	return model
 }
@@ -272,7 +272,7 @@ func TestProvisionTUIUsesExistingSSHKeyReference(t *testing.T) {
 	updated, _ := model.Update(catalogMessage)
 	model = updated.(digitalOceanProvisionModel)
 	for step := 0; model.screen != provisionScreenReview && step < 4; step++ {
-		updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated, _ = model.Update(keyCode(tea.KeyEnter))
 		model = updated.(digitalOceanProvisionModel)
 	}
 	if model.screen != provisionScreenReview {
@@ -282,7 +282,7 @@ func TestProvisionTUIUsesExistingSSHKeyReference(t *testing.T) {
 		t.Fatalf("existing provider key should be selected: %+v reference=%q", model.selectedKey, model.selectedKeyReference())
 	}
 	model.confirmInput.SetValue(provisionConfirmPhrase(provisionTestExistingKeyName))
-	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, command := model.Update(keyCode(tea.KeyEnter))
 	model = updated.(digitalOceanProvisionModel)
 	if model.screen != provisionScreenCreating {
 		t.Fatalf("existing key review should begin creation: screen=%d err=%q", model.screen, model.err)
@@ -314,17 +314,17 @@ func TestProvisionTUIValidationErrorsAndBackNavigation(t *testing.T) {
 
 func assertProvisionInputNavigation(t *testing.T, model digitalOceanProvisionModel) {
 	t.Helper()
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	updated, _ := model.Update(keyRunes("x"))
 	model = updated.(digitalOceanProvisionModel)
 	if !strings.Contains(model.inputs[0].Value(), "x") {
 		t.Fatalf("text input did not accept typed token: %q", model.inputs[0].Value())
 	}
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ = model.Update(keyCode(tea.KeyTab))
 	model = updated.(digitalOceanProvisionModel)
 	if model.focus != 1 {
 		t.Fatalf("tab did not advance focus: %d", model.focus)
 	}
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	updated, _ = model.Update(keyMod(tea.KeyTab, tea.ModShift))
 	model = updated.(digitalOceanProvisionModel)
 	if model.focus != 0 {
 		t.Fatalf("shift-tab did not move focus back: %d", model.focus)
@@ -403,7 +403,7 @@ func assertProvisionHelpText(t *testing.T, model digitalOceanProvisionModel) {
 func assertProvisionSelectionQuit(t *testing.T, model digitalOceanProvisionModel) {
 	t.Helper()
 	model.screen = provisionScreenRegion
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	updated, _ := model.Update(keyRunes("q"))
 	if !updated.(digitalOceanProvisionModel).cancelled {
 		t.Fatal("q should cancel selection screens")
 	}
@@ -425,13 +425,13 @@ func TestProvisionTUIHandlesCatalogAndSelectionErrors(t *testing.T) {
 
 	model.catalog = cloudCatalog{Regions: []cloudRegion{{Slug: "nyc3", Name: provisionTestRegionName, Available: true}}}
 	model.regionList = newProvisionList("regions", []list.Item{listItemForTest{}})
-	updated, _ = model.updateRegion(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = model.updateRegion(keyCode(tea.KeyEnter))
 	model = updated.(digitalOceanProvisionModel)
 	if model.screen != provisionScreenInput {
 		t.Fatalf("non-provision region item should be ignored: screen=%d", model.screen)
 	}
 	model.regionList = newProvisionList("regions", []list.Item{provisionListItem{index: 10, title: "stale"}})
-	updated, _ = model.updateRegion(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = model.updateRegion(keyCode(tea.KeyEnter))
 	model = updated.(digitalOceanProvisionModel)
 	if !strings.Contains(model.err, "selected region is no longer available") {
 		t.Fatalf("stale region selection was not rejected: %q", model.err)
@@ -439,7 +439,7 @@ func TestProvisionTUIHandlesCatalogAndSelectionErrors(t *testing.T) {
 
 	model.catalog = cloudCatalog{Regions: []cloudRegion{{Slug: "nyc3", Name: provisionTestRegionName, Available: true}}}
 	model.regionList = newProvisionList("regions", provisionRegionItems(model.catalog))
-	updated, _ = model.updateRegion(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = model.updateRegion(keyCode(tea.KeyEnter))
 	model = updated.(digitalOceanProvisionModel)
 	if !strings.Contains(model.err, "no available sizes") {
 		t.Fatalf("region with no sizes was not rejected: %q", model.err)
@@ -448,7 +448,7 @@ func TestProvisionTUIHandlesCatalogAndSelectionErrors(t *testing.T) {
 	model.catalog = cloudCatalog{Sizes: []cloudSize{{Slug: provisionTestSize, Regions: []string{"nyc3"}, Available: true, PriceMonthly: 6, DiskGB: 25}}}
 	model.selectedRegion = cloudRegion{Slug: "nyc3"}
 	model.sizeList = newProvisionList("sizes", []list.Item{provisionListItem{index: 9, title: "stale"}})
-	updated, _ = model.updateSize(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = model.updateSize(keyCode(tea.KeyEnter))
 	model = updated.(digitalOceanProvisionModel)
 	if !strings.Contains(model.err, "selected size is no longer available") {
 		t.Fatalf("stale size selection was not rejected: %q", model.err)
@@ -456,7 +456,7 @@ func TestProvisionTUIHandlesCatalogAndSelectionErrors(t *testing.T) {
 
 	model.catalog = cloudCatalog{Sizes: []cloudSize{{Slug: provisionTestSize, Regions: []string{"nyc3"}, Available: true, PriceMonthly: 6, DiskGB: 25}}}
 	model.sizeList = newProvisionList("sizes", provisionSizeItems(model.catalog, "nyc3"))
-	updated, _ = model.updateSize(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = model.updateSize(keyCode(tea.KeyEnter))
 	model = updated.(digitalOceanProvisionModel)
 	if !strings.Contains(model.err, "no Ubuntu images") {
 		t.Fatalf("size with no images was not rejected: %q", model.err)
@@ -466,7 +466,7 @@ func TestProvisionTUIHandlesCatalogAndSelectionErrors(t *testing.T) {
 	model.selectedRegion = cloudRegion{Slug: "nyc3"}
 	model.selectedSize = cloudSize{DiskGB: 25}
 	model.imageList = newProvisionList("images", []list.Item{provisionListItem{index: 9, title: "stale"}})
-	updated, _ = model.updateImage(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = model.updateImage(keyCode(tea.KeyEnter))
 	model = updated.(digitalOceanProvisionModel)
 	if !strings.Contains(model.err, "selected image is no longer available") {
 		t.Fatalf("stale image selection was not rejected: %q", model.err)
@@ -474,7 +474,7 @@ func TestProvisionTUIHandlesCatalogAndSelectionErrors(t *testing.T) {
 
 	model.catalog = cloudCatalog{}
 	model.keyList = newProvisionList("keys", []list.Item{provisionListItem{index: 9, title: "stale"}})
-	updated, _ = model.updateSSHKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = model.updateSSHKey(keyCode(tea.KeyEnter))
 	model = updated.(digitalOceanProvisionModel)
 	if !strings.Contains(model.err, "selected SSH key is no longer available") {
 		t.Fatalf("stale SSH key selection was not rejected: %q", model.err)
@@ -666,7 +666,7 @@ func TestProfileCloudScreensConfirmActionsAndRenderStatus(t *testing.T) {
 	model = startProfileCloudRestart(t, model)
 	model = validateProfileCloudRestartConfirmation(t, model)
 	model = runProfileCloudRestart(t, model, fake)
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ := model.Update(keyCode(tea.KeyEsc))
 	model = updated.(profileSetupModel)
 	if model.screen != profileSetupScreenDashboard {
 		t.Fatalf("esc should return from cloud actions to dashboard: %d", model.screen)
@@ -681,13 +681,13 @@ func openProfileCloudActions(t *testing.T) (profileSetupModel, *recordingCloudPr
 	model := newProfileSetupModel([]profileChoice{activeCloudProfileChoice()})
 	model.selectedIndex = 0
 	model.screen = profileSetupScreenDashboard
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})
+	updated, _ := model.Update(keyRunes("o"))
 	model = updated.(profileSetupModel)
 	if model.screen != profileSetupScreenCloud || model.err != "" {
 		t.Fatalf("cloud shortcut did not open action screen: screen=%d err=%q", model.screen, model.err)
 	}
-	if !containsAll(model.View(), "DigitalOcean Droplet actions", "restart", "destroy") {
-		t.Fatalf("cloud view missing actions:\n%s", model.View())
+	if !containsAll(model.View().Content, "DigitalOcean Droplet actions", "restart", "destroy") {
+		t.Fatalf("cloud view missing actions:\n%s", model.View().Content)
 	}
 	return model, fake, restore
 }
@@ -704,7 +704,7 @@ func assertProfileCloudHelpBindings(t *testing.T) {
 
 func startProfileCloudRestart(t *testing.T, model profileSetupModel) profileSetupModel {
 	t.Helper()
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	updated, _ := model.Update(keyRunes("r"))
 	model = updated.(profileSetupModel)
 	if model.screen != profileSetupScreenCloudConfirm || model.cloudAction != "restart" || model.focus != 0 {
 		t.Fatalf("restart should request token first: screen=%d action=%q focus=%d", model.screen, model.cloudAction, model.focus)
@@ -717,25 +717,25 @@ func startProfileCloudRestart(t *testing.T, model profileSetupModel) profileSetu
 
 func validateProfileCloudRestartConfirmation(t *testing.T, model profileSetupModel) profileSetupModel {
 	t.Helper()
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := model.Update(keyCode(tea.KeyEnter))
 	model = updated.(profileSetupModel)
 	if !strings.Contains(model.err, "DigitalOcean API token is required") {
 		t.Fatalf("blank token was not rejected: %q", model.err)
 	}
 	model.cloudTokenInput.SetValue("token")
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ = model.Update(keyCode(tea.KeyTab))
 	model = updated.(profileSetupModel)
 	if model.focus != 1 {
 		t.Fatalf("tab should focus confirmation: %d", model.focus)
 	}
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	updated, _ = model.Update(keyMod(tea.KeyTab, tea.ModShift))
 	model = updated.(profileSetupModel)
 	if model.focus != 0 {
 		t.Fatalf("shift-tab should focus token: %d", model.focus)
 	}
 	model.focus = 1
 	model.cloudConfirmInput.SetValue("wrong")
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = model.Update(keyCode(tea.KeyEnter))
 	model = updated.(profileSetupModel)
 	if !strings.Contains(model.err, "type \"restart 84\"") {
 		t.Fatalf("wrong confirmation was not rejected: %q", model.err)
@@ -746,13 +746,13 @@ func validateProfileCloudRestartConfirmation(t *testing.T, model profileSetupMod
 func runProfileCloudRestart(t *testing.T, model profileSetupModel, fake *recordingCloudProvider) profileSetupModel {
 	t.Helper()
 	model.cloudConfirmInput.SetValue("restart 84")
-	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, command := model.Update(keyCode(tea.KeyEnter))
 	model = updated.(profileSetupModel)
 	if model.screen != profileSetupScreenCloudRunning || command == nil {
 		t.Fatalf("confirmed restart should run: screen=%d command=%v", model.screen, command)
 	}
-	if !strings.Contains(model.View(), "Running DigitalOcean restart action") {
-		t.Fatalf("running view missing action:\n%s", model.View())
+	if !strings.Contains(model.View().Content, "Running DigitalOcean restart action") {
+		t.Fatalf("running view missing action:\n%s", model.View().Content)
 	}
 	updated, _ = model.Update(command())
 	model = updated.(profileSetupModel)
@@ -832,7 +832,7 @@ func TestProfileCloudInactiveAndErrorPaths(t *testing.T) {
 		t.Fatal("destroyed cloud metadata should not be active")
 	}
 	model.screen = profileSetupScreenCloud
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	updated, _ := model.Update(keyRunes("d"))
 	model = updated.(profileSetupModel)
 	if !strings.Contains(model.err, "active DigitalOcean Droplet") {
 		t.Fatalf("inactive cloud action should be blocked: %q", model.err)
@@ -857,7 +857,7 @@ func TestProfileCloudInactiveAndErrorPaths(t *testing.T) {
 	noCloud := newProfileSetupModel([]profileChoice{{Profile: Profile{ID: "profile-2"}, State: ProfileState{Runs: map[string]SetupRun{}}}})
 	noCloud.selectedIndex = 0
 	noCloud.screen = profileSetupScreenDashboard
-	updated, _ = noCloud.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})
+	updated, _ = noCloud.Update(keyRunes("o"))
 	noCloud = updated.(profileSetupModel)
 	if !strings.Contains(noCloud.err, "no DigitalOcean Droplet metadata") {
 		t.Fatalf("dashboard should reject cloud screen without metadata: %q", noCloud.err)

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 )
 
 const (
@@ -148,8 +148,8 @@ func TestLegacySetupModelNavigationAndConfirmation(t *testing.T) {
 	if model.Init() == nil {
 		t.Fatal("setup model should blink the active input")
 	}
-	if !strings.Contains(model.View(), "Servestead setup") {
-		t.Fatalf("mode view missing title:\n%s", model.View())
+	if !strings.Contains(model.View().Content, "Servestead setup") {
+		t.Fatalf("mode view missing title:\n%s", model.View().Content)
 	}
 
 	updated, command := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
@@ -158,27 +158,27 @@ func TestLegacySetupModelNavigationAndConfirmation(t *testing.T) {
 		t.Fatalf("non-key message changed setup state: %+v", model)
 	}
 
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	updated, _ = model.Update(keyRunes("j"))
 	model = updated.(setupModel)
 	if model.selected != 1 {
 		t.Fatalf("down key did not advance mode selection: %d", model.selected)
 	}
 
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = model.Update(keyCode(tea.KeyEnter))
 	model = updated.(setupModel)
 	if model.step != setupStepInput || model.mode != setupModeBootstrapHarden || len(model.inputs) == 0 {
 		t.Fatalf("enter did not open bootstrap input step: %+v", model)
 	}
-	if !strings.Contains(model.View(), "Set up an existing Ubuntu VPS") {
-		t.Fatalf("input view missing selected mode:\n%s", model.View())
+	if !strings.Contains(model.View().Content, "Set up an existing Ubuntu VPS") {
+		t.Fatalf("input view missing selected mode:\n%s", model.View().Content)
 	}
 
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ = model.Update(keyCode(tea.KeyTab))
 	model = updated.(setupModel)
 	if model.focus != 1 {
 		t.Fatalf("tab did not advance input focus: %d", model.focus)
 	}
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	updated, _ = model.Update(keyMod(tea.KeyTab, tea.ModShift))
 	model = updated.(setupModel)
 	if model.focus != 0 {
 		t.Fatalf("shift+tab did not move input focus back: %d", model.focus)
@@ -189,13 +189,13 @@ func TestLegacySetupModelNavigationAndConfirmation(t *testing.T) {
 		model.inputs[index].SetValue(value)
 	}
 	model.focus = len(model.inputs) - 1
-	updated, command = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, command = model.Update(keyCode(tea.KeyEnter))
 	model = updated.(setupModel)
 	if command != nil || model.step != setupStepConfirm || model.config.Host != setupTestHost {
 		t.Fatalf("valid inputs did not open confirmation: %+v", model)
 	}
-	if !strings.Contains(model.View(), "Review plan") {
-		t.Fatalf("confirm view missing review:\n%s", model.View())
+	if !strings.Contains(model.View().Content, "Review plan") {
+		t.Fatalf("confirm view missing review:\n%s", model.View().Content)
 	}
 }
 
@@ -203,39 +203,39 @@ func TestLegacySetupModelEditDoctorAndCancel(t *testing.T) {
 	t.Setenv("SERVESTEAD_TEST_HOME", setupTestHome)
 	model := newSetupModel()
 	model.selected = int(setupModeBootstrapHarden)
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := model.Update(keyCode(tea.KeyEnter))
 	model = updated.(setupModel)
 	values := []string{setupTestHost, "root", "servestead", setupTestEnvPrivateKey}
 	for index, value := range values {
 		model.inputs[index].SetValue(value)
 	}
 	model.focus = len(model.inputs) - 1
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = model.Update(keyCode(tea.KeyEnter))
 	model = updated.(setupModel)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	updated, _ = model.Update(keyRunes("e"))
 	model = updated.(setupModel)
 	if model.step != setupStepInput {
 		t.Fatalf("edit key did not return to input: %+v", model)
 	}
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ = model.Update(keyCode(tea.KeyEsc))
 	model = updated.(setupModel)
 	if model.step != setupStepMode {
 		t.Fatalf("escape from input did not return to mode: %+v", model)
 	}
 
 	model.selected = int(setupModeDoctor)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = model.Update(keyCode(tea.KeyEnter))
 	model = updated.(setupModel)
 	if model.step != setupStepConfirm || model.config.Mode != setupModeDoctor {
 		t.Fatalf("doctor mode did not skip to confirmation: %+v", model)
 	}
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	updated, _ = model.Update(keyRunes("e"))
 	model = updated.(setupModel)
 	if model.step != setupStepMode {
 		t.Fatalf("editing doctor mode should return to mode selection: %+v", model)
 	}
 
-	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	updated, command := model.Update(keyRunes("q"))
 	model = updated.(setupModel)
 	if command == nil || !model.cancelled {
 		t.Fatalf("q from mode should cancel setup: %+v", model)
@@ -644,7 +644,7 @@ func TestFailedProxyRetryCollectsPangolinCredentials(t *testing.T) {
 	model.selectedIndex = 0
 	model.setInputsFromChoice(false)
 	model.stageTable.SetCursor(2)
-	updated, _ := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	updated, _ := model.updateProfileDashboard(keyRunes("r"))
 	result := updated.(profileSetupModel)
 	if result.screen != profileSetupScreenAdvanced || result.singleStage != "platform" {
 		t.Fatalf("failed Platform retry did not request credentials: screen=%d stage=%q", result.screen, result.singleStage)
@@ -667,7 +667,7 @@ func TestPlatformStageWithMissingProfileValuesOpensIntake(t *testing.T) {
 	model.stageTable = newProfileStageTable(&state)
 	model.stageTable.SetCursor(2)
 
-	updated, command := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	updated, command := model.updateProfileDashboard(keyRunes("r"))
 	result := updated.(profileSetupModel)
 	if command != nil || result.done || result.screen != profileSetupScreenIntake || result.singleStage != "platform" {
 		t.Fatalf("Platform with missing values should open intake: screen=%d stage=%q done=%v", result.screen, result.singleStage, result.done)
@@ -676,14 +676,14 @@ func TestPlatformStageWithMissingProfileValuesOpensIntake(t *testing.T) {
 		t.Fatalf("intake should focus the domain field with guidance: focus=%d err=%q", result.focus, result.err)
 	}
 
-	updated, command = result.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, command = result.Update(keyCode(tea.KeyEsc))
 	result = updated.(profileSetupModel)
 	if command != nil || result.screen != profileSetupScreenDashboard || result.singleStage != "" {
 		t.Fatalf("leaving Platform intake should clear one-time stage: screen=%d stage=%q", result.screen, result.singleStage)
 	}
 	result.screen = profileSetupScreenReview
 	result.singleStage = "platform"
-	updated, command = result.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, command = result.Update(keyCode(tea.KeyEsc))
 	result = updated.(profileSetupModel)
 	if command != nil || result.screen != profileSetupScreenDashboard || result.singleStage != "" {
 		t.Fatalf("leaving Platform review should clear one-time stage: screen=%d stage=%q", result.screen, result.singleStage)
@@ -736,7 +736,7 @@ func TestFailedStackSyncRetryCollectsPangolinCredentials(t *testing.T) {
 	model.setInputsFromChoice(false)
 	model.screen = profileSetupScreenStacks
 	model.stackGitStatus = "clean"
-	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	updated, command := model.updateStacks(keyRunes("y"))
 	result := updated.(profileSetupModel)
 	if command != nil || result.done || result.screen != profileSetupScreenAdvanced || result.singleStage != "stacks" {
 		t.Fatalf("failed stack sync retry did not request credentials: screen=%d stage=%q done=%v", result.screen, result.singleStage, result.done)
@@ -764,7 +764,7 @@ func TestFailedSingleStackRetryCollectsPangolinCredentials(t *testing.T) {
 	model.stackGitStatus = "clean"
 	model.stacks = []editableStack{{Name: "site"}}
 	model.stackTable = newStackTable(model.stacks, setupTestDomain, &state)
-	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	updated, command := model.updateStacks(keyRunes("r"))
 	result := updated.(profileSetupModel)
 	if command != nil || result.done || result.screen != profileSetupScreenAdvanced || result.singleStage != "stack:site" {
 		t.Fatalf("failed single-stack retry did not request credentials: screen=%d stage=%q done=%v", result.screen, result.singleStage, result.done)
@@ -840,7 +840,7 @@ func TestProfileSetupModelRendersDashboardFromProfileState(t *testing.T) {
 	model.selectedIndex = 0
 	model.refreshDashboard()
 	model.screen = profileSetupScreenDashboard
-	view := model.View()
+	view := model.View().Content
 	for _, expected := range []string{"Dashboard for production", "Bootstrap", "complete", "Harden", "failed", "ufw command failed"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("dashboard missing %q:\n%s", expected, view)
@@ -855,7 +855,7 @@ func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
 	result = addGuidedStackRoute(t, result, 1)
 	result = selectAdjacentStackEnvironment(t, result)
 	result.stackInputs[0].SetValue("site")
-	updated, _ := result.updateStackReview(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := result.updateStackReview(keyCode(tea.KeyEnter))
 	result = updated.(profileSetupModel)
 	if result.screen != profileSetupScreenStacks || len(result.stacks) != 1 || result.stacks[0].Name != "site" {
 		t.Fatalf("stack review did not save in-session: %+v", result)
@@ -905,12 +905,12 @@ func newGuidedStackAddModel(t *testing.T) (profileSetupModel, string, string) {
 
 func openGuidedStackAddCompose(t *testing.T, model profileSetupModel, composePath string) profileSetupModel {
 	t.Helper()
-	updated, _ := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	updated, _ := model.updateProfileDashboard(keyRunes("s"))
 	result := updated.(profileSetupModel)
 	if result.screen != profileSetupScreenStacks {
 		t.Fatalf("stack shortcut did not open stack manager: %v (%s)", result.screen, result.err)
 	}
-	updated, _ = result.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	updated, _ = result.updateStacks(keyRunes("a"))
 	result = updated.(profileSetupModel)
 	if result.screen != profileSetupScreenStackCompose {
 		t.Fatalf("stack shortcut did not open Compose intake: %v", result.screen)
@@ -918,13 +918,13 @@ func openGuidedStackAddCompose(t *testing.T, model profileSetupModel, composePat
 	if result.stackComposeManual {
 		t.Fatal("Compose intake did not start in file-browser mode")
 	}
-	updated, _ = result.updateStackCompose(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	updated, _ = result.updateStackCompose(keyRunes("/"))
 	result = updated.(profileSetupModel)
 	if !result.stackComposeManual {
 		t.Fatal("manual Compose path fallback did not open")
 	}
 	result.stackComposeInput.SetValue(composePath)
-	updated, _ = result.updateStackCompose(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = result.updateStackCompose(keyCode(tea.KeyEnter))
 	result = updated.(profileSetupModel)
 	if result.screen != profileSetupScreenStackServices || len(result.stackResources) != 0 {
 		t.Fatalf("Compose intake did not open private-by-default service selection: %v %+v", result.screen, result.stackResources)
@@ -936,11 +936,11 @@ func addGuidedStackRoute(t *testing.T, result profileSetupModel, serviceIndex in
 	t.Helper()
 	if serviceIndex > 0 {
 		for index := 0; index < serviceIndex; index++ {
-			updated, _ := result.updateStackServices(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+			updated, _ := result.updateStackServices(keyRunes("j"))
 			result = updated.(profileSetupModel)
 		}
 	}
-	updated, _ := result.updateStackServices(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := result.updateStackServices(keyCode(tea.KeyEnter))
 	result = updated.(profileSetupModel)
 	if result.screen != profileSetupScreenStackResourceEditor || result.stackResourceInputs[1].Value() != result.stackServices[serviceIndex].Name {
 		t.Fatalf("first service route editor did not open: %v %q", result.screen, result.stackResourceInputs[1].Value())
@@ -949,7 +949,7 @@ func addGuidedStackRoute(t *testing.T, result profileSetupModel, serviceIndex in
 		t.Fatal("advanced route fields were shown by default")
 	}
 	result = openGuidedStackAdvancedFields(t, result, serviceIndex)
-	updated, _ = result.updateStackResourceEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
+	updated, _ = result.updateStackResourceEditor(keyCtrl('s'))
 	result = updated.(profileSetupModel)
 	if result.screen != profileSetupScreenStackServices || len(result.stackResources) != serviceIndex+1 {
 		t.Fatalf("route was not retained: %+v", result.stackResources)
@@ -962,7 +962,7 @@ func openGuidedStackAdvancedFields(t *testing.T, result profileSetupModel, servi
 	if serviceIndex != 0 {
 		return result
 	}
-	updated, _ := result.updateStackResourceEditor(tea.KeyMsg{Type: tea.KeyCtrlX})
+	updated, _ := result.updateStackResourceEditor(keyCtrl('x'))
 	result = updated.(profileSetupModel)
 	if !strings.Contains(result.stackResourceEditorView(), "Resource ID") {
 		t.Fatal("advanced route fields did not open")
@@ -972,14 +972,14 @@ func openGuidedStackAdvancedFields(t *testing.T, result profileSetupModel, servi
 
 func selectAdjacentStackEnvironment(t *testing.T, result profileSetupModel) profileSetupModel {
 	t.Helper()
-	updated, _ := result.updateStackServices(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	updated, _ := result.updateStackServices(keyRunes("n"))
 	result = updated.(profileSetupModel)
 	if result.screen != profileSetupScreenStackEnvironment || len(result.stackEnvironmentOptions) != 3 {
 		t.Fatalf("runtime environment choices were not prepared: %+v", result.stackEnvironmentOptions)
 	}
-	updated, _ = result.updateStackEnvironment(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	updated, _ = result.updateStackEnvironment(keyRunes("j"))
 	result = updated.(profileSetupModel)
-	updated, _ = result.updateStackEnvironment(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = result.updateStackEnvironment(keyCode(tea.KeyEnter))
 	result = updated.(profileSetupModel)
 	if result.screen != profileSetupScreenStackReview || len(result.stackEnvironmentKeys) != 1 {
 		t.Fatalf("adjacent environment did not open review: %v %+v", result.screen, result.stackEnvironmentKeys)
@@ -1023,7 +1023,7 @@ func TestStackFilePickersSelectComposeAndShowHiddenEnvironmentFiles(t *testing.T
 	message := model.stackComposePicker.Init()()
 	updated, _ := model.updateStackCompose(message)
 	model = updated.(profileSetupModel)
-	updated, _ = model.updateStackCompose(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = model.updateStackCompose(keyCode(tea.KeyEnter))
 	model = updated.(profileSetupModel)
 	if model.screen != profileSetupScreenStackServices || model.stackComposePath != composePath {
 		t.Fatalf("Compose picker did not select the file: %v %q", model.screen, model.stackComposePath)
@@ -1092,13 +1092,13 @@ func newMultiResourceStackEditorModel(t *testing.T) (profileSetupModel, ProfileS
 
 func editFirstStackResourceSubdomain(t *testing.T, model profileSetupModel) profileSetupModel {
 	t.Helper()
-	updated, _ := model.updateStackEditor(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	updated, _ := model.updateStackEditor(keyRunes("e"))
 	model = updated.(profileSetupModel)
 	if model.screen != profileSetupScreenStackResourceEditor {
 		t.Fatalf("resource editor did not open: %v", model.screen)
 	}
 	model.stackResourceInputs[3].SetValue("app")
-	updated, _ = model.updateStackResourceEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
+	updated, _ = model.updateStackResourceEditor(keyCtrl('s'))
 	model = updated.(profileSetupModel)
 	if model.stackResources[0].Subdomain != "app" {
 		t.Fatalf("resource edit was not retained: %+v", model.stackResources)
@@ -1112,13 +1112,13 @@ func saveStackEditorRuntimeEnvironment(t *testing.T, model profileSetupModel) pr
 	if err := os.WriteFile(environmentPath, []byte(setupTestAPIKeyEnvironment), 0600); err != nil {
 		t.Fatal(err)
 	}
-	updated, _ := model.updateStackEditor(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	updated, _ := model.updateStackEditor(keyRunes("n"))
 	model = updated.(profileSetupModel)
 	model.stackEnvironmentMode = stackEnvironmentManual
 	model.stackEnvironmentInput.SetValue(environmentPath)
-	updated, _ = model.updateStackEnvironment(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = model.updateStackEnvironment(keyCode(tea.KeyEnter))
 	model = updated.(profileSetupModel)
-	updated, _ = model.updateStackEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
+	updated, _ = model.updateStackEditor(keyCtrl('s'))
 	model = updated.(profileSetupModel)
 	if model.screen != profileSetupScreenStacks || model.err != "" {
 		t.Fatalf("stack editor did not save: %v %s", model.screen, model.err)
@@ -1188,18 +1188,18 @@ public_resources:
 	if len(model.stacks) != 1 || model.stacks[0].Name != "arrs" {
 		t.Fatalf("dashboard did not detect arrs stack: %+v", model.stacks)
 	}
-	view := model.View()
+	view := model.View().Content
 	if !strings.Contains(view, "Standalone stacks (1)") || !strings.Contains(view, "arrs") {
 		t.Fatalf("dashboard does not show detected stack:\n%s", view)
 	}
 	model.screen = profileSetupScreenStacks
-	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	updated, command := model.updateStacks(keyRunes("r"))
 	blocked := updated.(profileSetupModel)
 	if command != nil || blocked.done || !strings.Contains(blocked.err, "uncommitted") {
 		t.Fatalf("dirty single-stack deployment was not blocked in the TUI: %+v", blocked)
 	}
 
-	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	updated, command = model.updateStacks(keyRunes("y"))
 	blocked = updated.(profileSetupModel)
 	if command != nil || blocked.done || !strings.Contains(blocked.err, "uncommitted") {
 		t.Fatalf("dirty repository sync was not blocked: %+v", blocked)
@@ -1211,7 +1211,7 @@ public_resources:
 	if model.stackSyncStatus != "sync required" {
 		t.Fatalf("committed repository drift not detected: %q", model.stackSyncStatus)
 	}
-	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	updated, command = model.updateStacks(keyRunes("y"))
 	syncing := updated.(profileSetupModel)
 	if command == nil || !syncing.done || syncing.singleStage != "stacks" {
 		t.Fatalf("clean repository did not start synchronization: %+v", syncing)
@@ -1268,7 +1268,7 @@ func assertComposeOnlyStackDraft(t *testing.T, model profileSetupModel) {
 	if !strings.Contains(view, "draft") || !strings.Contains(view, "needs review") {
 		t.Fatalf("draft stack guidance missing:\n%s", view)
 	}
-	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	updated, command := model.updateStacks(keyRunes("r"))
 	blocked := updated.(profileSetupModel)
 	if command != nil || blocked.done || !strings.Contains(blocked.err, "needs review") {
 		t.Fatalf("draft deployment was not blocked: %+v", blocked)
@@ -1277,12 +1277,12 @@ func assertComposeOnlyStackDraft(t *testing.T, model profileSetupModel) {
 
 func reviewAndSaveComposeOnlyStack(t *testing.T, model profileSetupModel) profileSetupModel {
 	t.Helper()
-	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, command := model.updateStacks(keyCode(tea.KeyEnter))
 	reviewing := updated.(profileSetupModel)
 	if command != nil || reviewing.screen != profileSetupScreenStackEditor || !reviewing.stackMetadataMissing {
 		t.Fatalf("draft stack did not open for review: %+v", reviewing)
 	}
-	updated, command = reviewing.updateStackEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
+	updated, command = reviewing.updateStackEditor(keyCtrl('s'))
 	saved := updated.(profileSetupModel)
 	if command != nil || saved.screen != profileSetupScreenStacks || saved.err != "" {
 		t.Fatalf("draft stack did not save: %+v", saved)
@@ -1468,20 +1468,20 @@ func TestProfileSetupModelViewsRenderPopulatedScreens(t *testing.T) {
 	}
 	for _, tc := range cases {
 		model.screen = tc.screen
-		if view := model.View(); !strings.Contains(view, tc.want) {
+		if view := model.View().Content; !strings.Contains(view, tc.want) {
 			t.Fatalf("screen %d missing %q:\n%s", tc.screen, tc.want, view)
 		}
 	}
 
 	model.screen = profileSetupScreenStackCompose
 	model.stackComposeManual = true
-	if view := model.View(); !strings.Contains(view, "Docker Compose file") {
+	if view := model.View().Content; !strings.Contains(view, "Docker Compose file") {
 		t.Fatalf("manual stack compose view missing input:\n%s", view)
 	}
 	for _, mode := range []stackEnvironmentMode{stackEnvironmentChoose, stackEnvironmentBrowse, stackEnvironmentManual} {
 		model.screen = profileSetupScreenStackEnvironment
 		model.stackEnvironmentMode = mode
-		if view := model.View(); !strings.Contains(view, "Runtime environment") {
+		if view := model.View().Content; !strings.Contains(view, "Runtime environment") {
 			t.Fatalf("environment mode %d did not render:\n%s", mode, view)
 		}
 	}
@@ -1543,19 +1543,19 @@ func TestStackDeleteRemovesSelectedStackAndEnvironmentSecret(t *testing.T) {
 
 func TestProfileStackManagerReviewsStagesAndCommitsCleanStack(t *testing.T) {
 	model := newCleanStackManagerModel(t)
-	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
+	updated, command := model.updateStacks(keyRunes("v"))
 	withDiff := updated.(profileSetupModel)
 	if command != nil || withDiff.screen != profileSetupScreenStackDiff || withDiff.err != "" {
 		t.Fatalf("diff action failed: %+v", withDiff)
 	}
 
-	updated, _ = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	updated, _ = model.updateStacks(keyRunes("g"))
 	staged := updated.(profileSetupModel)
 	if staged.err != "" || !strings.Contains(staged.stackNotice, "staged") {
 		t.Fatalf("stage action failed: %+v", staged)
 	}
 
-	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	updated, command = model.updateStacks(keyRunes("c"))
 	committing := updated.(profileSetupModel)
 	if command != nil || committing.screen != profileSetupScreenStackCommit || committing.err != "" {
 		t.Fatalf("commit action failed: %+v", committing)
@@ -1564,19 +1564,19 @@ func TestProfileStackManagerReviewsStagesAndCommitsCleanStack(t *testing.T) {
 
 func TestProfileStackManagerRunsSyncsAndReportsPushFailure(t *testing.T) {
 	model := newCleanStackManagerModel(t)
-	updated, command := model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	updated, command := model.updateStacks(keyRunes("r"))
 	running := updated.(profileSetupModel)
 	if command == nil || !running.done || running.singleStage != setupStageStackPrefix+"site" {
 		t.Fatalf("stack run action failed: %+v", running)
 	}
 
-	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	updated, command = model.updateStacks(keyRunes("y"))
 	syncing := updated.(profileSetupModel)
 	if command == nil || !syncing.done || syncing.singleStage != "stacks" {
 		t.Fatalf("stack sync action failed: %+v", syncing)
 	}
 
-	updated, command = model.updateStacks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	updated, command = model.updateStacks(keyRunes("p"))
 	pushing := updated.(profileSetupModel)
 	if command != nil || pushing.err == "" {
 		t.Fatalf("push action without origin should report an error: %+v", pushing)
@@ -1627,11 +1627,11 @@ func TestProfileStackEnvironmentChoiceNavigation(t *testing.T) {
 	if result := updated.(profileSetupModel); result.stackEnvironmentCursor != 0 {
 		t.Fatalf("non-key message changed cursor: %+v", result)
 	}
-	updated, _ = model.updateStackEnvironmentChoice(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	updated, _ = model.updateStackEnvironmentChoice(keyRunes("j"))
 	if result := updated.(profileSetupModel); result.stackEnvironmentCursor != 1 {
 		t.Fatalf("down key did not move cursor: %+v", result)
 	}
-	updated, _ = updated.(profileSetupModel).updateStackEnvironmentChoice(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	updated, _ = updated.(profileSetupModel).updateStackEnvironmentChoice(keyRunes("k"))
 	if result := updated.(profileSetupModel); result.stackEnvironmentCursor != 0 {
 		t.Fatalf("up key did not move cursor: %+v", result)
 	}
@@ -1678,12 +1678,12 @@ func TestProfileStackEnvironmentBrowseAndManualFallback(t *testing.T) {
 		t.Fatalf("browse option returned unexpected result: %+v", browsing)
 	}
 
-	updated, command = browsing.updateStackEnvironmentBrowse(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	updated, command = browsing.updateStackEnvironmentBrowse(keyRunes("/"))
 	manual := updated.(profileSetupModel)
 	if command == nil || manual.stackEnvironmentMode != stackEnvironmentManual || manual.err != "" {
 		t.Fatalf("manual environment fallback failed: %+v", manual)
 	}
-	updated, _ = manual.updateStackEnvironmentManual(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = manual.updateStackEnvironmentManual(keyCode(tea.KeyEnter))
 	if result := updated.(profileSetupModel); !strings.Contains(result.err, "path is required") {
 		t.Fatalf("blank manual path returned unexpected result: %+v", result)
 	}
@@ -1742,7 +1742,7 @@ func TestProfileSetupRepositoryFlowDefaultsToCreateBeforeSSH(t *testing.T) {
 		t.Fatalf("unexpected default repository mode: %s", model.repositoryMode)
 	}
 	model.screen = profileSetupScreenRepository
-	view := model.View()
+	view := model.View().Content
 	for _, expected := range []string{
 		"Create a new local repository",
 		"Use an existing local checkout",
@@ -1754,7 +1754,7 @@ func TestProfileSetupRepositoryFlowDefaultsToCreateBeforeSSH(t *testing.T) {
 		}
 	}
 
-	updated, _ := model.updateRepositoryChoice(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := model.updateRepositoryChoice(keyCode(tea.KeyEnter))
 	result := updated.(profileSetupModel)
 	if result.screen != profileSetupScreenReview || result.repositoryMode != "create" {
 		t.Fatalf("create choice did not proceed to review: %+v", result)
@@ -1813,7 +1813,7 @@ func TestProfileSetupRepositoryFlowUsesExistingCheckout(t *testing.T) {
 	runGitCommand(t, repository, "init", "-b", "main")
 	model := newProfileSetupModel(nil)
 	model.repositoryList.Select(1)
-	updated, _ := model.updateRepositoryChoice(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := model.updateRepositoryChoice(keyCode(tea.KeyEnter))
 	result := updated.(profileSetupModel)
 	if result.screen != profileSetupScreenRepositoryDetails || result.repositoryMode != "existing" {
 		t.Fatalf("existing choice did not request details: %+v", result)
@@ -1822,7 +1822,7 @@ func TestProfileSetupRepositoryFlowUsesExistingCheckout(t *testing.T) {
 		result.inputs[index].SetValue(value)
 	}
 	result.repositoryInputs[0].SetValue(repository)
-	updated, _ = result.updateRepositoryDetails(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = result.updateRepositoryDetails(keyCode(tea.KeyEnter))
 	result = updated.(profileSetupModel)
 	if result.screen != profileSetupScreenReview {
 		t.Fatalf("existing checkout did not proceed to review: %s", result.err)
@@ -1840,7 +1840,7 @@ func TestProfileSetupRepositoryFlowRejectsMissingExistingCheckout(t *testing.T) 
 	model := newProfileSetupModel(nil)
 	model.repositoryMode = "existing"
 	model.repositoryInputs[0].SetValue(filepath.Join(t.TempDir(), "missing"))
-	updated, _ := model.updateRepositoryDetails(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := model.updateRepositoryDetails(keyCode(tea.KeyEnter))
 	result := updated.(profileSetupModel)
 	if result.screen == profileSetupScreenReview || !strings.Contains(result.err, "choose create") {
 		t.Fatalf("missing checkout was not rejected clearly: %+v", result)
@@ -1876,7 +1876,7 @@ func TestProfileSetupModelFreshUsesAdminAsInitialUser(t *testing.T) {
 	model.selectedIndex = 0
 	model.setInputsFromChoice(false)
 
-	updatedModel, _ := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	updatedModel, _ := model.updateProfileDashboard(keyRunes("f"))
 	result := updatedModel.(profileSetupModel)
 	options, err := result.optionsFromInputs()
 	if err != nil {
@@ -1902,12 +1902,12 @@ func TestProfileSetupModelDeleteConfirmation(t *testing.T) {
 	model.selectedIndex = 0
 	model.screen = profileSetupScreenDashboard
 
-	updatedModel, _ := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	updatedModel, _ := model.updateProfileDashboard(keyRunes("x"))
 	result := updatedModel.(profileSetupModel)
 	if result.screen != profileSetupScreenDeleteConfirm {
 		t.Fatalf("delete key did not open confirmation: %+v", result.screen)
 	}
-	updatedModel, _ = result.updateProfileDeleteConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	updatedModel, _ = result.updateProfileDeleteConfirm(keyRunes("y"))
 	result = updatedModel.(profileSetupModel)
 	if result.deleteProfileID != setupTestProfileID {
 		t.Fatalf("delete confirmation did not capture profile id: %+v", result)
@@ -2206,7 +2206,7 @@ func TestProfileRunModelRendersTaskProgressAndLogs(t *testing.T) {
 	model.applyTaskEvent(TaskEvent{Type: TaskLogLine, RunID: "run-1", Stage: "harden", Stream: "stdout", Line: "remote output"})
 	model.applyTaskEvent(TaskEvent{Type: TaskSucceeded, RunID: "run-1", Stage: "harden", TaskName: "Validate sysctl keys"})
 
-	view := model.View()
+	view := model.View().Content
 	for _, expected := range []string{
 		"Servestead setup run",
 		"production (203.0.113.10)",
@@ -2238,7 +2238,7 @@ func TestProfileRunFailureRemainsInTUIOnEscape(t *testing.T) {
 	if model.Init() != nil {
 		t.Fatal("completed failure model should not start background commands")
 	}
-	view := model.View()
+	view := model.View().Content
 	for _, expected := range []string{
 		"Failed",
 		"Sync stacks",
@@ -2255,12 +2255,12 @@ func TestProfileRunFailureRemainsInTUIOnEscape(t *testing.T) {
 		t.Fatalf("failure view did not advertise escape return:\n%s", view)
 	}
 
-	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, command := model.Update(keyCode(tea.KeyEsc))
 	result := updated.(profileRunModel)
 	if command == nil || !result.done || result.err == nil || !result.returnToSetup {
 		t.Fatalf("escape did not request returning to setup: %+v", result)
 	}
-	_, command = result.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	_, command = result.Update(keyRunes("q"))
 	if command == nil {
 		t.Fatal("q should explicitly exit the completed run view")
 	}
@@ -2286,7 +2286,7 @@ func TestProfileRunCompletedEscapeReturnsWhenParentSetupExists(t *testing.T) {
 	model.done = true
 	model.allowReturn = true
 
-	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, command := model.Update(keyCode(tea.KeyEsc))
 	result := updated.(profileRunModel)
 	if command == nil || !result.returnToSetup {
 		t.Fatalf("escape did not request return from completed result: %+v", result)
@@ -2308,11 +2308,11 @@ func TestProfileRunModelUpdatesAndFinishMessages(t *testing.T) {
 
 	updated, command := model.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
 	model = updated.(profileRunModel)
-	if command != nil || model.width != 120 || model.logViewport.Height == 0 {
+	if command != nil || model.width != 120 || model.logViewport.Height() == 0 {
 		t.Fatalf("window resize did not update run model: %+v", model)
 	}
 
-	updated, command = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	updated, command = model.Update(keyRunes("q"))
 	model = updated.(profileRunModel)
 	if command == nil || !cancelled || !model.cancelled {
 		t.Fatalf("q did not cancel running setup: cancelled=%v model=%+v", cancelled, model)
@@ -2460,7 +2460,7 @@ func TestProfileSetupModelSelectsSingleStageRun(t *testing.T) {
 	model.screen = profileSetupScreenDashboard
 	model.stageTable.SetCursor(1)
 
-	updatedModel, cmd := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	updatedModel, cmd := model.updateProfileDashboard(keyRunes("r"))
 	if cmd == nil {
 		t.Fatal("single-stage selection should quit the setup picker")
 	}
@@ -2630,13 +2630,13 @@ func TestProfileSetupModelDashboardUsesVForReview(t *testing.T) {
 	model.refreshDashboard()
 	model.screen = profileSetupScreenDashboard
 
-	updatedModel, _ := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
+	updatedModel, _ := model.updateProfileDashboard(keyRunes("v"))
 	result := updatedModel.(profileSetupModel)
 	if result.screen != profileSetupScreenReview {
 		t.Fatalf("v should open review, got screen %d", result.screen)
 	}
 
-	updatedModel, _ = model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyEnter})
+	updatedModel, _ = model.updateProfileDashboard(keyCode(tea.KeyEnter))
 	result = updatedModel.(profileSetupModel)
 	if result.screen == profileSetupScreenReview {
 		t.Fatal("enter should not open review from the dashboard")
@@ -2656,7 +2656,7 @@ func TestProfileSetupModelEscapeBackAndQQuit(t *testing.T) {
 	model.selectedIndex = 0
 	model.screen = profileSetupScreenReview
 
-	updatedModel, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updatedModel, cmd := model.Update(keyCode(tea.KeyEsc))
 	if cmd != nil {
 		t.Fatal("esc should go back without quitting")
 	}
@@ -2665,7 +2665,7 @@ func TestProfileSetupModelEscapeBackAndQQuit(t *testing.T) {
 		t.Fatalf("esc should return to dashboard without cancelling: %+v", result)
 	}
 
-	updatedModel, cmd = result.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	updatedModel, cmd = result.Update(keyRunes("q"))
 	if cmd == nil {
 		t.Fatal("q should quit")
 	}

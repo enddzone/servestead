@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -96,26 +95,6 @@ type provisionSSHKeyChoice struct {
 	Upload bool
 }
 
-func collectDigitalOceanProvisionProfile(ctx context.Context, store ProfileStore, output io.Writer) (Profile, error) {
-	model := newDigitalOceanProvisionModel(ctx, store)
-	program := tea.NewProgram(model, tea.WithOutput(output), tea.WithAltScreen())
-	finalModel, err := program.Run()
-	if err != nil {
-		return Profile{}, fmt.Errorf("run provisioning TUI: %w", err)
-	}
-	result, ok := finalModel.(digitalOceanProvisionModel)
-	if !ok {
-		return Profile{}, errors.New("provisioning TUI returned an unexpected model")
-	}
-	if result.cancelled {
-		return Profile{}, errors.New("provisioning cancelled")
-	}
-	if !result.done {
-		return Profile{}, errors.New("provisioning did not complete")
-	}
-	return result.createdProfile, nil
-}
-
 func newDigitalOceanProvisionModel(ctx context.Context, store ProfileStore) digitalOceanProvisionModel {
 	token := firstNonEmpty(os.Getenv("DIGITALOCEAN_ACCESS_TOKEN"), os.Getenv("DIGITALOCEAN_TOKEN"))
 	inputs := newSetupInputs([]setupInputField{
@@ -127,7 +106,7 @@ func newDigitalOceanProvisionModel(ctx context.Context, store ProfileStore) digi
 	confirmInput := textinput.New()
 	confirmInput.Prompt = "Type confirmation: "
 	confirmInput.CharLimit = 256
-	confirmInput.Width = 72
+	confirmInput.SetWidth(72)
 	return digitalOceanProvisionModel{
 		ctx:          ctx,
 		store:        store,
@@ -532,7 +511,7 @@ func (model digitalOceanProvisionModel) selectedKeyReference() string {
 	return model.selectedKey.Key.Fingerprint
 }
 
-func (model digitalOceanProvisionModel) View() string {
+func (model digitalOceanProvisionModel) View() tea.View {
 	var builder strings.Builder
 	builder.WriteString(setupTitleStyle.Render("Provision a DigitalOcean VPS"))
 	builder.WriteString("\n")
@@ -579,7 +558,7 @@ func (model digitalOceanProvisionModel) View() string {
 	}
 	builder.WriteString("\n")
 	builder.WriteString(setupHelpStyle.Render(model.provisionHelpText()))
-	return builder.String()
+	return altScreenView(builder.String())
 }
 
 func (model digitalOceanProvisionModel) provisionReviewView() string {
