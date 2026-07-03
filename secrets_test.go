@@ -12,28 +12,41 @@ import (
 )
 
 func TestAgeProviderEncryptsWithoutPlaintextAndDecrypts(t *testing.T) {
-	repository := t.TempDir()
+	provider := newAgeSecretProvider()
+	ref := newAgeProviderTestRef(t)
+	secrets := SecretSet{"API_KEY": "secret-value", "TOKEN": "second-secret"}
+	if err := provider.PutStackSecrets(context.Background(), ref, secrets); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(ref.RepositoryPath, filepath.FromSlash(defaultStackSecretSource("site")))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertAgeSecretFileEncrypted(t, data)
+	assertAgeSecretFileMode(t, path)
+	assertAgeProviderDecrypts(t, provider, ref)
+	assertSOPSDecryptsAgeSecretFile(t, ref.Identity, data)
+	assertAgeProviderListsKeys(t, provider, ref)
+}
+
+func newAgeProviderTestRef(t *testing.T) StackSecretRef {
+	t.Helper()
 	identity, recipient, err := generateStackSecretIdentity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider := newAgeSecretProvider()
-	ref := StackSecretRef{
-		RepositoryPath: repository,
+	return StackSecretRef{
+		RepositoryPath: t.TempDir(),
 		StackName:      "site",
 		Source:         defaultStackSecretSource("site"),
 		Recipients:     []string{recipient},
 		Identity:       identity,
 	}
+}
 
-	if err := provider.PutStackSecrets(context.Background(), ref, SecretSet{"API_KEY": "secret-value", "TOKEN": "second-secret"}); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(repository, filepath.FromSlash(defaultStackSecretSource("site")))
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+func assertAgeSecretFileEncrypted(t *testing.T, data []byte) {
+	t.Helper()
 	for _, leaked := range []string{"secret-value", "second-secret"} {
 		if bytes.Contains(data, []byte(leaked)) {
 			t.Fatalf("secret file leaked plaintext %q:\n%s", leaked, data)
@@ -44,6 +57,10 @@ func TestAgeProviderEncryptsWithoutPlaintextAndDecrypts(t *testing.T) {
 			t.Fatalf("secret file missing %q:\n%s", expected, data)
 		}
 	}
+}
+
+func assertAgeSecretFileMode(t *testing.T, path string) {
+	t.Helper()
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +68,10 @@ func TestAgeProviderEncryptsWithoutPlaintextAndDecrypts(t *testing.T) {
 	if info.Mode().Perm() != 0600 {
 		t.Fatalf("secret file mode = %o, want 0600", info.Mode().Perm())
 	}
+}
+
+func assertAgeProviderDecrypts(t *testing.T, provider SecretProvider, ref StackSecretRef) {
+	t.Helper()
 	values, err := provider.GetStackSecrets(context.Background(), ref)
 	if err != nil {
 		t.Fatal(err)
@@ -58,8 +79,12 @@ func TestAgeProviderEncryptsWithoutPlaintextAndDecrypts(t *testing.T) {
 	if values["API_KEY"] != "secret-value" || values["TOKEN"] != "second-secret" {
 		t.Fatalf("unexpected decrypted values: %+v", values.Redacted())
 	}
+}
+
+func assertSOPSDecryptsAgeSecretFile(t *testing.T, identity string, data []byte) {
+	t.Helper()
 	var sopsPlaintext []byte
-	err = withSOPSAgeKey(identity, func() error {
+	err := withSOPSAgeKey(identity, func() error {
 		var decryptErr error
 		sopsPlaintext, decryptErr = sopsdecrypt.Data(data, "yaml")
 		return decryptErr
@@ -71,6 +96,10 @@ func TestAgeProviderEncryptsWithoutPlaintextAndDecrypts(t *testing.T) {
 		!bytes.Contains(sopsPlaintext, []byte("TOKEN: second-secret")) {
 		t.Fatalf("SOPS decrypt API returned unexpected plaintext:\n%s", sopsPlaintext)
 	}
+}
+
+func assertAgeProviderListsKeys(t *testing.T, provider SecretProvider, ref StackSecretRef) {
+	t.Helper()
 	metas, err := provider.ListStackSecretKeys(context.Background(), ref)
 	if err != nil {
 		t.Fatal(err)

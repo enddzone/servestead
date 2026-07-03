@@ -9,26 +9,11 @@ import (
 )
 
 func TestSecretsCommandsManageProfileIdentity(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	store, err := newDefaultProfileStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile, err := store.Create(Profile{IP: "203.0.113.10"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, profile := newSecretsCommandTestProfile(t, "203.0.113.10")
 
 	var stdout, stderr strings.Builder
-	if err := runSecrets(context.Background(), []string{"init", "--profile", profile.ID}, &stdout, &stderr); err != nil {
-		t.Fatalf("secrets init failed: %v\n%s", err, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "Created stack secret identity.") ||
-		!strings.Contains(stdout.String(), "Recipient: age1") {
-		t.Fatalf("secrets init did not report the new recipient:\n%s", stdout.String())
-	}
+	runSecretsCommand(t, []string{"init", "--profile", profile.ID}, &stdout, &stderr)
+	assertSecretsCommandOutput(t, stdout.String(), "Created stack secret identity.", "Recipient: age1")
 	secrets, err := store.LoadSecrets(profile.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -38,37 +23,60 @@ func TestSecretsCommandsManageProfileIdentity(t *testing.T) {
 		t.Fatalf("stack secret identity was not saved: %+v", secrets)
 	}
 
-	stdout.Reset()
-	stderr.Reset()
-	if err := runSecrets(context.Background(), []string{"export-key", "--profile", profile.ID}, &stdout, &stderr); err != nil {
-		t.Fatalf("secrets export-key failed: %v\n%s", err, stderr.String())
-	}
+	runSecretsCommand(t, []string{"export-key", "--profile", profile.ID}, &stdout, &stderr)
 	if strings.TrimSpace(stdout.String()) != identity {
 		t.Fatalf("export-key did not print the saved identity:\n%s", stdout.String())
 	}
 
-	importedProfile, err := store.Create(Profile{IP: "203.0.113.11"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, importedProfile := newSecretsCommandProfile(t, store, "203.0.113.11")
 	keyPath := filepath.Join(t.TempDir(), "stack-secret-key.txt")
 	if err := os.WriteFile(keyPath, []byte(identity+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	stdout.Reset()
-	stderr.Reset()
-	if err := runSecrets(context.Background(), []string{"import-key", "--profile", importedProfile.ID, "--file", keyPath}, &stdout, &stderr); err != nil {
-		t.Fatalf("secrets import-key failed: %v\n%s", err, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "Imported stack secret identity.") ||
-		!strings.Contains(stdout.String(), secrets.StackSecretRecipient) {
-		t.Fatalf("secrets import-key did not report the imported recipient:\n%s", stdout.String())
-	}
+	runSecretsCommand(t, []string{"import-key", "--profile", importedProfile.ID, "--file", keyPath}, &stdout, &stderr)
+	assertSecretsCommandOutput(t, stdout.String(), "Imported stack secret identity.", secrets.StackSecretRecipient)
 	importedSecrets, err := store.LoadSecrets(importedProfile.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if importedSecrets.StackSecretIdentity != identity || importedSecrets.StackSecretRecipient != secrets.StackSecretRecipient {
 		t.Fatalf("import-key did not save the imported identity: %+v", importedSecrets)
+	}
+}
+
+func newSecretsCommandTestProfile(t *testing.T, ip string) (ProfileStore, Profile) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	store, err := newDefaultProfileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newSecretsCommandProfile(t, store, ip)
+}
+
+func newSecretsCommandProfile(t *testing.T, store ProfileStore, ip string) (ProfileStore, Profile) {
+	t.Helper()
+	profile, err := store.Create(Profile{IP: ip})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, profile
+}
+
+func runSecretsCommand(t *testing.T, args []string, stdout, stderr *strings.Builder) {
+	t.Helper()
+	stdout.Reset()
+	stderr.Reset()
+	if err := runSecrets(context.Background(), args, stdout, stderr); err != nil {
+		t.Fatalf("secrets %s failed: %v\n%s", strings.Join(args, " "), err, stderr.String())
+	}
+}
+
+func assertSecretsCommandOutput(t *testing.T, output string, expected ...string) {
+	t.Helper()
+	if !containsAll(output, expected...) {
+		t.Fatalf("secrets output missing expected content %v:\n%s", expected, output)
 	}
 }

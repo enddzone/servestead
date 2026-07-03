@@ -625,35 +625,11 @@ func TestAdvancedSetupMasksPangolinPassword(t *testing.T) {
 }
 
 func TestProfileSetupGitHubTokenScreenManagesProfileSecret(t *testing.T) {
-	store := newFileProfileStore(t.TempDir())
-	profile, err := store.Create(Profile{
-		IP: "203.0.113.10",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	model := newProfileSetupModel([]profileChoice{{
-		Profile: profile,
-		State:   ProfileState{Runs: map[string]SetupRun{}},
-	}})
-	model.profileStore = store
-	model.selectedIndex = 0
-	model.screen = profileSetupScreenDashboard
-
-	updated, command := model.updateProfileDashboard(keyRunes("g"))
-	result := updated.(profileSetupModel)
-	if result.screen != profileSetupScreenGitHubToken || command == nil {
-		t.Fatalf("g should open GitHub token screen: screen=%d command=%v", result.screen, command)
-	}
-	if result.githubTokenInput.EchoMode != textinput.EchoPassword {
-		t.Fatal("GitHub token input is not masked")
-	}
-	if !containsAll(result.View().Content, "GitHub repository token", "Profile token: not configured", "Effective source: none") {
-		t.Fatalf("GitHub token view missing initial status:\n%s", result.View().Content)
-	}
+	store, profile, result := openGitHubTokenScreen(t)
+	assertGitHubTokenScreenStatus(t, result, "", "GitHub repository token", "Profile token: not configured", "Effective source: none")
 
 	result.githubTokenInput.SetValue(" github_pat_profile_secret\n")
-	updated, _ = result.updateGitHubToken(keyCode(tea.KeyEnter))
+	updated, _ := result.updateGitHubToken(keyCode(tea.KeyEnter))
 	result = updated.(profileSetupModel)
 	secrets, err := store.LoadSecrets(profile.ID)
 	if err != nil {
@@ -662,12 +638,7 @@ func TestProfileSetupGitHubTokenScreenManagesProfileSecret(t *testing.T) {
 	if secrets.GitHubToken != "github_pat_profile_secret" || result.profiles[0].Secrets.GitHubToken != "github_pat_profile_secret" {
 		t.Fatalf("GitHub token was not saved: stored=%+v model=%+v", secrets, result.profiles[0].Secrets)
 	}
-	if strings.Contains(result.View().Content, "github_pat_profile_secret") {
-		t.Fatal("GitHub token view leaked the saved token")
-	}
-	if !containsAll(result.View().Content, "Profile token: configured", "Effective source: profile") {
-		t.Fatalf("GitHub token view missing saved status:\n%s", result.View().Content)
-	}
+	assertGitHubTokenScreenStatus(t, result, "github_pat_profile_secret", "Profile token: configured", "Effective source: profile")
 
 	t.Setenv("SERVESTEAD_GITHUB_TOKEN", "github_pat_env_secret")
 	updated, _ = result.updateGitHubToken(keyRunes("e"))
@@ -679,12 +650,7 @@ func TestProfileSetupGitHubTokenScreenManagesProfileSecret(t *testing.T) {
 	if secrets.GitHubToken != "github_pat_env_secret" {
 		t.Fatalf("environment GitHub token was not saved: %+v", secrets)
 	}
-	if strings.Contains(result.View().Content, "github_pat_env_secret") {
-		t.Fatal("GitHub token view leaked the environment token")
-	}
-	if !containsAll(result.View().Content, "Environment token: configured", "Effective source: environment") {
-		t.Fatalf("GitHub token view missing environment status:\n%s", result.View().Content)
-	}
+	assertGitHubTokenScreenStatus(t, result, "github_pat_env_secret", "Environment token: configured", "Effective source: environment")
 
 	updated, _ = result.updateGitHubToken(keyRunes("x"))
 	result = updated.(profileSetupModel)
@@ -694,6 +660,42 @@ func TestProfileSetupGitHubTokenScreenManagesProfileSecret(t *testing.T) {
 	}
 	if secrets.GitHubToken != "" || result.profiles[0].Secrets.GitHubToken != "" {
 		t.Fatalf("GitHub token was not removed: stored=%+v model=%+v", secrets, result.profiles[0].Secrets)
+	}
+}
+
+func openGitHubTokenScreen(t *testing.T) (ProfileStore, Profile, profileSetupModel) {
+	t.Helper()
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{IP: "203.0.113.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: profile,
+		State:   ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenDashboard
+	updated, command := model.updateProfileDashboard(keyRunes("g"))
+	result := updated.(profileSetupModel)
+	if result.screen != profileSetupScreenGitHubToken || command == nil {
+		t.Fatalf("g should open GitHub token screen: screen=%d command=%v", result.screen, command)
+	}
+	if result.githubTokenInput.EchoMode != textinput.EchoPassword {
+		t.Fatal("GitHub token input is not masked")
+	}
+	return store, profile, result
+}
+
+func assertGitHubTokenScreenStatus(t *testing.T, model profileSetupModel, forbidden string, expected ...string) {
+	t.Helper()
+	view := model.View().Content
+	if forbidden != "" && strings.Contains(view, forbidden) {
+		t.Fatalf("GitHub token view leaked %q", forbidden)
+	}
+	if !containsAll(view, expected...) {
+		t.Fatalf("GitHub token view missing expected content %v:\n%s", expected, view)
 	}
 }
 

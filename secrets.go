@@ -157,15 +157,8 @@ func validateStackSecretMetadata(stackName string, metadata stackSecretMetadata)
 	if len(metadata.Recipients) == 0 {
 		return errors.New("secrets recipients are required")
 	}
-	seenRecipients := map[string]bool{}
-	for _, recipient := range metadata.Recipients {
-		if _, err := sopsage.MasterKeyFromRecipient(recipient); err != nil {
-			return fmt.Errorf("secrets recipient %q is invalid: %w", recipient, err)
-		}
-		if seenRecipients[recipient] {
-			return fmt.Errorf("secrets recipient %q is duplicated", recipient)
-		}
-		seenRecipients[recipient] = true
+	if err := validateStackSecretRecipients(metadata.Recipients); err != nil {
+		return err
 	}
 	if metadata.Runtime.Sink != stackSecretRuntimeSink {
 		return fmt.Errorf("secrets runtime sink must be %q", stackSecretRuntimeSink)
@@ -176,8 +169,26 @@ func validateStackSecretMetadata(stackName string, metadata stackSecretMetadata)
 	if len(metadata.Keys) == 0 {
 		return errors.New("secrets keys are required")
 	}
+	return validateStackSecretKeys(metadata.Keys)
+}
+
+func validateStackSecretRecipients(recipients []string) error {
+	seenRecipients := map[string]bool{}
+	for _, recipient := range recipients {
+		if _, err := sopsage.MasterKeyFromRecipient(recipient); err != nil {
+			return fmt.Errorf("secrets recipient %q is invalid: %w", recipient, err)
+		}
+		if seenRecipients[recipient] {
+			return fmt.Errorf("secrets recipient %q is duplicated", recipient)
+		}
+		seenRecipients[recipient] = true
+	}
+	return nil
+}
+
+func validateStackSecretKeys(keys []stackSecretKeyMetadata) error {
 	seen := map[string]bool{}
-	for _, key := range metadata.Keys {
+	for _, key := range keys {
 		if !environmentKeyPattern.MatchString(key.Name) {
 			return fmt.Errorf("secret key %q must be a valid environment variable name", key.Name)
 		}

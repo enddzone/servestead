@@ -9,26 +9,14 @@ import (
 )
 
 func TestGitHubTokenCommandsManageProfileToken(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	store, err := newDefaultProfileStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile, err := store.Create(Profile{IP: "203.0.113.10"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, profile := newGitHubTokenTestProfile(t)
 	tokenPath := filepath.Join(t.TempDir(), "github-token.txt")
 	if err := os.WriteFile(tokenPath, []byte("github_pat_profile_secret\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
 	var stdout, stderr strings.Builder
-	if err := run(context.Background(), []string{"github-token", "set", "--profile", profile.ID, "--file", tokenPath}, &stdout, &stderr, func(string) string { return "" }); err != nil {
-		t.Fatalf("github-token set failed: %v\n%s", err, stderr.String())
-	}
+	runGitHubTokenCLI(t, []string{"github-token", "set", "--profile", profile.ID, "--file", tokenPath}, &stdout, &stderr)
 	if strings.Contains(stdout.String(), "github_pat_profile_secret") || strings.Contains(stderr.String(), "github_pat_profile_secret") {
 		t.Fatal("github-token set leaked the token")
 	}
@@ -40,40 +28,20 @@ func TestGitHubTokenCommandsManageProfileToken(t *testing.T) {
 		t.Fatalf("GitHub token was not saved: %+v", secrets)
 	}
 
-	stdout.Reset()
-	stderr.Reset()
-	if err := run(context.Background(), []string{"github-token", "status", "--profile", profile.ID}, &stdout, &stderr, func(string) string { return "" }); err != nil {
-		t.Fatalf("github-token status failed: %v\n%s", err, stderr.String())
-	}
-	for _, expected := range []string{"Profile token: configured", "Environment token: not configured", "Effective source: profile"} {
-		if !strings.Contains(stdout.String(), expected) {
-			t.Fatalf("github-token status missing %q:\n%s", expected, stdout.String())
-		}
-	}
+	runGitHubTokenCLI(t, []string{"github-token", "status", "--profile", profile.ID}, &stdout, &stderr)
+	assertGitHubTokenOutput(t, stdout.String(), "Profile token: configured", "Environment token: not configured", "Effective source: profile")
 	if strings.Contains(stdout.String(), "github_pat_profile_secret") {
 		t.Fatal("github-token status leaked the token")
 	}
 
 	t.Setenv("SERVESTEAD_GITHUB_TOKEN", "github_pat_env_secret")
-	stdout.Reset()
-	stderr.Reset()
-	if err := run(context.Background(), []string{"github-token", "status", "--profile", profile.ID}, &stdout, &stderr, func(string) string { return "" }); err != nil {
-		t.Fatalf("github-token status with env failed: %v\n%s", err, stderr.String())
-	}
-	for _, expected := range []string{"Environment token: configured", "Effective source: environment"} {
-		if !strings.Contains(stdout.String(), expected) {
-			t.Fatalf("github-token status with env missing %q:\n%s", expected, stdout.String())
-		}
-	}
+	runGitHubTokenCLI(t, []string{"github-token", "status", "--profile", profile.ID}, &stdout, &stderr)
+	assertGitHubTokenOutput(t, stdout.String(), "Environment token: configured", "Effective source: environment")
 	if strings.Contains(stdout.String(), "github_pat_env_secret") {
 		t.Fatal("github-token status leaked the environment token")
 	}
 
-	stdout.Reset()
-	stderr.Reset()
-	if err := run(context.Background(), []string{"github-token", "remove", "--profile", profile.ID}, &stdout, &stderr, func(string) string { return "" }); err != nil {
-		t.Fatalf("github-token remove failed: %v\n%s", err, stderr.String())
-	}
+	runGitHubTokenCLI(t, []string{"github-token", "remove", "--profile", profile.ID}, &stdout, &stderr)
 	secrets, err = store.LoadSecrets(profile.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -83,11 +51,11 @@ func TestGitHubTokenCommandsManageProfileToken(t *testing.T) {
 	}
 }
 
-func TestGitHubTokenSetFromEnv(t *testing.T) {
+func newGitHubTokenTestProfile(t *testing.T) (ProfileStore, Profile) {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("SERVESTEAD_GITHUB_TOKEN", "github_pat_env_secret")
 	store, err := newDefaultProfileStore()
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +64,28 @@ func TestGitHubTokenSetFromEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return store, profile
+}
+
+func runGitHubTokenCLI(t *testing.T, args []string, stdout, stderr *strings.Builder) {
+	t.Helper()
+	stdout.Reset()
+	stderr.Reset()
+	if err := run(context.Background(), args, stdout, stderr, func(string) string { return "" }); err != nil {
+		t.Fatalf("%s failed: %v\n%s", strings.Join(args, " "), err, stderr.String())
+	}
+}
+
+func assertGitHubTokenOutput(t *testing.T, output string, expected ...string) {
+	t.Helper()
+	if !containsAll(output, expected...) {
+		t.Fatalf("github-token output missing expected content %v:\n%s", expected, output)
+	}
+}
+
+func TestGitHubTokenSetFromEnv(t *testing.T) {
+	t.Setenv("SERVESTEAD_GITHUB_TOKEN", "github_pat_env_secret")
+	store, profile := newGitHubTokenTestProfile(t)
 
 	var stdout, stderr strings.Builder
 	if err := runGitHubToken([]string{"set", "--profile", profile.ID, "--from-env"}, &stdout, &stderr); err != nil {

@@ -1819,117 +1819,185 @@ func (model profileSetupModel) updateStackEditor(key tea.KeyMsg) (tea.Model, tea
 }
 
 func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
+	ctx := context.Background()
+	request, err := model.stackEditorSaveRequest(ctx)
+	if err != nil {
+		return model.withStackEditorError(err), nil
+	}
+	scaffoldCreated, err := ensureStackEditorScaffold(request.RepositoryPath, request.Profile)
+	if err != nil {
+		return model.withStackEditorError(err), nil
+	}
+	secretsWritten, err := model.writeStackEditorSecretsBeforeMetadata(ctx, request)
+	if err != nil {
+		return model.withStackEditorError(err), nil
+	}
+	if err := writeEditableStack(request.RepositoryPath, model.stackOriginalName, request.Options, []byte(model.stackCompose)); err != nil {
+		return model.withStackEditorError(err), nil
+	}
+	if err := model.reconcileStackEditorSecrets(ctx, request, secretsWritten); err != nil {
+		return model.withStackEditorError(err), nil
+	}
+	model.finishStackEditorSave(scaffoldCreated)
+	return model, nil
+}
+
+type stackEditorSaveRequest struct {
+	Name           string
+	RepositoryPath string
+	Profile        Profile
+	CurrentSecrets stackSecretMetadata
+	Options        stackAddOptions
+	SecretPlan     stackEditorSecretPlan
+}
+
+type stackEditorSecretPlan struct {
+	Metadata       stackSecretMetadata
+	Values         SecretSet
+	Identity       string
+	RenameExisting bool
+}
+
+func (model *profileSetupModel) stackEditorSaveRequest(ctx context.Context) (stackEditorSaveRequest, error) {
 	name := strings.TrimSpace(model.stackInputs[0].Value())
 	repositoryPath, err := model.selectedRepositoryPath()
 	if err != nil {
-		model.err = err.Error()
-		return model, nil
+		return stackEditorSaveRequest{}, err
 	}
 	profile, err := model.selectedProfile()
 	if err != nil {
-		model.err = err.Error()
-		return model, nil
+		return stackEditorSaveRequest{}, err
 	}
-	currentSecrets := stackSecretMetadata{}
-	if model.stackOriginalName != "" {
-		metadataPath := filepath.Join(repositoryPath, "stacks", model.stackOriginalName, stackMetadataFilename)
-		if existing, err := readStackMetadataFile(metadataPath); err == nil {
-			currentSecrets = existing.Secrets
-		}
+	currentSecrets := model.currentStackEditorSecrets(repositoryPath)
+	secretPlan, err := model.stackEditorSecretPlan(ctx, repositoryPath, name, currentSecrets)
+	if err != nil {
+		return stackEditorSaveRequest{}, err
 	}
-	var secretValues SecretSet
-	var stackSecretIdentity string
-	renameExistingSecrets := false
-	options := stackAddOptions{Name: name, Resources: model.stackResources}
-	if model.stackEnvironmentDirty {
-		if model.stackEnvironment != "" {
-			values, _, err := parseEnvironmentSecretSet(model.stackEnvironment)
-			if err != nil {
-				model.err = err.Error()
-				return model, nil
-			}
-			secretValues = values
-			identity, recipient, err := model.ensureSelectedStackSecretIdentity()
-			if err != nil {
-				model.err = err.Error()
-				return model, nil
-			}
-			stackSecretIdentity = identity
-			options.Secrets = ageStackSecretMetadata(name, values, recipient)
-		}
-	} else if currentSecrets.HasSecrets() {
-		if model.stackOriginalName != "" && model.stackOriginalName != name {
-			identity, _, err := model.profiles[model.selectedIndex].Secrets.StackSecretIdentityPair()
-			if err != nil {
-				model.err = err.Error()
-				return model, nil
-			}
-			provider, err := secretProviderForName(currentSecrets.Provider)
-			if err != nil {
-				model.err = err.Error()
-				return model, nil
-			}
-			values, err := provider.GetStackSecrets(context.Background(), currentSecrets.Ref(repositoryPath, model.stackOriginalName, identity))
-			if err != nil {
-				model.err = err.Error()
-				return model, nil
-			}
-			secretValues = values
-			stackSecretIdentity = identity
-			renameExistingSecrets = true
-		}
-		currentSecrets.Source = defaultStackSecretSource(name)
-		options.Secrets = currentSecrets
-	}
+	options := stackAddOptions{Name: name, Resources: model.stackResources, Secrets: secretPlan.Metadata}
 	metadata := stackMetadata{Version: 1, PublicResources: model.stackResources, Secrets: options.Secrets}
 	if err := validateStackMetadata(name, metadata, model.stackServices); err != nil {
-		model.err = err.Error()
-		return model, nil
+		return stackEditorSaveRequest{}, err
 	}
-	scaffoldCreated, err := ensureStackEditorScaffold(repositoryPath, profile)
+	return stackEditorSaveRequest{
+		Name: name, RepositoryPath: repositoryPath, Profile: profile,
+		CurrentSecrets: currentSecrets, Options: options, SecretPlan: secretPlan,
+	}, nil
+}
+
+func (model profileSetupModel) currentStackEditorSecrets(repositoryPath string) stackSecretMetadata {
+	if model.stackOriginalName == "" {
+		return stackSecretMetadata{}
+	}
+	metadataPath := filepath.Join(repositoryPath, "stacks", model.stackOriginalName, stackMetadataFilename)
+	existing, err := readStackMetadataFile(metadataPath)
 	if err != nil {
-		model.err = err.Error()
-		return model, nil
+		return stackSecretMetadata{}
 	}
-	secretsWritten := false
-	canWriteSecretsBeforeMetadata := model.stackEnvironmentDirty &&
-		options.Secrets.HasSecrets() &&
-		(model.stackOriginalName == "" || model.stackOriginalName == options.Name)
-	if canWriteSecretsBeforeMetadata {
-		if err := putStackSecrets(context.Background(), repositoryPath, options.Name, options.Secrets, stackSecretIdentity, secretValues); err != nil {
-			model.err = err.Error()
-			return model, nil
-		}
-		secretsWritten = true
-	}
-	if err := writeEditableStack(repositoryPath, model.stackOriginalName, options, []byte(model.stackCompose)); err != nil {
-		model.err = err.Error()
-		return model, nil
-	}
+	return existing.Secrets
+}
+
+func (model *profileSetupModel) stackEditorSecretPlan(ctx context.Context, repositoryPath, name string, currentSecrets stackSecretMetadata) (stackEditorSecretPlan, error) {
 	if model.stackEnvironmentDirty {
-		if options.Secrets.HasSecrets() && !secretsWritten {
-			if err := putStackSecrets(context.Background(), repositoryPath, options.Name, options.Secrets, stackSecretIdentity, secretValues); err != nil {
-				model.err = err.Error()
-				return model, nil
-			}
-		} else if currentSecrets.HasSecrets() {
-			currentSecrets.Source = defaultStackSecretSource(options.Name)
-			identity, _, err := model.profiles[model.selectedIndex].Secrets.StackSecretIdentityPair()
-			if err != nil {
-				model.err = err.Error()
-				return model, nil
-			}
-			if err := removeStackSecrets(context.Background(), repositoryPath, options.Name, currentSecrets, identity); err != nil {
-				model.err = err.Error()
-				return model, nil
-			}
-		}
-	} else if renameExistingSecrets {
-		if err := putStackSecrets(context.Background(), repositoryPath, options.Name, options.Secrets, stackSecretIdentity, secretValues); err != nil {
-			model.err = err.Error()
-			return model, nil
-		}
+		return model.dirtyStackEditorSecretPlan(name)
 	}
+	return model.existingStackEditorSecretPlan(ctx, repositoryPath, name, currentSecrets)
+}
+
+func (model *profileSetupModel) dirtyStackEditorSecretPlan(name string) (stackEditorSecretPlan, error) {
+	if model.stackEnvironment == "" {
+		return stackEditorSecretPlan{}, nil
+	}
+	values, _, err := parseEnvironmentSecretSet(model.stackEnvironment)
+	if err != nil {
+		return stackEditorSecretPlan{}, err
+	}
+	identity, recipient, err := model.ensureSelectedStackSecretIdentity()
+	if err != nil {
+		return stackEditorSecretPlan{}, err
+	}
+	return stackEditorSecretPlan{
+		Metadata: ageStackSecretMetadata(name, values, recipient),
+		Values:   values,
+		Identity: identity,
+	}, nil
+}
+
+func (model profileSetupModel) existingStackEditorSecretPlan(ctx context.Context, repositoryPath, name string, currentSecrets stackSecretMetadata) (stackEditorSecretPlan, error) {
+	if !currentSecrets.HasSecrets() {
+		return stackEditorSecretPlan{}, nil
+	}
+	plan := stackEditorSecretPlan{Metadata: currentSecrets}
+	if model.stackOriginalName != "" && model.stackOriginalName != name {
+		values, identity, err := model.currentStackEditorSecretValues(ctx, repositoryPath, currentSecrets)
+		if err != nil {
+			return stackEditorSecretPlan{}, err
+		}
+		plan.Values = values
+		plan.Identity = identity
+		plan.RenameExisting = true
+	}
+	plan.Metadata.Source = defaultStackSecretSource(name)
+	return plan, nil
+}
+
+func (model profileSetupModel) currentStackEditorSecretValues(ctx context.Context, repositoryPath string, metadata stackSecretMetadata) (SecretSet, string, error) {
+	identity, _, err := model.profiles[model.selectedIndex].Secrets.StackSecretIdentityPair()
+	if err != nil {
+		return nil, "", err
+	}
+	provider, err := secretProviderForName(metadata.Provider)
+	if err != nil {
+		return nil, "", err
+	}
+	values, err := provider.GetStackSecrets(ctx, metadata.Ref(repositoryPath, model.stackOriginalName, identity))
+	if err != nil {
+		return nil, "", err
+	}
+	return values, identity, nil
+}
+
+func (model profileSetupModel) writeStackEditorSecretsBeforeMetadata(ctx context.Context, request stackEditorSaveRequest) (bool, error) {
+	canWrite := model.stackEnvironmentDirty &&
+		request.SecretPlan.Metadata.HasSecrets() &&
+		(model.stackOriginalName == "" || model.stackOriginalName == request.Name)
+	if !canWrite {
+		return false, nil
+	}
+	return true, putStackSecrets(ctx, request.RepositoryPath, request.Name, request.SecretPlan.Metadata, request.SecretPlan.Identity, request.SecretPlan.Values)
+}
+
+func (model profileSetupModel) reconcileStackEditorSecrets(ctx context.Context, request stackEditorSaveRequest, secretsWritten bool) error {
+	if model.stackEnvironmentDirty {
+		return model.reconcileDirtyStackEditorSecrets(ctx, request, secretsWritten)
+	}
+	if request.SecretPlan.RenameExisting {
+		return putStackSecrets(ctx, request.RepositoryPath, request.Name, request.SecretPlan.Metadata, request.SecretPlan.Identity, request.SecretPlan.Values)
+	}
+	return nil
+}
+
+func (model profileSetupModel) reconcileDirtyStackEditorSecrets(ctx context.Context, request stackEditorSaveRequest, secretsWritten bool) error {
+	if request.SecretPlan.Metadata.HasSecrets() && !secretsWritten {
+		return putStackSecrets(ctx, request.RepositoryPath, request.Name, request.SecretPlan.Metadata, request.SecretPlan.Identity, request.SecretPlan.Values)
+	}
+	if !request.CurrentSecrets.HasSecrets() {
+		return nil
+	}
+	currentSecrets := request.CurrentSecrets
+	currentSecrets.Source = defaultStackSecretSource(request.Name)
+	identity, _, err := model.profiles[model.selectedIndex].Secrets.StackSecretIdentityPair()
+	if err != nil {
+		return err
+	}
+	return removeStackSecrets(ctx, request.RepositoryPath, request.Name, currentSecrets, identity)
+}
+
+func (model profileSetupModel) withStackEditorError(err error) profileSetupModel {
+	model.err = err.Error()
+	return model
+}
+
+func (model *profileSetupModel) finishStackEditorSave(scaffoldCreated bool) {
 	model.stackNotice = stackEditorSavedNotice(model.stackOriginalName, model.stackMetadataMissing, scaffoldCreated)
 	model.err = ""
 	model.screen = profileSetupScreenStacks
@@ -1938,7 +2006,6 @@ func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
 		model.stackNotice = "Runtime secrets updated in Git-backed encrypted state. Review and commit the stack changes."
 	}
 	model.stackTable.Focus()
-	return model, nil
 }
 
 func (model *profileSetupModel) ensureSelectedStackSecretIdentity() (string, string, error) {
