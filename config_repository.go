@@ -156,9 +156,6 @@ func stackSecretValuesFromRevision(ctx context.Context, revision configRepositor
 	if !stack.Metadata.Secrets.HasSecrets() {
 		return nil, nil
 	}
-	if revision.Origin == "" || revision.Branch == "" {
-		return nil, fmt.Errorf("stack %s has secrets; Dockhand secret sync requires a pushed configuration repository origin", stack.Name)
-	}
 	identity, _, err := secrets.StackSecretIdentityPair()
 	if err != nil {
 		return nil, fmt.Errorf("stack %s secrets: %w", stack.Name, err)

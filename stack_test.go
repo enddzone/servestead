@@ -776,6 +776,35 @@ secrets:
 	}
 }
 
+func TestStackSecretValuesFromRevisionAllowsLocalRepository(t *testing.T) {
+	provider := installRecordingSecretProvider(t)
+	identity, recipient, err := generateStackSecretIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := SecretSet{"API_KEY": "secret"}
+	metadata := ageStackSecretMetadata("site", values, recipient)
+	provider.values[metadata.Source] = values
+
+	loaded, err := stackSecretValuesFromRevision(context.Background(),
+		configRepositoryRevision{Path: t.TempDir()},
+		repositoryStack{
+			Name: "site",
+			Metadata: stackMetadata{
+				Version: 1,
+				Secrets: metadata,
+			},
+		},
+		ProfileSecrets{StackSecretIdentity: identity},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded["API_KEY"] != "secret" {
+		t.Fatalf("local stack secret values were not loaded: %+v", loaded.Redacted())
+	}
+}
+
 func TestStackEnvironmentInputsValidateActions(t *testing.T) {
 	if _, _, _, _, err := stackEnvironmentInputs(nil, io.Discard); err == nil || !strings.Contains(err.Error(), "usage") {
 		t.Fatalf("missing env action returned unexpected error: %v", err)
