@@ -140,6 +140,36 @@ func TestRunStackDispatchRejectsInvalidCommands(t *testing.T) {
 	if err := runStack(context.Background(), []string{"unknown"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "unknown stack command") {
 		t.Fatalf("unknown stack subcommand returned unexpected error: %v", err)
 	}
+	if err := runStack(context.Background(), []string{"env"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("missing stack env action returned unexpected error: %v", err)
+	}
+}
+
+func TestPrepareEditableStackDestinationHandlesExistingDirectories(t *testing.T) {
+	stacksDirectory := filepath.Join(t.TempDir(), "stacks")
+	existing := filepath.Join(stacksDirectory, "site")
+	if err := os.MkdirAll(existing, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(existing, stackComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareEditableStackDestination(stacksDirectory, existing, "", "site"); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("existing stack directory was accepted: %v", err)
+	}
+	if stackDirectoryContainsOnlySecretFile(filepath.Join(stacksDirectory, "missing")) {
+		t.Fatal("missing stack directory looked secret-only")
+	}
+	secretOnly := filepath.Join(stacksDirectory, "secret-only")
+	if err := os.MkdirAll(secretOnly, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secretOnly, stackSecretFilename), []byte("encrypted\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareEditableStackDestination(stacksDirectory, secretOnly, "", "secret-only"); err != nil {
+		t.Fatalf("secret-only stack directory should be reusable: %v", err)
+	}
 }
 
 func TestGenerateStackPangolinOverrideOwnsLabelsWithoutRewritingCompose(t *testing.T) {
@@ -897,6 +927,19 @@ func TestStackEnvironmentSaveRemove(t *testing.T) {
 	assertStackEnvironmentRemoved(t, fixture)
 }
 
+func TestRunStackEnvironmentDispatchesSetAndRemove(t *testing.T) {
+	fixture := newDefaultStackEnvironmentSaveFixture(t)
+	if err := runStackEnvironment(context.Background(), []string{"set", "--profile", fixture.profileID, "--stack", "site", "--file", fixture.environmentPath}, &fixture.output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := runStackEnvironment(context.Background(), []string{"remove", "--profile", fixture.profileID, "--stack", "site"}, &fixture.output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.provider.deleted) != 1 {
+		t.Fatalf("stack env remove did not delete provider secrets: %+v", fixture.provider.deleted)
+	}
+}
+
 type stackEnvironmentSaveFixture struct {
 	provider        *recordingSecretProvider
 	store           ProfileStore
@@ -910,6 +953,41 @@ func newStackEnvironmentSaveFixture(t *testing.T) stackEnvironmentSaveFixture {
 	t.Helper()
 	provider := installRecordingSecretProvider(t)
 	store := newFileProfileStore(t.TempDir())
+	repository := t.TempDir()
+	stackDirectory := filepath.Join(repository, "stacks", "site")
+	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackTestComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackMetadataFilename), []byte("version: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := store.Create(Profile{IP: stackTestHost, ConfigRepositoryPath: repository})
+	if err != nil {
+		t.Fatal(err)
+	}
+	environmentPath := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(environmentPath, []byte(stackTestEnvironment), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return stackEnvironmentSaveFixture{
+		provider: provider, store: store, profileID: profile.ID,
+		stackDirectory: stackDirectory, environmentPath: environmentPath,
+	}
+}
+
+func newDefaultStackEnvironmentSaveFixture(t *testing.T) stackEnvironmentSaveFixture {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	store, err := newDefaultProfileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := installRecordingSecretProvider(t)
 	repository := t.TempDir()
 	stackDirectory := filepath.Join(repository, "stacks", "site")
 	if err := os.MkdirAll(stackDirectory, 0700); err != nil {

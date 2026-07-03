@@ -23,6 +23,12 @@ func TestSecretsCommandsManageProfileIdentity(t *testing.T) {
 		t.Fatalf("stack secret identity was not saved: %+v", secrets)
 	}
 
+	runSecretsCommand(t, []string{"status", "--profile", profile.ID}, &stdout, &stderr)
+	assertSecretsCommandOutput(t, stdout.String(), "Recipient: "+secrets.StackSecretRecipient, "Configuration repository: not configured")
+
+	runSecretsCommand(t, []string{"init", "--profile", profile.ID}, &stdout, &stderr)
+	assertSecretsCommandOutput(t, stdout.String(), "Stack secret identity already exists.", "Recipient: "+secrets.StackSecretRecipient)
+
 	runSecretsCommand(t, []string{"export-key", "--profile", profile.ID}, &stdout, &stderr)
 	if strings.TrimSpace(stdout.String()) != identity {
 		t.Fatalf("export-key did not print the saved identity:\n%s", stdout.String())
@@ -41,6 +47,93 @@ func TestSecretsCommandsManageProfileIdentity(t *testing.T) {
 	}
 	if importedSecrets.StackSecretIdentity != identity || importedSecrets.StackSecretRecipient != secrets.StackSecretRecipient {
 		t.Fatalf("import-key did not save the imported identity: %+v", importedSecrets)
+	}
+}
+
+func TestSecretsStatusListsRepositoryStacks(t *testing.T) {
+	store, profile := newSecretsCommandTestProfile(t, "203.0.113.13")
+	identity, recipient, err := generateStackSecretIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSecrets(profile.ID, ProfileSecrets{StackSecretIdentity: identity, StackSecretRecipient: recipient}); err != nil {
+		t.Fatal(err)
+	}
+	repository := t.TempDir()
+	profile.ConfigRepositoryPath = repository
+	if err := store.Save(profile, ProfileState{Runs: map[string]SetupRun{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeEditableStack(repository, "", stackAddOptions{Name: "plain"}, []byte(testApplicationCompose)); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr strings.Builder
+	runSecretsCommand(t, []string{"status", "--profile", profile.ID}, &stdout, &stderr)
+	assertSecretsCommandOutput(t, stdout.String(), "Configuration repository: "+repository, "Stack secrets: none")
+
+	secretValues := SecretSet{"API_KEY": "secret", "TOKEN": "second-secret"}
+	if err := writeEditableStack(repository, "", stackAddOptions{
+		Name:    "secret",
+		Secrets: ageStackSecretMetadata("secret", secretValues, recipient),
+	}, []byte(testApplicationCompose)); err != nil {
+		t.Fatal(err)
+	}
+	runSecretsCommand(t, []string{"status", "--profile", profile.ID}, &stdout, &stderr)
+	assertSecretsCommandOutput(t, stdout.String(), "Stack secret: API_KEY, TOKEN")
+}
+
+func TestSecretsStatusReportsUninitializedProfile(t *testing.T) {
+	_, profile := newSecretsCommandTestProfile(t, "203.0.113.12")
+
+	var stdout, stderr strings.Builder
+	runSecretsCommand(t, []string{"status", "--profile", profile.ID}, &stdout, &stderr)
+	assertSecretsCommandOutput(t, stdout.String(), "Recipient: not initialized", "Configuration repository: not configured")
+}
+
+func TestSecretsCommandsRejectMissingAndInvalidIdentity(t *testing.T) {
+	_, profile := newSecretsCommandTestProfile(t, "203.0.113.14")
+
+	var stdout, stderr strings.Builder
+	if err := runSecrets(context.Background(), []string{"export-key", "--profile", profile.ID}, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "no stack secret identity") {
+		t.Fatalf("export-key should reject missing identity, got %v", err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "stack-secret-key.txt")
+	if err := os.WriteFile(keyPath, []byte("not-an-age-identity"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runSecrets(context.Background(), []string{"import-key", "--profile", profile.ID, "--file", keyPath}, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "stack secret identity is invalid") {
+		t.Fatalf("import-key should reject invalid identity, got %v", err)
+	}
+}
+
+func TestSecretsCommandValidation(t *testing.T) {
+	missingPath := filepath.Join(t.TempDir(), "missing-key.txt")
+	cases := []struct {
+		name       string
+		args       []string
+		wantErr    string
+		wantStderr string
+	}{
+		{name: "missing command", wantErr: "secrets command is required", wantStderr: "servestead secrets init"},
+		{name: "unknown command", args: []string{"wat"}, wantErr: "unknown secrets command", wantStderr: "servestead secrets init"},
+		{name: "init unexpected argument", args: []string{"init", "--profile", "profile-1", "extra"}, wantErr: "unexpected arguments"},
+		{name: "status missing profile", args: []string{"status"}, wantErr: "--profile is required"},
+		{name: "export unexpected argument", args: []string{"export-key", "--profile", "profile-1", "extra"}, wantErr: "unexpected arguments"},
+		{name: "import missing file", args: []string{"import-key", "--profile", "profile-1"}, wantErr: "--profile and --file are required"},
+		{name: "import unreadable file", args: []string{"import-key", "--profile", "profile-1", "--file", missingPath}, wantErr: "read stack secret identity"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr strings.Builder
+			err := runSecrets(context.Background(), tc.args, &stdout, &stderr)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected %q error, got %v", tc.wantErr, err)
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Fatalf("stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+		})
 	}
 }
 

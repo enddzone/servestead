@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,6 +51,12 @@ func TestGitHubTokenCommandsManageProfileToken(t *testing.T) {
 	if secrets.GitHubToken != "" {
 		t.Fatalf("GitHub token was not removed: %+v", secrets)
 	}
+
+	runGitHubTokenCLI(t, []string{"github-token", "status", "--profile", profile.ID}, &stdout, &stderr)
+	assertGitHubTokenOutput(t, stdout.String(), "Profile token: not configured", "Environment token: configured", "Effective source: environment")
+	if strings.Contains(stdout.String(), "github_pat_env_secret") {
+		t.Fatal("github-token status leaked the environment token")
+	}
 }
 
 func newGitHubTokenTestProfile(t *testing.T) (ProfileStore, Profile) {
@@ -80,6 +88,63 @@ func assertGitHubTokenOutput(t *testing.T, output string, expected ...string) {
 	t.Helper()
 	if !containsAll(output, expected...) {
 		t.Fatalf("github-token output missing expected content %v:\n%s", expected, output)
+	}
+}
+
+func TestGitHubTokenCommandValidation(t *testing.T) {
+	t.Setenv("SERVESTEAD_GITHUB_TOKEN", "")
+	cases := []struct {
+		name       string
+		args       []string
+		wantErr    string
+		wantStdout string
+		wantStderr string
+		wantHelp   bool
+	}{
+		{name: "missing command", wantErr: "github-token command is required", wantStderr: "servestead github-token set"},
+		{name: "unknown command", args: []string{"wat"}, wantErr: "unknown github-token command", wantStderr: "servestead github-token set"},
+		{name: "help", args: []string{"help"}, wantStdout: "servestead github-token set", wantHelp: true},
+		{name: "set unexpected argument", args: []string{"set", "--profile", "profile-1", "--file", "token.txt", "extra"}, wantErr: "unexpected arguments"},
+		{name: "set missing profile", args: []string{"set", "--file", "token.txt"}, wantErr: "--profile is required"},
+		{name: "set missing token source", args: []string{"set", "--profile", "profile-1"}, wantErr: "exactly one of --file or --from-env is required"},
+		{name: "set conflicting token sources", args: []string{"set", "--profile", "profile-1", "--file", "token.txt", "--from-env"}, wantErr: "exactly one of --file or --from-env is required"},
+		{name: "set empty env token", args: []string{"set", "--profile", "profile-1", "--from-env"}, wantErr: "GitHub token is empty"},
+		{name: "status unexpected argument", args: []string{"status", "--profile", "profile-1", "extra"}, wantErr: "unexpected arguments"},
+		{name: "remove missing profile", args: []string{"remove"}, wantErr: "--profile is required"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertGitHubTokenValidation(t, tc.args, tc.wantErr, tc.wantStdout, tc.wantStderr, tc.wantHelp)
+		})
+	}
+}
+
+func assertGitHubTokenValidation(t *testing.T, args []string, wantErr, wantStdout, wantStderr string, wantHelp bool) {
+	t.Helper()
+	var stdout, stderr strings.Builder
+	err := runGitHubToken(args, &stdout, &stderr)
+	assertGitHubTokenValidationError(t, err, wantErr, wantHelp)
+	assertStringContains(t, stdout.String(), wantStdout, "stdout")
+	assertStringContains(t, stderr.String(), wantStderr, "stderr")
+}
+
+func assertGitHubTokenValidationError(t *testing.T, err error, wantErr string, wantHelp bool) {
+	t.Helper()
+	if wantHelp {
+		if !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("expected help error, got %v", err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("expected %q error, got %v", wantErr, err)
+	}
+}
+
+func assertStringContains(t *testing.T, value, expected, stream string) {
+	t.Helper()
+	if expected != "" && !strings.Contains(value, expected) {
+		t.Fatalf("%s missing %q:\n%s", stream, expected, value)
 	}
 }
 

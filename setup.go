@@ -119,6 +119,8 @@ const (
 	setupExampleDomainPlaceholder = "example.com"
 	setupAdminEmailPlaceholder    = "admin@example.com"
 	setupGeneratedPlaceholder     = "generated-placeholder"
+	setupNoProfileSelectedMessage = "no profile selected"
+	setupNoProfileSelectedView    = "No profile selected."
 	setupNoStackSelectedMessage   = "no stack selected"
 	setupSelectedPlanHeader       = "Selected plan:"
 	setupAdminPublicKeyLabel      = "admin public key"
@@ -1389,7 +1391,7 @@ func (model profileSetupModel) updateGitHubToken(key tea.KeyMsg) (tea.Model, tea
 
 func (model profileSetupModel) saveSelectedGitHubToken(token string) profileSetupModel {
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
-		model.err = "no profile selected"
+		model.err = setupNoProfileSelectedMessage
 		return model
 	}
 	if model.profileStore == nil {
@@ -1410,7 +1412,7 @@ func (model profileSetupModel) saveSelectedGitHubToken(token string) profileSetu
 
 func (model profileSetupModel) removeSelectedGitHubToken() profileSetupModel {
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
-		model.err = "no profile selected"
+		model.err = setupNoProfileSelectedMessage
 		return model
 	}
 	if model.profileStore == nil {
@@ -2010,7 +2012,7 @@ func (model *profileSetupModel) finishStackEditorSave(scaffoldCreated bool) {
 
 func (model *profileSetupModel) ensureSelectedStackSecretIdentity() (string, string, error) {
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
-		return "", "", errors.New("no profile selected")
+		return "", "", errors.New(setupNoProfileSelectedMessage)
 	}
 	choice := &model.profiles[model.selectedIndex]
 	recipient, changed, err := choice.Secrets.EnsureStackSecretIdentity()
@@ -2027,7 +2029,7 @@ func (model *profileSetupModel) ensureSelectedStackSecretIdentity() (string, str
 
 func (model profileSetupModel) selectedProfile() (Profile, error) {
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
-		return Profile{}, errors.New("no profile selected")
+		return Profile{}, errors.New(setupNoProfileSelectedMessage)
 	}
 	return model.profiles[model.selectedIndex].Profile, nil
 }
@@ -2613,7 +2615,7 @@ func (model profileSetupModel) selectedStack() (editableStack, bool) {
 
 func (model profileSetupModel) selectedRepositoryPath() (string, error) {
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
-		return "", errors.New("no profile selected")
+		return "", errors.New(setupNoProfileSelectedMessage)
 	}
 	path := strings.TrimSpace(model.profiles[model.selectedIndex].Profile.ConfigRepositoryPath)
 	if path == "" {
@@ -2733,7 +2735,7 @@ func (model profileSetupModel) updateProfileDeleteConfirm(key tea.KeyMsg) (tea.M
 	switch key.String() {
 	case "y", "Y":
 		if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
-			model.err = "no profile selected"
+			model.err = setupNoProfileSelectedMessage
 			model.screen = profileSetupScreenPicker
 			return model, nil
 		}
@@ -3105,7 +3107,7 @@ func (model profileSetupModel) optionsFromInputs() (setupCLIOptions, error) {
 
 func (model profileSetupModel) optionsForSelectedProfile() (setupCLIOptions, error) {
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
-		return setupCLIOptions{}, errors.New("no profile selected")
+		return setupCLIOptions{}, errors.New(setupNoProfileSelectedMessage)
 	}
 	profile := model.profiles[model.selectedIndex].Profile
 	inputValue := func(index int) string {
@@ -3138,7 +3140,7 @@ func (model profileSetupModel) optionsForSelectedProfile() (setupCLIOptions, err
 
 func (model profileSetupModel) selectedDashboardStage() (string, error) {
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
-		return "", errors.New("no profile selected")
+		return "", errors.New(setupNoProfileSelectedMessage)
 	}
 	cursor := model.stageTable.Cursor()
 	if cursor < 0 || cursor >= len(dashboardStageOrder) {
@@ -3232,7 +3234,7 @@ func (model profileSetupModel) View() tea.View {
 
 func (model profileSetupModel) dashboardView() string {
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
-		return "No profile selected."
+		return setupNoProfileSelectedView
 	}
 	choice := model.profiles[model.selectedIndex]
 	var builder strings.Builder
@@ -3271,7 +3273,7 @@ func (model profileSetupModel) dashboardView() string {
 
 func (model profileSetupModel) githubTokenView() string {
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
-		return "No profile selected."
+		return setupNoProfileSelectedView
 	}
 	choice := model.profiles[model.selectedIndex]
 	var builder strings.Builder
@@ -3722,7 +3724,7 @@ func stageUsesRepository(stage string) bool {
 
 func (model profileSetupModel) deleteConfirmView() string {
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
-		return "No profile selected."
+		return setupNoProfileSelectedView
 	}
 	profile := model.profiles[model.selectedIndex].Profile
 	var builder strings.Builder

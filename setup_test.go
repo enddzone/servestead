@@ -628,8 +628,22 @@ func TestProfileSetupGitHubTokenScreenManagesProfileSecret(t *testing.T) {
 	store, profile, result := openGitHubTokenScreen(t)
 	assertGitHubTokenScreenStatus(t, result, "", "GitHub repository token", "Profile token: not configured", "Effective source: none")
 
-	result.githubTokenInput.SetValue(" github_pat_profile_secret\n")
+	result.githubTokenInput.SetValue("github_pat_profile secret")
 	updated, _ := result.updateGitHubToken(keyCode(tea.KeyEnter))
+	result = updated.(profileSetupModel)
+	if !strings.Contains(result.err, "whitespace") {
+		t.Fatalf("invalid token should show a validation error: %q", result.err)
+	}
+
+	t.Setenv("SERVESTEAD_GITHUB_TOKEN", "")
+	updated, _ = result.updateGitHubToken(keyRunes("e"))
+	result = updated.(profileSetupModel)
+	if !strings.Contains(result.err, "SERVESTEAD_GITHUB_TOKEN") {
+		t.Fatalf("empty environment token should show a validation error: %q", result.err)
+	}
+
+	result.githubTokenInput.SetValue(" github_pat_profile_secret\n")
+	updated, _ = result.updateGitHubToken(keyCode(tea.KeyEnter))
 	result = updated.(profileSetupModel)
 	secrets, err := store.LoadSecrets(profile.ID)
 	if err != nil {
@@ -660,6 +674,42 @@ func TestProfileSetupGitHubTokenScreenManagesProfileSecret(t *testing.T) {
 	}
 	if secrets.GitHubToken != "" || result.profiles[0].Secrets.GitHubToken != "" {
 		t.Fatalf("GitHub token was not removed: stored=%+v model=%+v", secrets, result.profiles[0].Secrets)
+	}
+}
+
+func TestProfileSetupGitHubTokenScreenReportsSaveFailures(t *testing.T) {
+	model := newProfileSetupModel(nil)
+	result := model.saveSelectedGitHubToken("github_pat_profile_secret")
+	if result.err != setupNoProfileSelectedMessage {
+		t.Fatalf("missing selection error = %q", result.err)
+	}
+	result = model.removeSelectedGitHubToken()
+	if result.err != setupNoProfileSelectedMessage {
+		t.Fatalf("missing selection remove error = %q", result.err)
+	}
+
+	model.profiles = []profileChoice{{Profile: Profile{ID: setupTestProfileID}}}
+	model.selectedIndex = 0
+	result = model.saveSelectedGitHubToken("github_pat_profile_secret")
+	if result.err != "profile store is unavailable" {
+		t.Fatalf("missing store error = %q", result.err)
+	}
+	result = model.removeSelectedGitHubToken()
+	if result.err != "profile store is unavailable" {
+		t.Fatalf("missing store remove error = %q", result.err)
+	}
+
+	model.profileStore = failingSaveSecretsProfileStore{
+		ProfileStore: newFileProfileStore(t.TempDir()),
+		err:          errors.New("save failed"),
+	}
+	result = model.saveSelectedGitHubToken("github_pat_profile_secret")
+	if result.err != "save failed" {
+		t.Fatalf("save failure error = %q", result.err)
+	}
+	result = model.removeSelectedGitHubToken()
+	if result.err != "save failed" {
+		t.Fatalf("remove failure error = %q", result.err)
 	}
 }
 
@@ -697,6 +747,15 @@ func assertGitHubTokenScreenStatus(t *testing.T, model profileSetupModel, forbid
 	if !containsAll(view, expected...) {
 		t.Fatalf("GitHub token view missing expected content %v:\n%s", expected, view)
 	}
+}
+
+type failingSaveSecretsProfileStore struct {
+	ProfileStore
+	err error
+}
+
+func (store failingSaveSecretsProfileStore) SaveSecrets(string, ProfileSecrets) error {
+	return store.err
 }
 
 func TestFailedProxyRetryCollectsPangolinCredentials(t *testing.T) {
