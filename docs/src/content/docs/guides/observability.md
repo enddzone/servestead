@@ -40,13 +40,31 @@ bin/servestead setup \
 Or clone a GitHub HTTPS repository:
 
 ```sh
-SERVESTEAD_GITHUB_TOKEN='...' \
 bin/servestead setup \
   --ip 203.0.113.10 \
   --github-repo https://github.com/owner/repo.git
 ```
 
-Private repository credentials are read from `SERVESTEAD_GITHUB_TOKEN`.
+## GitHub Personal Access Tokens
+
+Private repositories require a GitHub personal access token. Public repositories can also use one to avoid anonymous rate limits.
+
+Create a fine-grained personal access token in GitHub:
+
+- Select the resource owner that owns the configuration repository.
+- Select only the repository Servestead should read.
+- Grant repository `Contents` permission as `Read-only`.
+- Set an expiration you can rotate before it expires.
+
+Save the token locally, then store it in the Servestead profile:
+
+```sh
+bin/servestead github-token set --profile <profile-id> --file ./github-token.txt
+rm ./github-token.txt
+bin/servestead github-token status --profile <profile-id>
+```
+
+`SERVESTEAD_GITHUB_TOKEN` can still be set before launching Servestead for a one-off run. When both exist, the environment token wins.
 
 ## Deployment Rules
 

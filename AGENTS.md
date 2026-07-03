@@ -64,6 +64,8 @@ Transform tasks into verifiable goals:
 - "Fix the bug" → "Write a test that reproduces it, then make it pass"
 - "Refactor X" → "Ensure tests pass before and after"
 
+Always run `golangci-lint` after making changes, in addition to any targeted tests or broader test suite runs that fit the risk of the change.
+
 For multi-step tasks, state a brief plan:
 
 ```

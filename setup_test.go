@@ -624,6 +624,140 @@ func TestAdvancedSetupMasksPangolinPassword(t *testing.T) {
 	}
 }
 
+func TestProfileSetupGitHubTokenScreenManagesProfileSecret(t *testing.T) {
+	store, profile, result := openGitHubTokenScreen(t)
+	assertGitHubTokenScreenStatus(t, result, "", "GitHub repository token", "Profile token: not configured", "Effective source: none")
+
+	result.githubTokenInput.SetValue("github_pat_profile secret")
+	updated, _ := result.updateGitHubToken(keyCode(tea.KeyEnter))
+	result = updated.(profileSetupModel)
+	if !strings.Contains(result.err, "whitespace") {
+		t.Fatalf("invalid token should show a validation error: %q", result.err)
+	}
+
+	t.Setenv("SERVESTEAD_GITHUB_TOKEN", "")
+	updated, _ = result.updateGitHubToken(keyRunes("e"))
+	result = updated.(profileSetupModel)
+	if !strings.Contains(result.err, "SERVESTEAD_GITHUB_TOKEN") {
+		t.Fatalf("empty environment token should show a validation error: %q", result.err)
+	}
+
+	result.githubTokenInput.SetValue(" github_pat_profile_secret\n")
+	updated, _ = result.updateGitHubToken(keyCode(tea.KeyEnter))
+	result = updated.(profileSetupModel)
+	secrets, err := store.LoadSecrets(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secrets.GitHubToken != "github_pat_profile_secret" || result.profiles[0].Secrets.GitHubToken != "github_pat_profile_secret" {
+		t.Fatalf("GitHub token was not saved: stored=%+v model=%+v", secrets, result.profiles[0].Secrets)
+	}
+	assertGitHubTokenScreenStatus(t, result, "github_pat_profile_secret", "Profile token: configured", "Effective source: profile")
+
+	t.Setenv("SERVESTEAD_GITHUB_TOKEN", "github_pat_env_secret")
+	updated, _ = result.updateGitHubToken(keyRunes("e"))
+	result = updated.(profileSetupModel)
+	secrets, err = store.LoadSecrets(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secrets.GitHubToken != "github_pat_env_secret" {
+		t.Fatalf("environment GitHub token was not saved: %+v", secrets)
+	}
+	assertGitHubTokenScreenStatus(t, result, "github_pat_env_secret", "Environment token: configured", "Effective source: environment")
+
+	updated, _ = result.updateGitHubToken(keyRunes("x"))
+	result = updated.(profileSetupModel)
+	secrets, err = store.LoadSecrets(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secrets.GitHubToken != "" || result.profiles[0].Secrets.GitHubToken != "" {
+		t.Fatalf("GitHub token was not removed: stored=%+v model=%+v", secrets, result.profiles[0].Secrets)
+	}
+}
+
+func TestProfileSetupGitHubTokenScreenReportsSaveFailures(t *testing.T) {
+	model := newProfileSetupModel(nil)
+	result := model.saveSelectedGitHubToken("github_pat_profile_secret")
+	if result.err != setupNoProfileSelectedMessage {
+		t.Fatalf("missing selection error = %q", result.err)
+	}
+	result = model.removeSelectedGitHubToken()
+	if result.err != setupNoProfileSelectedMessage {
+		t.Fatalf("missing selection remove error = %q", result.err)
+	}
+
+	model.profiles = []profileChoice{{Profile: Profile{ID: setupTestProfileID}}}
+	model.selectedIndex = 0
+	result = model.saveSelectedGitHubToken("github_pat_profile_secret")
+	if result.err != "profile store is unavailable" {
+		t.Fatalf("missing store error = %q", result.err)
+	}
+	result = model.removeSelectedGitHubToken()
+	if result.err != "profile store is unavailable" {
+		t.Fatalf("missing store remove error = %q", result.err)
+	}
+
+	model.profileStore = failingSaveSecretsProfileStore{
+		ProfileStore: newFileProfileStore(t.TempDir()),
+		err:          errors.New("save failed"),
+	}
+	result = model.saveSelectedGitHubToken("github_pat_profile_secret")
+	if result.err != "save failed" {
+		t.Fatalf("save failure error = %q", result.err)
+	}
+	result = model.removeSelectedGitHubToken()
+	if result.err != "save failed" {
+		t.Fatalf("remove failure error = %q", result.err)
+	}
+}
+
+func openGitHubTokenScreen(t *testing.T) (ProfileStore, Profile, profileSetupModel) {
+	t.Helper()
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{IP: "203.0.113.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: profile,
+		State:   ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenDashboard
+	updated, command := model.updateProfileDashboard(keyRunes("g"))
+	result := updated.(profileSetupModel)
+	if result.screen != profileSetupScreenGitHubToken || command == nil {
+		t.Fatalf("g should open GitHub token screen: screen=%d command=%v", result.screen, command)
+	}
+	if result.githubTokenInput.EchoMode != textinput.EchoPassword {
+		t.Fatal("GitHub token input is not masked")
+	}
+	return store, profile, result
+}
+
+func assertGitHubTokenScreenStatus(t *testing.T, model profileSetupModel, forbidden string, expected ...string) {
+	t.Helper()
+	view := model.View().Content
+	if forbidden != "" && strings.Contains(view, forbidden) {
+		t.Fatalf("GitHub token view leaked %q", forbidden)
+	}
+	if !containsAll(view, expected...) {
+		t.Fatalf("GitHub token view missing expected content %v:\n%s", expected, view)
+	}
+}
+
+type failingSaveSecretsProfileStore struct {
+	ProfileStore
+	err error
+}
+
+func (store failingSaveSecretsProfileStore) SaveSecrets(string, ProfileSecrets) error {
+	return store.err
+}
+
 func TestFailedProxyRetryCollectsPangolinCredentials(t *testing.T) {
 	state := ProfileState{
 		ActiveRunID: setupTestFailedRunID,
@@ -849,6 +983,7 @@ func TestProfileSetupModelRendersDashboardFromProfileState(t *testing.T) {
 }
 
 func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
+	provider := installRecordingSecretProvider(t)
 	model, repository, composePath := newGuidedStackAddModel(t)
 	result := openGuidedStackAddCompose(t, model, composePath)
 	result = addGuidedStackRoute(t, result, 0)
@@ -865,6 +1000,13 @@ func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
 	}
 	if len(result.stacks[0].Metadata.PublicResources) != 2 {
 		t.Fatalf("multi-service routes were not saved: %+v", result.stacks[0].Metadata.PublicResources)
+	}
+	if result.stacks[0].Metadata.Secrets.Provider != stackSecretProviderAge ||
+		strings.Join(result.stacks[0].Metadata.Secrets.KeyNames(), ",") != "API_KEY" {
+		t.Fatalf("runtime secret metadata was not saved: %+v", result.stacks[0].Metadata.Secrets)
+	}
+	if provider.values[defaultStackSecretSource("site")]["API_KEY"] != "secret" {
+		t.Fatalf("runtime secret was not saved through provider: %+v", provider.values)
 	}
 	if _, err := os.Stat(filepath.Join(repository, filepath.FromSlash(observabilityComposeRepositoryPath))); err != nil {
 		t.Fatalf("repository scaffold was not prepared before commit: %v", err)
@@ -1038,15 +1180,16 @@ func TestStackFilePickersSelectComposeAndShowHiddenEnvironmentFiles(t *testing.T
 }
 
 func TestStackEditorManagesMultipleResourcesAndRuntimeEnvironment(t *testing.T) {
-	model, store, profile, repository := newMultiResourceStackEditorModel(t)
+	model, provider, repository := newMultiResourceStackEditorModel(t)
 	model = editFirstStackResourceSubdomain(t, model)
 	model = saveStackEditorRuntimeEnvironment(t, model)
-	assertStackEditorSavedRuntimeEnvironment(t, store, profile.ID, repository)
+	assertStackEditorSavedRuntimeEnvironment(t, model, provider, repository)
 }
 
-func newMultiResourceStackEditorModel(t *testing.T) (profileSetupModel, ProfileStore, Profile, string) {
+func newMultiResourceStackEditorModel(t *testing.T) (profileSetupModel, *recordingSecretProvider, string) {
 	t.Helper()
 	requireGit(t)
+	provider := installRecordingSecretProvider(t)
 	repository := t.TempDir()
 	runGitCommand(t, repository, "init")
 	compose := []byte(`services:
@@ -1087,7 +1230,7 @@ func newMultiResourceStackEditorModel(t *testing.T) (profileSetupModel, ProfileS
 	if model.screen != profileSetupScreenStackEditor || len(model.stackResources) != 2 || model.err != "" {
 		t.Fatalf("multi-resource stack did not open: %+v", model.stackResources)
 	}
-	return model, store, profile, repository
+	return model, provider, repository
 }
 
 func editFirstStackResourceSubdomain(t *testing.T, model profileSetupModel) profileSetupModel {
@@ -1126,14 +1269,11 @@ func saveStackEditorRuntimeEnvironment(t *testing.T, model profileSetupModel) pr
 	return model
 }
 
-func assertStackEditorSavedRuntimeEnvironment(t *testing.T, store ProfileStore, profileID, repository string) {
+func assertStackEditorSavedRuntimeEnvironment(t *testing.T, model profileSetupModel, provider *recordingSecretProvider, repository string) {
 	t.Helper()
-	secrets, err := store.LoadSecrets(profileID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if secrets.StackEnvironments["suite"] != setupTestAPIKeyEnvironment {
-		t.Fatal("runtime environment was not saved in profile secrets")
+	recorded := provider.values[defaultStackSecretSource("suite")]
+	if recorded["API_KEY"] != "secret" {
+		t.Fatalf("runtime secret was not saved through provider: %+v", recorded.Redacted())
 	}
 	reloaded, err := loadEditableStacks(repository)
 	if err != nil {
@@ -1142,6 +1282,21 @@ func assertStackEditorSavedRuntimeEnvironment(t *testing.T, store ProfileStore, 
 	if len(reloaded[0].Metadata.PublicResources) != 2 ||
 		reloaded[0].Metadata.PublicResources[0].Subdomain != "app" {
 		t.Fatalf("multi-resource metadata was not saved: %+v", reloaded[0].Metadata)
+	}
+	if reloaded[0].Metadata.Secrets.Provider != stackSecretProviderAge ||
+		strings.Join(reloaded[0].Metadata.Secrets.KeyNames(), ",") != "API_KEY" {
+		t.Fatalf("secret metadata was not saved: %+v", reloaded[0].Metadata.Secrets)
+	}
+	model.openStackEditor(reloaded[0])
+	model.stackInputs[0].SetValue("suite-renamed")
+	updated, _ := model.updateStackEditor(keyCtrl('s'))
+	model = updated.(profileSetupModel)
+	if model.screen != profileSetupScreenStacks || model.err != "" {
+		t.Fatalf("stack editor did not rename with secrets: %v %s", model.screen, model.err)
+	}
+	recorded = provider.values[defaultStackSecretSource("suite-renamed")]
+	if recorded["API_KEY"] != "secret" {
+		t.Fatalf("runtime secret was not re-encrypted for renamed stack: %+v", provider.values)
 	}
 }
 
@@ -1402,7 +1557,6 @@ func TestProfileSetupModelViewsRenderPopulatedScreens(t *testing.T) {
 		Secrets: ProfileSecrets{
 			PangolinSetupToken:    "setup-token",
 			PangolinAdminPassword: "admin-password",
-			StackEnvironments:     map[string]string{"site": setupTestAPIKeyEnvironment},
 		},
 	}})
 	model.selectedIndex = 0
@@ -1455,7 +1609,7 @@ func TestProfileSetupModelViewsRenderPopulatedScreens(t *testing.T) {
 		{profileSetupScreenStackServices, "Choose public services"},
 		{profileSetupScreenStackEditor, "Edit stack"},
 		{profileSetupScreenStackResourceEditor, "Edit public resource"},
-		{profileSetupScreenStackEnvironment, "Runtime environment"},
+		{profileSetupScreenStackEnvironment, "Runtime secrets"},
 		{profileSetupScreenStackReview, "Review application stack"},
 		{profileSetupScreenStackDeleteConfirm, "Remove stack site"},
 		{profileSetupScreenStackDiff, "diff --git"},
@@ -1481,13 +1635,13 @@ func TestProfileSetupModelViewsRenderPopulatedScreens(t *testing.T) {
 	for _, mode := range []stackEnvironmentMode{stackEnvironmentChoose, stackEnvironmentBrowse, stackEnvironmentManual} {
 		model.screen = profileSetupScreenStackEnvironment
 		model.stackEnvironmentMode = mode
-		if view := model.View().Content; !strings.Contains(view, "Runtime environment") {
+		if view := model.View().Content; !strings.Contains(view, "Runtime secrets") {
 			t.Fatalf("environment mode %d did not render:\n%s", mode, view)
 		}
 	}
 }
 
-func TestStackDeleteRemovesSelectedStackAndEnvironmentSecret(t *testing.T) {
+func TestStackDeleteRemovesSelectedStack(t *testing.T) {
 	requireGit(t)
 	repository := t.TempDir()
 	runGitCommand(t, repository, "init")
@@ -1511,12 +1665,8 @@ func TestStackDeleteRemovesSelectedStackAndEnvironmentSecret(t *testing.T) {
 			BaseDomain:           setupTestDomain,
 			ConfigRepositoryPath: repository,
 		},
-		State:   ProfileState{Runs: map[string]SetupRun{}},
-		Secrets: ProfileSecrets{StackEnvironments: map[string]string{"site": setupTestAPIKeyEnvironment}},
+		State: ProfileState{Runs: map[string]SetupRun{}},
 	}})
-	if err := model.deleteStackEnvironmentSecret("unused"); err != nil {
-		t.Fatal(err)
-	}
 	model.selectedIndex = 0
 	model.screen = profileSetupScreenStacks
 	model.stacks = []editableStack{{Name: "site"}}
@@ -1532,9 +1682,6 @@ func TestStackDeleteRemovesSelectedStackAndEnvironmentSecret(t *testing.T) {
 	model = updated.(profileSetupModel)
 	if command != nil || model.screen != profileSetupScreenStacks || model.err != "" {
 		t.Fatalf("selected stack was not deleted cleanly: %+v", model)
-	}
-	if _, ok := model.profiles[0].Secrets.StackEnvironments["site"]; ok {
-		t.Fatal("deleted stack runtime environment secret was retained")
 	}
 	if _, err := os.Stat(stackDirectory); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stack directory still exists or stat failed unexpectedly: %v", err)
@@ -1642,7 +1789,7 @@ func TestProfileStackEnvironmentSelectsKeepNoneAndFile(t *testing.T) {
 	invalid := model
 	invalid.stackEnvironmentCursor = -1
 	updated, _ := invalid.selectStackEnvironmentOption()
-	if result := updated.(profileSetupModel); !strings.Contains(result.err, "no runtime environment option") {
+	if result := updated.(profileSetupModel); !strings.Contains(result.err, "no runtime secret option") {
 		t.Fatalf("invalid cursor returned unexpected result: %+v", result)
 	}
 

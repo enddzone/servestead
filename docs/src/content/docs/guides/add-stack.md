@@ -1,6 +1,6 @@
 ---
 title: Add an Application Stack
-description: Import a Compose file, choose public routes, store secrets outside Git, and deploy.
+description: Import a Compose file, choose public routes, store secrets as encrypted files, and deploy.
 ---
 
 Servestead deploys application stacks from a Git-backed configuration repository. The Compose file stays consumer-owned.
@@ -13,7 +13,7 @@ From a saved profile dashboard:
 2. Press `a` to open the Compose file browser.
 3. Review detected services.
 4. Select services that should receive public routes.
-5. Choose no runtime environment, a detected adjacent `.env`, or another environment file.
+5. Choose no runtime secrets, a detected adjacent `.env`, or another environment file.
 6. Save the generated stack metadata.
 7. Review and commit repository files.
 8. Deploy the selected committed stack.
@@ -47,16 +47,27 @@ Servestead copies and writes:
 | --- | --- |
 | `stacks/<name>/compose.yaml` | Your reviewed Compose file. |
 | `stacks/<name>/servestead.yaml` | Public-resource contract and route metadata. |
+| `stacks/<name>/servestead.secrets.yaml` | SOPS-compatible age-encrypted runtime secret values when a populated `.env` is imported. |
 
 It does not inject labels into the consumer-owned Compose file.
 
-## Runtime Environment
+## Runtime Secrets
 
-Runtime environment values are stored in the profile's owner-only `secrets.json`, outside the configuration repository.
+Runtime environment values imported from `.env` files are stored as SOPS-compatible age-encrypted data in the configuration repository. Servestead creates the profile stack secret identity automatically on first import, or you can create it with `bin/servestead secrets init --profile <profile-id>`.
+
+Back up the profile stack secret identity with `bin/servestead secrets export-key --profile <profile-id>` and restore it with `bin/servestead secrets import-key --profile <profile-id> --file <path>`.
+
+If Servestead is unavailable, export or recover that identity into a file and decrypt with SOPS:
+
+```sh
+SOPS_AGE_KEY_FILE=/path/to/stack-secret-key.txt sops -d stacks/<name>/servestead.secrets.yaml
+```
 
 Commit `.env.example` when required keys need documentation. Do not commit populated `.env` files.
 
-Update or remove stack environment values without editing the stack:
+At deployment time, Servestead decrypts values locally, exports them only for the remote Compose task, and sends them to Dockhand's server-local API over SSH stdin as secret env vars. It does not write populated stack `.env` files to the remote host.
+
+Update or remove stack secret values without editing the stack by hand:
 
 ```sh
 bin/servestead stack env set --profile <profile-id> --stack <name> --file /path/to/.env

@@ -31,6 +31,16 @@ func TestSubcommandHelpIsSuccessful(t *testing.T) {
 	}
 }
 
+func TestGitHubTokenHelpIsSuccessful(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := run(context.Background(), []string{"github-token", "--help"}, &stdout, &stderr, func(string) string { return "" }); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "servestead github-token set") || stderr.Len() != 0 {
+		t.Fatalf("unexpected output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 func TestProvisionRequiresProviderCredential(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := run(context.Background(), []string{

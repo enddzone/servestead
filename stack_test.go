@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -23,6 +24,90 @@ const testApplicationCompose = `services:
   worker:
     image: example/worker
 `
+
+type recordingSecretProvider struct {
+	values  map[string]SecretSet
+	deleted []string
+}
+
+func installRecordingSecretProvider(t *testing.T) *recordingSecretProvider {
+	t.Helper()
+	provider := &recordingSecretProvider{values: map[string]SecretSet{}}
+	original := secretProviderForName
+	secretProviderForName = func(name string) (SecretProvider, error) {
+		if name != stackSecretProviderAge {
+			return nil, errors.New("unexpected provider")
+		}
+		return provider, nil
+	}
+	t.Cleanup(func() {
+		secretProviderForName = original
+	})
+	return provider
+}
+
+func (provider *recordingSecretProvider) Name() string {
+	return stackSecretProviderAge
+}
+
+func (provider *recordingSecretProvider) Capabilities() SecretCapabilities {
+	return SecretCapabilities{Read: true, Write: true, Delete: true, List: true}
+}
+
+func (provider *recordingSecretProvider) GetStackSecrets(_ context.Context, ref StackSecretRef) (SecretSet, error) {
+	values, ok := provider.values[ref.Source]
+	if !ok {
+		return nil, errors.New("missing recorded secrets")
+	}
+	return copySecretSet(values), nil
+}
+
+func (provider *recordingSecretProvider) PutStackSecrets(_ context.Context, ref StackSecretRef, values SecretSet) error {
+	provider.values[ref.Source] = copySecretSet(values)
+	path, err := stackSecretPath(ref)
+	if err != nil {
+		return err
+	}
+	content := "version: 1\nkind: servestead-stack-secrets\nstack: " + ref.StackName + "\nvalues:\n"
+	for _, key := range secretSetKeys(values) {
+		content += "  " + key + ": ENC[recorded]\n"
+	}
+	return atomicWriteFile(path, []byte(content), 0600)
+}
+
+func (provider *recordingSecretProvider) DeleteStackSecrets(_ context.Context, ref StackSecretRef, _ []string) error {
+	provider.deleted = append(provider.deleted, ref.Source)
+	delete(provider.values, ref.Source)
+	path, err := stackSecretPath(ref)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func (provider *recordingSecretProvider) ListStackSecretKeys(_ context.Context, ref StackSecretRef) ([]SecretKeyMeta, error) {
+	values, ok := provider.values[ref.Source]
+	if !ok {
+		return nil, errors.New("missing recorded secrets")
+	}
+	keys := secretSetKeys(values)
+	metas := make([]SecretKeyMeta, 0, len(keys))
+	for _, key := range keys {
+		metas = append(metas, SecretKeyMeta{Name: key, Required: true})
+	}
+	return metas, nil
+}
+
+func copySecretSet(values SecretSet) SecretSet {
+	copied := SecretSet{}
+	for key, value := range values {
+		copied[key] = value
+	}
+	return copied
+}
 
 const (
 	stackTestHost            = "203.0.113.10"
@@ -54,6 +139,36 @@ func TestRunStackDispatchRejectsInvalidCommands(t *testing.T) {
 	}
 	if err := runStack(context.Background(), []string{"unknown"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "unknown stack command") {
 		t.Fatalf("unknown stack subcommand returned unexpected error: %v", err)
+	}
+	if err := runStack(context.Background(), []string{"env"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("missing stack env action returned unexpected error: %v", err)
+	}
+}
+
+func TestPrepareEditableStackDestinationHandlesExistingDirectories(t *testing.T) {
+	stacksDirectory := filepath.Join(t.TempDir(), "stacks")
+	existing := filepath.Join(stacksDirectory, "site")
+	if err := os.MkdirAll(existing, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(existing, stackComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareEditableStackDestination(stacksDirectory, existing, "", "site"); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("existing stack directory was accepted: %v", err)
+	}
+	if stackDirectoryContainsOnlySecretFile(filepath.Join(stacksDirectory, "missing")) {
+		t.Fatal("missing stack directory looked secret-only")
+	}
+	secretOnly := filepath.Join(stacksDirectory, "secret-only")
+	if err := os.MkdirAll(secretOnly, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secretOnly, stackSecretFilename), []byte("encrypted\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareEditableStackDestination(stacksDirectory, secretOnly, "", "secret-only"); err != nil {
+		t.Fatalf("secret-only stack directory should be reusable: %v", err)
 	}
 }
 
@@ -143,6 +258,25 @@ func TestGenerateStackPangolinOverrideGroupsMultipleResourcesByService(t *testin
 	}
 }
 
+func TestValidateStackMetadataRejectsUnsupportedPangolinProtocol(t *testing.T) {
+	services, err := inspectComposeServices([]byte(testApplicationCompose))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = validateStackMetadata("site", stackMetadata{
+		Version: 1,
+		PublicResources: []stackPublicResource{{
+			ID: "web", Service: "web", Name: "Site", Subdomain: "site", Port: 80,
+			Protocol: "https",
+		}},
+	}, services)
+	if err == nil ||
+		!strings.Contains(err.Error(), "protocol must be one of http, tcp, udp, ssh, rdp, vnc") ||
+		!strings.Contains(err.Error(), "use http for web apps") {
+		t.Fatalf("expected actionable protocol validation error, got %v", err)
+	}
+}
+
 func TestPrivateStackGeneratesDockhandOnlyOverride(t *testing.T) {
 	services, err := inspectComposeServices([]byte(testApplicationCompose))
 	if err != nil {
@@ -193,14 +327,27 @@ func TestParseStackPublications(t *testing.T) {
 }
 
 func TestRunStackAddImportsMultiplePublicationsAndEnvironment(t *testing.T) {
+	result := runStackAddEnvironmentFixture(t)
+	assertStackAddImportedResources(t, result.stacks)
+	assertStackAddImportedSecrets(t, result.provider, result.repository, result.stacks)
+	assertStackAddDidNotLeakSecrets(t, result.store, result.profileID, result.stdout)
+	assertStackAddRepositoryScaffold(t, result.repository, result.stdout)
+}
+
+type stackAddEnvironmentResult struct {
+	provider   *recordingSecretProvider
+	store      ProfileStore
+	profileID  string
+	repository string
+	stdout     string
+	stacks     []editableStack
+}
+
+func runStackAddEnvironmentFixture(t *testing.T) stackAddEnvironmentResult {
+	t.Helper()
 	requireGit(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	store, err := newDefaultProfileStore()
-	if err != nil {
-		t.Fatal(err)
-	}
+	provider := installRecordingSecretProvider(t)
+	store := newStackAddEnvironmentStore(t)
 	repository := filepath.Join(t.TempDir(), "repository")
 	if err := os.MkdirAll(repository, 0700); err != nil {
 		t.Fatal(err)
@@ -213,15 +360,7 @@ func TestRunStackAddImportsMultiplePublicationsAndEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	directory := t.TempDir()
-	composePath := filepath.Join(directory, stackTestComposeFilename)
-	if err := os.WriteFile(composePath, []byte(testApplicationCompose), 0600); err != nil {
-		t.Fatal(err)
-	}
-	environmentPath := filepath.Join(directory, ".env")
-	if err := os.WriteFile(environmentPath, []byte(stackTestEnvironment), 0600); err != nil {
-		t.Fatal(err)
-	}
+	composePath, environmentPath := writeStackAddEnvironmentInputs(t)
 	var stdout, stderr strings.Builder
 	err = runStack(context.Background(), []string{
 		"add", "--profile", profile.ID, "--compose", composePath, "--name", "suite",
@@ -234,24 +373,82 @@ func TestRunStackAddImportsMultiplePublicationsAndEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stacks) != 1 || len(stacks[0].Metadata.PublicResources) != 2 {
-		t.Fatalf("multiple publications were not imported: %+v", stacks)
+	return stackAddEnvironmentResult{
+		provider: provider, store: store, profileID: profile.ID,
+		repository: repository, stdout: stdout.String(), stacks: stacks,
 	}
-	secrets, err := store.LoadSecrets(profile.ID)
+}
+
+func newStackAddEnvironmentStore(t *testing.T) ProfileStore {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	store, err := newDefaultProfileStore()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if secrets.StackEnvironments["suite"] != stackTestEnvironment {
-		t.Fatal("runtime environment was not imported")
+	return store
+}
+
+func writeStackAddEnvironmentInputs(t *testing.T) (string, string) {
+	t.Helper()
+	directory := t.TempDir()
+	composePath := filepath.Join(directory, stackTestComposeFilename)
+	if err := os.WriteFile(composePath, []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(stdout.String(), "API_KEY=secret") {
-		t.Fatalf("stack add exposed an environment value:\n%s", stdout.String())
+	environmentPath := filepath.Join(directory, ".env")
+	if err := os.WriteFile(environmentPath, []byte(stackTestEnvironment), 0600); err != nil {
+		t.Fatal(err)
 	}
+	return composePath, environmentPath
+}
+
+func assertStackAddImportedResources(t *testing.T, stacks []editableStack) {
+	t.Helper()
+	if len(stacks) != 1 || len(stacks[0].Metadata.PublicResources) != 2 {
+		t.Fatalf("multiple publications were not imported: %+v", stacks)
+	}
+}
+
+func assertStackAddImportedSecrets(t *testing.T, provider *recordingSecretProvider, repository string, stacks []editableStack) {
+	t.Helper()
+	metadataSecrets := stacks[0].Metadata.Secrets
+	if metadataSecrets.Provider != stackSecretProviderAge ||
+		metadataSecrets.Source != defaultStackSecretSource("suite") ||
+		strings.Join(metadataSecrets.KeyNames(), ",") != "API_KEY" {
+		t.Fatalf("stack secret metadata was not imported: %+v", metadataSecrets)
+	}
+	recorded := provider.values[defaultStackSecretSource("suite")]
+	if recorded["API_KEY"] != "secret" {
+		t.Fatalf("runtime secret was not imported through provider: %+v", recorded.Redacted())
+	}
+	if _, err := os.Stat(filepath.Join(repository, filepath.FromSlash(defaultStackSecretSource("suite")))); err != nil {
+		t.Fatalf("encrypted secret file was not written: %v", err)
+	}
+}
+
+func assertStackAddDidNotLeakSecrets(t *testing.T, store ProfileStore, profileID, stdout string) {
+	t.Helper()
+	if strings.Contains(stdout, "API_KEY=secret") {
+		t.Fatalf("stack add exposed an environment value:\n%s", stdout)
+	}
+	if fileStore, ok := store.(*fileProfileStore); ok {
+		if data, err := os.ReadFile(fileStore.secretsPath(profileID)); err == nil &&
+			(strings.Contains(string(data), "API_KEY") || strings.Contains(string(data), `"secret"`)) {
+			t.Fatalf("profile secrets leaked stack value:\n%s", data)
+		}
+	}
+}
+
+func assertStackAddRepositoryScaffold(t *testing.T, repository, stdout string) {
+	t.Helper()
 	if _, err := os.Stat(filepath.Join(repository, filepath.FromSlash(observabilityComposeRepositoryPath))); err != nil {
 		t.Fatalf("stack add did not complete the repository scaffold: %v", err)
 	}
-	if !strings.Contains(stdout.String(), " add stacks\n") || strings.Contains(stdout.String(), "add stacks/suite") {
-		t.Fatalf("stack add did not recommend one complete repository commit:\n%s", stdout.String())
+	if !strings.Contains(stdout, " add stacks\n") || strings.Contains(stdout, "add stacks/suite") {
+		t.Fatalf("stack add did not recommend one complete repository commit:\n%s", stdout)
 	}
 }
 
@@ -332,11 +529,6 @@ func TestLoadStackAddProfileAndRepositoryDefaults(t *testing.T) {
 }
 
 func TestWriteStackAddFilesHandlesInPlaceComposeAndExistingFiles(t *testing.T) {
-	store := newFileProfileStore(t.TempDir())
-	profile, err := store.Create(Profile{IP: stackTestHost})
-	if err != nil {
-		t.Fatal(err)
-	}
 	repository := t.TempDir()
 	stackDirectory := filepath.Join(repository, "stacks", "site")
 	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
@@ -347,18 +539,18 @@ func TestWriteStackAddFilesHandlesInPlaceComposeAndExistingFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	directory, copied, err := writeStackAddFiles(store, profile.ID, repository, stackAddOptions{
+	directory, copied, err := writeStackAddFiles(context.Background(), repository, stackAddOptions{
 		Name: "site", Compose: composePath,
-	}, stackMetadata{Version: 1}, "")
+	}, stackMetadata{Version: 1}, "", nil, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if directory != stackDirectory || copied {
 		t.Fatalf("unexpected in-place write result: directory=%s copied=%v", directory, copied)
 	}
-	if _, _, err := writeStackAddFiles(store, profile.ID, repository, stackAddOptions{
+	if _, _, err := writeStackAddFiles(context.Background(), repository, stackAddOptions{
 		Name: "site", Compose: composePath,
-	}, stackMetadata{Version: 1}, ""); err == nil || !strings.Contains(err.Error(), "already configured") {
+	}, stackMetadata{Version: 1}, "", nil, io.Discard); err == nil || !strings.Contains(err.Error(), "already configured") {
 		t.Fatalf("existing metadata returned unexpected error: %v", err)
 	}
 
@@ -373,9 +565,9 @@ func TestWriteStackAddFilesHandlesInPlaceComposeAndExistingFiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(otherDirectory, stackComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = writeStackAddFiles(store, profile.ID, repository, stackAddOptions{
+	_, _, err = writeStackAddFiles(context.Background(), repository, stackAddOptions{
 		Name: "other", Compose: sourcePath,
-	}, stackMetadata{Version: 1}, "")
+	}, stackMetadata{Version: 1}, "", nil, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "already has") {
 		t.Fatalf("existing compose returned unexpected error: %v", err)
 	}
@@ -425,71 +617,65 @@ func TestGeneratedStackOverridePassesDockerComposeMerge(t *testing.T) {
 	}
 }
 
-func TestStackEnvironmentIsStoredOutsideRepositoryAndSentOverStdin(t *testing.T) {
-	store, profile, environment := saveTestStackEnvironment(t)
-	assertSavedStackEnvironment(t, store, profile.ID, environment)
-	dataTask, writeTask, joinedApply := stackEnvironmentTasks(t, environment)
-	assertStackDataTask(t, dataTask)
-	assertStackEnvironmentTask(t, writeTask, joinedApply, environment)
-}
-
-func saveTestStackEnvironment(t *testing.T) (*fileProfileStore, Profile, string) {
-	t.Helper()
-	store := newFileProfileStore(t.TempDir())
-	profile, err := store.Create(Profile{IP: stackTestHost})
-	if err != nil {
-		t.Fatal(err)
-	}
-	environment, keys, err := readStackEnvironmentContent("# runtime\nAPI_KEY=secret-value\nPORT=3000")
+func TestStackSecretsAreSentToDockhandOverStdin(t *testing.T) {
+	values, keys, err := parseEnvironmentSecretSet("# runtime\nAPI_KEY=secret-value\nPORT=3000")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(keys, ",") != "API_KEY,PORT" {
 		t.Fatalf("unexpected environment keys: %v", keys)
 	}
-	if err := saveStackEnvironment(store, profile.ID, "site", environment); err != nil {
-		t.Fatal(err)
-	}
-	return store, profile, environment
+	taskSet := stackSecretTasks(t, values)
+	assertStackDataTask(t, taskSet.data)
+	assertStackSecretTasks(t, taskSet)
 }
 
-func assertSavedStackEnvironment(t *testing.T, store *fileProfileStore, profileID, environment string) {
-	t.Helper()
-	secrets, err := store.LoadSecrets(profileID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if secrets.StackEnvironments["site"] != environment {
-		t.Fatal("stack environment was not persisted")
-	}
-	info, err := os.Stat(store.secretsPath(profileID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Fatalf("secrets file mode = %o, want 0600", info.Mode().Perm())
-	}
+type stackSecretTaskSet struct {
+	data            Task
+	validation      Task
+	start           Task
+	gitStack        Task
+	secret          Task
+	joinedApply     string
+	gitStackIndex   int
+	secretTaskIndex int
 }
 
-func stackEnvironmentTasks(t *testing.T, environment string) (Task, Task, string) {
+func stackSecretTasks(t *testing.T, values SecretSet) stackSecretTaskSet {
 	t.Helper()
 	stack := configuredStack{
-		Name: "site", Override: "services: {}\n", Environment: environment,
+		Name: "site", Override: "services: {}\n", Secrets: ageStackSecretMetadata("site", values, "age1w7e2rccr8prd58v8u4073zut0e3vm94ukf6gucwge50u2m35hgcq0xzvrd"), SecretValues: values,
 	}
-	tasks := configuredStackTasks(observabilityConfig{}, stack, "servestead")
-	var dataTask Task
-	var writeTask Task
-	joinedApply := ""
-	for _, task := range tasks {
-		joinedApply += task.Apply
+	tasks := configuredStackTasks(observabilityConfig{
+		RepositoryOrigin: "https://github.com/example/config.git",
+		RepositoryBranch: "main",
+		RepositoryCommit: "abcdef1234567890",
+	}, stack, "servestead")
+	taskSet := stackSecretTaskSet{
+		gitStackIndex:   -1,
+		secretTaskIndex: -1,
+	}
+	for index, task := range tasks {
+		taskSet.joinedApply += task.Apply
 		if task.Name == "Prepare site data directory" {
-			dataTask = task
+			taskSet.data = task
 		}
-		if task.Name == "Write site environment" {
-			writeTask = task
+		if strings.HasPrefix(task.Name, "Validate site Compose") {
+			taskSet.validation = task
+		}
+		if strings.HasPrefix(task.Name, "Start site stack") {
+			taskSet.start = task
+		}
+		if task.Name == "Reconcile site Dockhand Git stack" {
+			taskSet.gitStack = task
+			taskSet.gitStackIndex = index
+		}
+		if task.Name == "Reconcile site Dockhand secret environment" {
+			taskSet.secret = task
+			taskSet.secretTaskIndex = index
 		}
 	}
-	return dataTask, writeTask, joinedApply
+	return taskSet
 }
 
 func assertStackDataTask(t *testing.T, dataTask Task) {
@@ -506,14 +692,44 @@ func assertStackDataTask(t *testing.T, dataTask Task) {
 	}
 }
 
-func assertStackEnvironmentTask(t *testing.T, writeTask Task, joinedApply, environment string) {
+func assertStackSecretTasks(t *testing.T, taskSet stackSecretTaskSet) {
 	t.Helper()
-	if writeTask.Stdin != environment || strings.Contains(writeTask.Apply, "secret-value") ||
-		strings.Contains(joinedApply, "secret-value") {
-		t.Fatal("environment value was not isolated to task stdin")
+	if taskSet.secret.Stdin == "" {
+		t.Fatal("Dockhand secret task was not created")
 	}
-	if !strings.Contains(joinedApply, "--env-file '/etc/servestead/stacks/site.env'") {
-		t.Fatalf("Compose commands do not use the managed environment:\n%s", joinedApply)
+	if taskSet.gitStackIndex < 0 || taskSet.secretTaskIndex < 0 || taskSet.gitStackIndex > taskSet.secretTaskIndex {
+		t.Fatalf("Dockhand Git stack should be reconciled before secret environment: git=%d secret=%d", taskSet.gitStackIndex, taskSet.secretTaskIndex)
+	}
+	if taskSet.gitStack.Apply == "" {
+		t.Fatal("Dockhand Git stack task was not created")
+	}
+	command := exec.Command("sh", "-n")
+	command.Stdin = strings.NewReader(taskSet.gitStack.Apply)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Dockhand Git stack task is not valid shell: %v\n%s\n%s", err, output, taskSet.gitStack.Apply)
+	}
+	if !strings.Contains(taskSet.validation.Stdin, "secret-value") ||
+		!strings.Contains(taskSet.start.Stdin, "secret-value") ||
+		strings.Contains(taskSet.validation.Apply, "secret-value") ||
+		strings.Contains(taskSet.start.Apply, "secret-value") {
+		t.Fatal("compose secret values were not isolated to task stdin")
+	}
+	if !strings.Contains(taskSet.secret.Stdin, "secret-value") ||
+		strings.Contains(taskSet.secret.Apply, "secret-value") ||
+		strings.Contains(taskSet.joinedApply, "secret-value") {
+		t.Fatal("secret value was not isolated to Dockhand task stdin")
+	}
+	if !strings.Contains(taskSet.secret.Apply, "http://127.0.0.1:3003/api") ||
+		!strings.Contains(taskSet.secret.Apply, "--data-binary @-") ||
+		strings.Contains(taskSet.secret.Apply, "--data '") ||
+		strings.Contains(taskSet.secret.Apply, "/etc/servestead/stacks/site.env") ||
+		strings.Contains(taskSet.joinedApply, "--env-file") {
+		t.Fatalf("Dockhand secret command does not use the expected stdin/local API path:\n%s", taskSet.secret.Apply)
+	}
+	command = exec.Command("sh", "-n")
+	command.Stdin = strings.NewReader(taskSet.secret.Apply)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Dockhand secret task is not valid shell: %v\n%s\n%s", err, output, taskSet.secret.Apply)
 	}
 }
 
@@ -561,8 +777,9 @@ public_resources:
 	}
 }
 
-func TestPrepareDeclarativeSetupAttachesStackEnvironment(t *testing.T) {
+func TestPrepareDeclarativeSetupAttachesStackSecrets(t *testing.T) {
 	requireGit(t)
+	provider := installRecordingSecretProvider(t)
 	store := newFileProfileStore(t.TempDir())
 	repository := filepath.Join(t.TempDir(), "repository")
 	profile, err := store.Create(Profile{
@@ -570,6 +787,13 @@ func TestPrepareDeclarativeSetupAttachesStackEnvironment(t *testing.T) {
 		PangolinAdminEmail: stackTestAdminEmail, ConfigRepositoryPath: repository,
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	identity, recipient, err := generateStackSecretIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSecrets(profile.ID, ProfileSecrets{StackSecretIdentity: identity, StackSecretRecipient: recipient}); err != nil {
 		t.Fatal(err)
 	}
 	scaffold := observabilityComposeFile(observabilityConfig{
@@ -597,15 +821,29 @@ public_resources:
     healthcheck:
       enabled: true
       path: /
+secrets:
+  provider: age
+  source: stacks/site/servestead.secrets.yaml
+  recipients:
+    - ` + recipient + `
+  runtime:
+    sink: dockhand
+    mode: env
+  keys:
+    - name: API_KEY
+      required: true
 `
 	if err := os.WriteFile(filepath.Join(stackDirectory, stackMetadataFilename), []byte(metadata), 0600); err != nil {
 		t.Fatal(err)
 	}
-	runGitCommand(t, repository, "add", "stacks/site")
-	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email="+stackTestGitEmail, "commit", "-m", "Add site")
-	if err := saveStackEnvironment(store, profile.ID, "site", stackTestEnvironment); err != nil {
+	provider.values[defaultStackSecretSource("site")] = SecretSet{"API_KEY": "secret"}
+	if err := atomicWriteFile(filepath.Join(stackDirectory, stackSecretFilename), []byte("encrypted\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	runGitCommand(t, repository, "add", "stacks/site")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email="+stackTestGitEmail, "commit", "-m", "Add site")
+	runGitCommand(t, repository, "remote", "add", "origin", "https://github.com/example/config.git")
+	runGitCommand(t, repository, "update-ref", "refs/remotes/origin/main", "HEAD")
 	_, config, err := prepareDeclarativeSetup(
 		context.Background(), store, profile, ProfileState{Runs: map[string]SetupRun{}},
 		setupConfig{BaseDomain: profile.BaseDomain, PangolinAdminEmail: profile.PangolinAdminEmail},
@@ -613,8 +851,37 @@ public_resources:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(config.Stacks) != 1 || config.Stacks[0].Environment != stackTestEnvironment {
-		t.Fatalf("stack environment was not attached: %+v", config.Stacks)
+	if len(config.Stacks) != 1 || config.Stacks[0].SecretValues["API_KEY"] != "secret" {
+		t.Fatalf("stack secrets were not attached: %+v", config.Stacks)
+	}
+}
+
+func TestStackSecretValuesFromRevisionAllowsLocalRepository(t *testing.T) {
+	provider := installRecordingSecretProvider(t)
+	identity, recipient, err := generateStackSecretIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := SecretSet{"API_KEY": "secret"}
+	metadata := ageStackSecretMetadata("site", values, recipient)
+	provider.values[metadata.Source] = values
+
+	loaded, err := stackSecretValuesFromRevision(context.Background(),
+		configRepositoryRevision{Path: t.TempDir()},
+		repositoryStack{
+			Name: "site",
+			Metadata: stackMetadata{
+				Version: 1,
+				Secrets: metadata,
+			},
+		},
+		ProfileSecrets{StackSecretIdentity: identity},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded["API_KEY"] != "secret" {
+		t.Fatalf("local stack secret values were not loaded: %+v", loaded.Redacted())
 	}
 }
 
@@ -654,8 +921,50 @@ func TestStackEnvironmentTargetValidation(t *testing.T) {
 }
 
 func TestStackEnvironmentSaveRemove(t *testing.T) {
+	fixture := newStackEnvironmentSaveFixture(t)
+	assertMissingStackEnvironmentFileRejected(t, fixture)
+	assertStackEnvironmentSaved(t, fixture)
+	assertStackEnvironmentRemoved(t, fixture)
+}
+
+func TestRunStackEnvironmentDispatchesSetAndRemove(t *testing.T) {
+	fixture := newDefaultStackEnvironmentSaveFixture(t)
+	if err := runStackEnvironment(context.Background(), []string{"set", "--profile", fixture.profileID, "--stack", "site", "--file", fixture.environmentPath}, &fixture.output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := runStackEnvironment(context.Background(), []string{"remove", "--profile", fixture.profileID, "--stack", "site"}, &fixture.output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.provider.deleted) != 1 {
+		t.Fatalf("stack env remove did not delete provider secrets: %+v", fixture.provider.deleted)
+	}
+}
+
+type stackEnvironmentSaveFixture struct {
+	provider        *recordingSecretProvider
+	store           ProfileStore
+	profileID       string
+	stackDirectory  string
+	environmentPath string
+	output          bytes.Buffer
+}
+
+func newStackEnvironmentSaveFixture(t *testing.T) stackEnvironmentSaveFixture {
+	t.Helper()
+	provider := installRecordingSecretProvider(t)
 	store := newFileProfileStore(t.TempDir())
-	profile, err := store.Create(Profile{IP: stackTestHost})
+	repository := t.TempDir()
+	stackDirectory := filepath.Join(repository, "stacks", "site")
+	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackTestComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackMetadataFilename), []byte("version: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := store.Create(Profile{IP: stackTestHost, ConfigRepositoryPath: repository})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,31 +972,84 @@ func TestStackEnvironmentSaveRemove(t *testing.T) {
 	if err := os.WriteFile(environmentPath, []byte(stackTestEnvironment), 0600); err != nil {
 		t.Fatal(err)
 	}
-	var output bytes.Buffer
-	if err := setStackEnvironment(store, profile.ID, "site", "", &output); err == nil || !strings.Contains(err.Error(), "--file is required") {
+	return stackEnvironmentSaveFixture{
+		provider: provider, store: store, profileID: profile.ID,
+		stackDirectory: stackDirectory, environmentPath: environmentPath,
+	}
+}
+
+func newDefaultStackEnvironmentSaveFixture(t *testing.T) stackEnvironmentSaveFixture {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	store, err := newDefaultProfileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := installRecordingSecretProvider(t)
+	repository := t.TempDir()
+	stackDirectory := filepath.Join(repository, "stacks", "site")
+	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackTestComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackMetadataFilename), []byte("version: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := store.Create(Profile{IP: stackTestHost, ConfigRepositoryPath: repository})
+	if err != nil {
+		t.Fatal(err)
+	}
+	environmentPath := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(environmentPath, []byte(stackTestEnvironment), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return stackEnvironmentSaveFixture{
+		provider: provider, store: store, profileID: profile.ID,
+		stackDirectory: stackDirectory, environmentPath: environmentPath,
+	}
+}
+
+func assertMissingStackEnvironmentFileRejected(t *testing.T, fixture stackEnvironmentSaveFixture) {
+	t.Helper()
+	if err := setStackEnvironment(context.Background(), fixture.store, fixture.profileID, "site", "", &fixture.output); err == nil || !strings.Contains(err.Error(), "--file is required") {
 		t.Fatalf("missing env file returned unexpected error: %v", err)
 	}
-	if err := setStackEnvironment(store, profile.ID, "site", environmentPath, &output); err != nil {
+}
+
+func assertStackEnvironmentSaved(t *testing.T, fixture stackEnvironmentSaveFixture) {
+	t.Helper()
+	if err := setStackEnvironment(context.Background(), fixture.store, fixture.profileID, "site", fixture.environmentPath, &fixture.output); err != nil {
 		t.Fatal(err)
 	}
-	secrets, err := store.LoadSecrets(profile.ID)
+	metadata, err := readStackMetadataFile(filepath.Join(fixture.stackDirectory, stackMetadataFilename))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if secrets.StackEnvironments["site"] != stackTestEnvironment || !strings.Contains(output.String(), "API_KEY") {
-		t.Fatalf("runtime environment was not saved: secrets=%+v output=%s", secrets, output.String())
+	if metadata.Secrets.Provider != stackSecretProviderAge ||
+		strings.Join(metadata.Secrets.KeyNames(), ",") != "API_KEY" ||
+		fixture.provider.values[defaultStackSecretSource("site")]["API_KEY"] != "secret" ||
+		!strings.Contains(fixture.output.String(), "API_KEY") {
+		t.Fatalf("runtime environment was not saved: metadata=%+v values=%+v output=%s", metadata.Secrets, fixture.provider.values, fixture.output.String())
 	}
-	if err := removeStackEnvironment(store, profile.ID, "site", environmentPath, io.Discard); err == nil || !strings.Contains(err.Error(), "--file cannot") {
+}
+
+func assertStackEnvironmentRemoved(t *testing.T, fixture stackEnvironmentSaveFixture) {
+	t.Helper()
+	if err := removeStackEnvironment(context.Background(), fixture.store, fixture.profileID, "site", fixture.environmentPath, io.Discard); err == nil || !strings.Contains(err.Error(), "--file cannot") {
 		t.Fatalf("remove with file returned unexpected error: %v", err)
 	}
-	if err := removeStackEnvironment(store, profile.ID, "site", "", io.Discard); err != nil {
+	if err := removeStackEnvironment(context.Background(), fixture.store, fixture.profileID, "site", "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	secrets, err = store.LoadSecrets(profile.ID)
+	metadata, err := readStackMetadataFile(filepath.Join(fixture.stackDirectory, stackMetadataFilename))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := secrets.StackEnvironments["site"]; ok {
+	if metadata.Secrets.HasSecrets() || len(fixture.provider.deleted) != 1 || fixture.provider.deleted[0] != defaultStackSecretSource("site") {
 		t.Fatal("runtime environment was not removed")
 	}
 }
@@ -702,7 +1064,7 @@ func TestStackAddInputsReadsEnvironmentAndPublications(t *testing.T) {
 	if err := os.WriteFile(environmentPath, []byte(stackTestEnvironment), 0600); err != nil {
 		t.Fatal(err)
 	}
-	options, services, metadata, environment, keys, err := stackAddInputs([]string{
+	options, services, metadata, secretValues, keys, err := stackAddInputs([]string{
 		"--profile", "profile-1",
 		"--compose", composePath,
 		"--name", "site",
@@ -713,8 +1075,8 @@ func TestStackAddInputsReadsEnvironmentAndPublications(t *testing.T) {
 		t.Fatal(err)
 	}
 	if options.Name != "site" || len(services) != 3 || len(metadata.PublicResources) != 1 ||
-		environment != stackTestEnvironment || len(keys) != 1 || keys[0] != "API_KEY" {
-		t.Fatalf("unexpected stack add inputs: options=%+v services=%+v metadata=%+v environment=%q keys=%+v", options, services, metadata, environment, keys)
+		secretValues["API_KEY"] != "secret" || len(keys) != 1 || keys[0] != "API_KEY" {
+		t.Fatalf("unexpected stack add inputs: options=%+v services=%+v metadata=%+v secrets=%+v keys=%+v", options, services, metadata, secretValues.Redacted(), keys)
 	}
 	if _, _, _, _, _, err := stackAddInputs([]string{"--profile", "profile-1", "--compose", composePath, "extra"}, io.Discard); err == nil || !strings.Contains(err.Error(), "unexpected arguments") {
 		t.Fatalf("unexpected argument was not rejected: %v", err)
@@ -736,7 +1098,7 @@ func TestValidateStackMetadataResourceRejectsInvalidResources(t *testing.T) {
 		want     string
 	}{
 		{name: "bad id", resource: stackPublicResource{ID: "Bad", Service: "web", Name: "Web", Subdomain: "bad", Port: 80, Protocol: "http"}, want: "lowercase DNS label"},
-		{name: "bad protocol", resource: stackPublicResource{ID: "bad", Service: "web", Name: "Web", Subdomain: "bad", Port: 80, Protocol: "tcp"}, want: "protocol"},
+		{name: "bad protocol", resource: stackPublicResource{ID: "bad", Service: "web", Name: "Web", Subdomain: "bad", Port: 80, Protocol: "https"}, want: "protocol"},
 		{name: "missing health path", resource: stackPublicResource{ID: "bad", Service: "web", Name: "Web", Subdomain: "bad", Port: 80, Protocol: "http", Healthcheck: stackResourceHealthcheck{Enabled: true}}, want: "health checks"},
 	}
 	for _, tc := range cases {

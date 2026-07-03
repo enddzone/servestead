@@ -26,10 +26,12 @@ const gitNoExtDiffFlag = "--no-ext-diff"
 
 var stackSlugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 var environmentKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var stackPublicResourceProtocols = []string{"http", "tcp", "udp", "ssh", "rdp", "vnc"}
 
 type stackMetadata struct {
 	Version         int                   `yaml:"version"`
 	PublicResources []stackPublicResource `yaml:"public_resources"`
+	Secrets         stackSecretMetadata   `yaml:"secrets,omitempty"`
 }
 
 type configuredStack struct {
@@ -40,7 +42,8 @@ type configuredStack struct {
 	ComposeSHA256 string
 	Resources     []stackPublicResource
 	Files         map[string]string
-	Environment   string
+	Secrets       stackSecretMetadata
+	SecretValues  SecretSet
 }
 
 type stackPublicResource struct {
@@ -71,6 +74,7 @@ type stackAddOptions struct {
 	Name            string
 	Resources       []stackPublicResource
 	EnvironmentFile string
+	Secrets         stackSecretMetadata
 }
 
 type editableStack struct {
@@ -194,7 +198,7 @@ func writeEditableStack(repositoryPath, originalName string, options stackAddOpt
 	if err != nil {
 		return err
 	}
-	metadata := stackMetadata{Version: 1, PublicResources: options.Resources}
+	metadata := stackMetadata{Version: 1, PublicResources: options.Resources, Secrets: options.Secrets}
 	if err := validateStackMetadata(options.Name, metadata, services); err != nil {
 		return err
 	}
@@ -209,7 +213,9 @@ func writeEditableStack(repositoryPath, originalName string, options stackAddOpt
 func prepareEditableStackDestination(stacksDirectory, destination, originalName, name string) error {
 	if originalName == "" {
 		if _, err := os.Stat(destination); err == nil {
-			return fmt.Errorf("stack %q already exists", name)
+			if !stackDirectoryContainsOnlySecretFile(destination) {
+				return fmt.Errorf("stack %q already exists", name)
+			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -245,6 +251,14 @@ func writeEditableStackFiles(destination string, metadata stackMetadata, compose
 		return err
 	}
 	return os.WriteFile(filepath.Join(destination, stackMetadataFilename), metadataData, 0600)
+}
+
+func stackDirectoryContainsOnlySecretFile(directory string) bool {
+	entries, err := os.ReadDir(directory)
+	if err != nil || len(entries) != 1 {
+		return false
+	}
+	return !entries[0].IsDir() && entries[0].Name() == stackSecretFilename
 }
 
 func removeEditableStack(repositoryPath, name string) error {
@@ -426,7 +440,7 @@ func runStack(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	case "add":
 		return runStackAdd(ctx, args[1:], stdout, stderr)
 	case "env":
-		return runStackEnvironment(args[1:], stdout, stderr)
+		return runStackEnvironment(ctx, args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("unknown stack command %q", args[0])
 	}
@@ -442,13 +456,26 @@ func (values *stackPublishFlags) Set(value string) error {
 }
 
 func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	options, services, metadata, environment, environmentKeys, err := stackAddInputs(args, stderr)
+	options, services, metadata, secretValues, secretKeys, err := stackAddInputs(args, stderr)
 	if err != nil {
 		return err
 	}
 	store, profile, state, err := loadStackAddProfile(options)
 	if err != nil {
 		return err
+	}
+	stackSecretIdentity := ""
+	if options.EnvironmentFile != "" {
+		_, identity, recipient, err := ensureProfileStackSecretIdentity(store, profile.ID)
+		if err != nil {
+			return err
+		}
+		stackSecretIdentity = identity
+		options.Secrets = ageStackSecretMetadata(options.Name, secretValues, recipient)
+		metadata.Secrets = options.Secrets
+		if err := validateStackMetadata(options.Name, metadata, services); err != nil {
+			return err
+		}
 	}
 	override, err := generateStackPangolinOverride(options.Name, metadata, services, profile)
 	if err != nil {
@@ -458,7 +485,7 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	if err != nil {
 		return err
 	}
-	directory, copiedCompose, err := writeStackAddFiles(store, profile.ID, revision.Path, options, metadata, environment)
+	directory, copiedCompose, err := writeStackAddFiles(ctx, revision.Path, options, metadata, stackSecretIdentity, secretValues, stdout)
 	if err != nil {
 		return err
 	}
@@ -469,7 +496,7 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		CopiedCompose:   copiedCompose,
 		ScaffoldCreated: scaffoldCreated,
 		Override:        override,
-		EnvironmentKeys: environmentKeys,
+		EnvironmentKeys: secretKeys,
 		Metadata:        metadata,
 		Services:        services,
 		BaseDomain:      profile.BaseDomain,
@@ -477,7 +504,7 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	return nil
 }
 
-func stackAddInputs(args []string, stderr io.Writer) (stackAddOptions, []composeServiceSummary, stackMetadata, string, []string, error) {
+func stackAddInputs(args []string, stderr io.Writer) (stackAddOptions, []composeServiceSummary, stackMetadata, SecretSet, []string, error) {
 	flags := flag.NewFlagSet("stack add", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	options := stackAddOptions{}
@@ -486,43 +513,43 @@ func stackAddInputs(args []string, stderr io.Writer) (stackAddOptions, []compose
 	flags.StringVar(&options.Compose, "compose", "", "Docker Compose file to add")
 	flags.StringVar(&options.Name, "name", "", "stack name used in the repository")
 	flags.Var(&publications, "publish", "public route service:port:subdomain[:id] (repeatable)")
-	flags.StringVar(&options.EnvironmentFile, "env-file", "", "runtime environment file stored outside Git")
+	flags.StringVar(&options.EnvironmentFile, "env-file", "", "runtime secret environment file stored as encrypted stack metadata")
 	if err := flags.Parse(args); err != nil {
-		return stackAddOptions{}, nil, stackMetadata{}, "", nil, err
+		return stackAddOptions{}, nil, stackMetadata{}, nil, nil, err
 	}
 	if flags.NArg() != 0 {
-		return stackAddOptions{}, nil, stackMetadata{}, "", nil, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+		return stackAddOptions{}, nil, stackMetadata{}, nil, nil, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
 	if options.ProfileID == "" || options.Compose == "" {
-		return stackAddOptions{}, nil, stackMetadata{}, "", nil, errors.New("--profile and --compose are required")
+		return stackAddOptions{}, nil, stackMetadata{}, nil, nil, errors.New("--profile and --compose are required")
 	}
 
 	composeData, err := os.ReadFile(expandUserPath(options.Compose))
 	if err != nil {
-		return stackAddOptions{}, nil, stackMetadata{}, "", nil, fmt.Errorf("read Compose file: %w", err)
+		return stackAddOptions{}, nil, stackMetadata{}, nil, nil, fmt.Errorf("read Compose file: %w", err)
 	}
 	services, err := inspectComposeServices(composeData)
 	if err != nil {
-		return stackAddOptions{}, nil, stackMetadata{}, "", nil, err
+		return stackAddOptions{}, nil, stackMetadata{}, nil, nil, err
 	}
 	options = withStackAddDefaults(options, services)
 	options.Resources, err = parseStackPublications(publications)
 	if err != nil {
-		return stackAddOptions{}, nil, stackMetadata{}, "", nil, err
+		return stackAddOptions{}, nil, stackMetadata{}, nil, nil, err
 	}
-	metadata := stackMetadata{Version: 1, PublicResources: options.Resources}
-	var environment string
-	var environmentKeys []string
+	var secretValues SecretSet
+	var secretKeys []string
 	if options.EnvironmentFile != "" {
-		environment, environmentKeys, err = readStackEnvironmentFile(options.EnvironmentFile)
+		secretValues, secretKeys, err = readStackEnvironmentSecrets(options.EnvironmentFile)
 		if err != nil {
-			return stackAddOptions{}, nil, stackMetadata{}, "", nil, err
+			return stackAddOptions{}, nil, stackMetadata{}, nil, nil, err
 		}
 	}
+	metadata := stackMetadata{Version: 1, PublicResources: options.Resources}
 	if err := validateStackMetadata(options.Name, metadata, services); err != nil {
-		return stackAddOptions{}, nil, stackMetadata{}, "", nil, err
+		return stackAddOptions{}, nil, stackMetadata{}, nil, nil, err
 	}
-	return options, services, metadata, environment, environmentKeys, nil
+	return options, services, metadata, secretValues, secretKeys, nil
 }
 
 func loadStackAddProfile(options stackAddOptions) (ProfileStore, Profile, ProfileState, error) {
@@ -578,7 +605,7 @@ func prepareStackAddRepository(ctx context.Context, store ProfileStore, profile 
 	return revision, scaffoldCreated, nil
 }
 
-func writeStackAddFiles(store ProfileStore, profileID, repositoryPath string, options stackAddOptions, metadata stackMetadata, environment string) (string, bool, error) {
+func writeStackAddFiles(ctx context.Context, repositoryPath string, options stackAddOptions, metadata stackMetadata, stackSecretIdentity string, secretValues SecretSet, stdout io.Writer) (string, bool, error) {
 	directory := filepath.Join(repositoryPath, "stacks", options.Name)
 	composeDestination := filepath.Join(directory, stackComposeFilename)
 	sourcePath, err := filepath.Abs(expandUserPath(options.Compose))
@@ -601,17 +628,18 @@ func writeStackAddFiles(store ProfileStore, profileID, repositoryPath string, op
 	if err := copyStackAddCompose(sourcePath, destinationPath, composeDestination, options.Name); err != nil {
 		return "", false, err
 	}
+	if options.EnvironmentFile != "" {
+		if err := putStackSecrets(ctx, repositoryPath, options.Name, metadata.Secrets, stackSecretIdentity, secretValues); err != nil {
+			return "", false, err
+		}
+		fmt.Fprintf(stdout, "Stack secrets saved to %s (%d keys).\n", metadata.Secrets.Source, len(secretSetKeys(secretValues)))
+	}
 	metadataData, err := yaml.Marshal(metadata)
 	if err != nil {
 		return "", false, err
 	}
 	if err := os.WriteFile(filepath.Join(directory, stackMetadataFilename), metadataData, 0600); err != nil {
 		return "", false, err
-	}
-	if options.EnvironmentFile != "" {
-		if err := saveStackEnvironment(store, profileID, options.Name, environment); err != nil {
-			return "", false, err
-		}
 	}
 	return directory, copiedCompose, nil
 }
@@ -643,7 +671,7 @@ type stackAddSummary struct {
 
 func printStackAddSummary(stdout io.Writer, summary stackAddSummary) {
 	if summary.Options.EnvironmentFile != "" {
-		fmt.Fprintf(stdout, "Runtime environment saved outside Git (%d keys).\n", len(summary.EnvironmentKeys))
+		fmt.Fprintf(stdout, "Runtime secrets saved as encrypted stack metadata (%d keys).\n", len(summary.EnvironmentKeys))
 	}
 	fmt.Fprintf(stdout, "Stack scaffold created: %s\n", summary.Directory)
 	if summary.ScaffoldCreated {
@@ -658,7 +686,7 @@ func printStackAddSummary(stdout io.Writer, summary stackAddSummary) {
 	for _, resource := range summary.Metadata.PublicResources {
 		fmt.Fprintf(stdout, "Public resource: https://%s.%s -> %s:%d\n", resource.Subdomain, summary.BaseDomain, resource.Service, resource.Port)
 	}
-	fmt.Fprintln(stdout, "Review the imported Compose file for literal secrets; Servestead does not move application-specific secrets out of Git.")
+	fmt.Fprintln(stdout, "Review the imported Compose file for literal secrets; Servestead stores imported environment values only as encrypted stack secrets.")
 	for _, resource := range summary.Metadata.PublicResources {
 		if servicePublishesPorts(summary.Services, resource.Service) {
 			fmt.Fprintf(stdout, "Servestead will suppress %s's direct host port bindings in its generated deployment override.\n", resource.Service)
@@ -674,7 +702,7 @@ func printStackAddSummary(stdout io.Writer, summary stackAddSummary) {
 	fmt.Fprintln(stdout, "Then open the profile dashboard, press s, select this stack, and press r to deploy it independently.")
 }
 
-func runStackEnvironment(args []string, stdout, stderr io.Writer) error {
+func runStackEnvironment(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	action, profileID, stackName, path, err := stackEnvironmentInputs(args, stderr)
 	if err != nil {
 		return err
@@ -687,9 +715,9 @@ func runStackEnvironment(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if action == "remove" {
-		return removeStackEnvironment(store, profileID, stackName, path, stdout)
+		return removeStackEnvironment(ctx, store, profileID, stackName, path, stdout)
 	}
-	return setStackEnvironment(store, profileID, stackName, path, stdout)
+	return setStackEnvironment(ctx, store, profileID, stackName, path, stdout)
 }
 
 func stackEnvironmentInputs(args []string, stderr io.Writer) (string, string, string, string, error) {
@@ -734,30 +762,81 @@ func ensureStackEnvironmentTarget(store ProfileStore, profileID, stackName strin
 	return nil
 }
 
-func removeStackEnvironment(store ProfileStore, profileID, stackName, path string, stdout io.Writer) error {
+func removeStackEnvironment(ctx context.Context, store ProfileStore, profileID, stackName, path string, stdout io.Writer) error {
 	if path != "" {
 		return errors.New("--file cannot be used with env remove")
 	}
-	if err := saveStackEnvironment(store, profileID, stackName, ""); err != nil {
-		return err
+	profile, _, err := store.Load(profileID)
+	if err != nil {
+		return fmt.Errorf("load profile: %w", err)
 	}
-	fmt.Fprintf(stdout, "Removed the runtime environment for %s. Deploy or synchronize the stack to apply it.\n", stackName)
-	return nil
-}
-
-func setStackEnvironment(store ProfileStore, profileID, stackName, path string, stdout io.Writer) error {
-	if path == "" {
-		return errors.New("--file is required with env set")
-	}
-	environment, keys, err := readStackEnvironmentFile(path)
+	metadataPath := filepath.Join(expandUserPath(profile.ConfigRepositoryPath), "stacks", stackName, stackMetadataFilename)
+	metadata, err := readStackMetadataFile(metadataPath)
 	if err != nil {
 		return err
 	}
-	if err := saveStackEnvironment(store, profileID, stackName, environment); err != nil {
+	if metadata.Secrets.HasSecrets() {
+		secrets, err := store.LoadSecrets(profileID)
+		if err != nil {
+			return err
+		}
+		identity, _, err := secrets.StackSecretIdentityPair()
+		if err != nil {
+			return err
+		}
+		if err := removeStackSecrets(ctx, profile.ConfigRepositoryPath, stackName, metadata.Secrets, identity); err != nil {
+			return err
+		}
+		metadata.Secrets = stackSecretMetadata{}
+		if err := writeStackMetadataFile(metadataPath, metadata); err != nil {
+			return err
+		}
+	}
+	fmt.Fprintf(stdout, "Removed the encrypted runtime secrets for %s. Review and commit the stack metadata change.\n", stackName)
+	return nil
+}
+
+func setStackEnvironment(ctx context.Context, store ProfileStore, profileID, stackName, path string, stdout io.Writer) error {
+	if path == "" {
+		return errors.New("--file is required with env set")
+	}
+	profile, _, err := store.Load(profileID)
+	if err != nil {
+		return fmt.Errorf("load profile: %w", err)
+	}
+	values, keys, err := readStackEnvironmentSecrets(path)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "Saved %d runtime environment keys for %s outside Git: %s\n", len(keys), stackName, strings.Join(keys, ", "))
-	fmt.Fprintln(stdout, "Deploy or synchronize the stack to apply the environment.")
+	metadataPath := filepath.Join(expandUserPath(profile.ConfigRepositoryPath), "stacks", stackName, stackMetadataFilename)
+	metadata, err := readStackMetadataFile(metadataPath)
+	if err != nil {
+		return err
+	}
+	_, identity, recipient, err := ensureProfileStackSecretIdentity(store, profileID)
+	if err != nil {
+		return err
+	}
+	metadata.Secrets = ageStackSecretMetadata(stackName, values, recipient)
+	composeData, err := os.ReadFile(filepath.Join(expandUserPath(profile.ConfigRepositoryPath), "stacks", stackName, "compose.yaml"))
+	if err != nil {
+		return fmt.Errorf("read stack Compose file: %w", err)
+	}
+	services, err := inspectComposeServices(composeData)
+	if err != nil {
+		return err
+	}
+	if err := validateStackMetadata(stackName, metadata, services); err != nil {
+		return err
+	}
+	if err := putStackSecrets(ctx, profile.ConfigRepositoryPath, stackName, metadata.Secrets, identity, values); err != nil {
+		return err
+	}
+	if err := writeStackMetadataFile(metadataPath, metadata); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Saved %d encrypted runtime secret keys for %s: %s\n", len(keys), stackName, strings.Join(keys, ", "))
+	fmt.Fprintln(stdout, "Review and commit the stack secret file and metadata, then deploy or synchronize the stack to apply them.")
 	return nil
 }
 
@@ -785,6 +864,50 @@ func parseStackPublications(values []string) ([]stackPublicResource, error) {
 	return resources, nil
 }
 
+func readStackMetadataFile(path string) (stackMetadata, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return stackMetadata{}, err
+	}
+	metadata := stackMetadata{Version: 1}
+	if err := yaml.Unmarshal(data, &metadata); err != nil {
+		return stackMetadata{}, err
+	}
+	return metadata, nil
+}
+
+func writeStackMetadataFile(path string, metadata stackMetadata) error {
+	data, err := yaml.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+func putStackSecrets(ctx context.Context, repositoryPath, stackName string, metadata stackSecretMetadata, identity string, values SecretSet) error {
+	provider, err := secretProviderForName(metadata.Provider)
+	if err != nil {
+		return err
+	}
+	return provider.PutStackSecrets(ctx, metadata.Ref(repositoryPath, stackName, identity), values)
+}
+
+func removeStackSecrets(ctx context.Context, repositoryPath, stackName string, metadata stackSecretMetadata, identity string) error {
+	provider, err := secretProviderForName(metadata.Provider)
+	if err != nil {
+		return err
+	}
+	return provider.DeleteStackSecrets(ctx, metadata.Ref(repositoryPath, stackName, identity), nil)
+}
+
+func readStackEnvironmentSecrets(path string) (SecretSet, []string, error) {
+	data, err := os.ReadFile(expandUserPath(path))
+	if err != nil {
+		return nil, nil, fmt.Errorf("read environment file: %w", err)
+	}
+	return parseEnvironmentSecretSet(string(data))
+}
+
 func readStackEnvironmentFile(path string) (string, []string, error) {
 	data, err := os.ReadFile(expandUserPath(path))
 	if err != nil {
@@ -797,47 +920,15 @@ func readStackEnvironmentContent(content string) (string, []string, error) {
 	if strings.IndexByte(content, 0) >= 0 {
 		return "", nil, errors.New("environment file contains a NUL byte")
 	}
-	keys := []string{}
-	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
-		key, _, found := strings.Cut(line, "=")
-		key = strings.TrimSpace(key)
-		if !found || !environmentKeyPattern.MatchString(key) {
-			continue
-		}
-		if !containsString(keys, key) {
-			keys = append(keys, key)
-		}
+	_, keys, err := parseEnvironmentSecretSet(content)
+	if err != nil {
+		return "", nil, err
 	}
-	sort.Strings(keys)
 	environment := content
 	if environment != "" && !strings.HasSuffix(environment, "\n") {
 		environment += "\n"
 	}
 	return environment, keys, nil
-}
-
-func saveStackEnvironment(store ProfileStore, profileID, stackName, environment string) error {
-	if !stackSlugPattern.MatchString(stackName) {
-		return errors.New("stack name must be a lowercase DNS label")
-	}
-	secrets, err := store.LoadSecrets(profileID)
-	if err != nil {
-		return err
-	}
-	if secrets.StackEnvironments == nil {
-		secrets.StackEnvironments = map[string]string{}
-	}
-	if environment == "" {
-		delete(secrets.StackEnvironments, stackName)
-	} else {
-		secrets.StackEnvironments[stackName] = environment
-	}
-	return store.SaveSecrets(profileID, secrets)
 }
 
 func inspectComposeServices(data []byte) ([]composeServiceSummary, error) {
@@ -962,6 +1053,9 @@ func validateStackMetadata(stackName string, metadata stackMetadata, services []
 			return fmt.Errorf("resource %q: %w", resource.ID, err)
 		}
 	}
+	if err := validateStackSecretMetadata(stackName, metadata.Secrets); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -977,13 +1071,22 @@ func validateStackMetadataResource(resource stackPublicResource, services []comp
 		return fmt.Errorf("resource subdomain %q is duplicated", resource.Subdomain)
 	}
 	subdomains[resource.Subdomain] = true
-	if resource.Protocol != "http" && resource.Protocol != "https" {
-		return fmt.Errorf("resource %q protocol must be http or https", resource.ID)
+	if !isStackPublicResourceProtocol(resource.Protocol) {
+		return fmt.Errorf("resource %q protocol must be one of %s; use http for web apps because Pangolin handles public HTTPS", resource.ID, strings.Join(stackPublicResourceProtocols, ", "))
 	}
 	if resource.Healthcheck.Enabled && resource.Healthcheck.Path == "" {
 		return fmt.Errorf("resource %q enables health checks but has no path", resource.ID)
 	}
 	return validateStackResource(resource, services)
+}
+
+func isStackPublicResourceProtocol(protocol string) bool {
+	for _, allowed := range stackPublicResourceProtocols {
+		if protocol == allowed {
+			return true
+		}
+	}
+	return false
 }
 
 func generateStackPangolinOverride(stackName string, metadata stackMetadata, services []composeServiceSummary, profile Profile) (string, error) {

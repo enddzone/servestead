@@ -1,0 +1,70 @@
+services:
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: arrs-gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      VPN_SERVICE_PROVIDER: airvpn
+      VPN_TYPE: wireguard
+      WIREGUARD_PRIVATE_KEY: ${AIRVPN_WIREGUARD_PRIVATE_KEY}
+      WIREGUARD_PRESHARED_KEY: ${AIRVPN_WIREGUARD_PRESHARED_KEY}
+      WIREGUARD_ADDRESSES: ${AIRVPN_WIREGUARD_ADDRESSES}
+      SERVER_COUNTRIES: ${AIRVPN_SERVER_COUNTRIES:-United States}
+      FIREWALL_INPUT_PORTS: "8080"
+      FIREWALL_VPN_INPUT_PORTS: ${AIRVPN_FORWARDED_PORT}
+    volumes:
+      - /data/arrs/config/gluetun:/gluetun
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: arrs-qbittorrent
+    network_mode: service:gluetun
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: America/Chicago
+      WEBUI_PORT: "8080"
+      TORRENTING_PORT: ${AIRVPN_FORWARDED_PORT}
+    volumes:
+      - /data/arrs/config/qbittorrent:/config
+      - /data/arrs/downloads:/downloads
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: arrs-sonarr
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: America/Chicago
+    volumes:
+      - /data/arrs/config/sonarr:/config
+      - /data/arrs/media/tv:/tv
+      - /data/arrs/downloads:/downloads
+    expose:
+      - "8989"
+    restart: unless-stopped
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: arrs-radarr
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: America/Chicago
+    volumes:
+      - /data/arrs/config/radarr:/config
+      - /data/arrs/media/movies:/movies
+      - /data/arrs/downloads:/downloads
+    expose:
+      - "7878"
+    restart: unless-stopped

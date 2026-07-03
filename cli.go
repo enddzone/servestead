@@ -24,6 +24,8 @@ Direct commands:
   servestead network --host <ipv4> --private-key <path>
   servestead proxy --host <ipv4> --private-key <path> --domain <domain> --email <email> --server-secret <secret>
   servestead pangolin-credentials (--profile <id> | --ip <ipv4>)
+  servestead github-token <set|status|remove> --profile <id>
+  servestead secrets <init|status|export-key|import-key> --profile <id>
   servestead stack add --profile <id> --compose <path> [--publish <service:port:subdomain[:id]> ...] [--env-file <path>]
   servestead stack env set --profile <id> --stack <name> --file <path>
   servestead stack env remove --profile <id> --stack <name>
@@ -64,6 +66,8 @@ func cliHandlers(ctx context.Context, args []string, stdout, stderr io.Writer, g
 		"network":              func() error { return runNetwork(ctx, args, stdout, stderr) },
 		"proxy":                func() error { return runProxy(ctx, args, stdout, stderr) },
 		"pangolin-credentials": func() error { return runPangolinCredentials(args, stdout, stderr) },
+		"github-token":         func() error { return runGitHubToken(args, stdout, stderr) },
+		"secrets":              func() error { return runSecrets(ctx, args, stdout, stderr) },
 		"keygen":               func() error { return runKeygen(ctx, args, stdout, stderr) },
 		"stack":                func() error { return runStack(ctx, args, stdout, stderr) },
 		"setup":                func() error { return runSetup(ctx, args, stdout, stderr) },

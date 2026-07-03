@@ -63,6 +63,57 @@ func TestPrepareConfigRepositoryInitializesAndDeploysExactCommit(t *testing.T) {
 	}
 }
 
+func TestPrepareDeclarativeSetupUsesStoredGitHubToken(t *testing.T) {
+	requireGit(t)
+	root := t.TempDir()
+	store := newFileProfileStore(root)
+	profile, err := store.Create(Profile{IP: "203.0.113.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSecrets(profile.ID, ProfileSecrets{GitHubToken: "github_pat_profile_secret"}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, config, err := prepareDeclarativeSetup(context.Background(), store, profile, ProfileState{Runs: map[string]SetupRun{}}, setupConfig{
+		BaseDomain:           "example.com",
+		PangolinAdminEmail:   "admin@example.com",
+		ConfigRepositoryPath: filepath.Join(root, "repository"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.GitHubToken != "github_pat_profile_secret" {
+		t.Fatalf("stored GitHub token was not applied: %q", config.GitHubToken)
+	}
+}
+
+func TestPrepareDeclarativeSetupPrefersEnvironmentGitHubToken(t *testing.T) {
+	requireGit(t)
+	t.Setenv("SERVESTEAD_GITHUB_TOKEN", "github_pat_env_secret")
+	root := t.TempDir()
+	store := newFileProfileStore(root)
+	profile, err := store.Create(Profile{IP: "203.0.113.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSecrets(profile.ID, ProfileSecrets{GitHubToken: "github_pat_profile_secret"}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, config, err := prepareDeclarativeSetup(context.Background(), store, profile, ProfileState{Runs: map[string]SetupRun{}}, setupConfig{
+		BaseDomain:           "example.com",
+		PangolinAdminEmail:   "admin@example.com",
+		ConfigRepositoryPath: filepath.Join(root, "repository"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.GitHubToken != "github_pat_env_secret" {
+		t.Fatalf("environment GitHub token was not preferred: %q", config.GitHubToken)
+	}
+}
+
 func TestPrepareSuppliedRepositoryScaffoldsThenRequiresReview(t *testing.T) {
 	requireGit(t)
 	repository := t.TempDir()
@@ -217,6 +268,28 @@ func TestValidateGitHubRepositoryURL(t *testing.T) {
 	}
 }
 
+func TestGitHubCheckoutFailureDetailAddsTokenGuidance(t *testing.T) {
+	detail := githubCheckoutFailureDetail("remote: Invalid username or token.\nfatal: Authentication failed", false, "profile-1")
+	for _, expected := range []string{
+		"No GitHub token was provided.",
+		"Private GitHub repositories require a personal access token",
+		"Contents: Read-only",
+		"servestead github-token set --profile profile-1 --file /path/to/token.txt",
+	} {
+		if !strings.Contains(detail, expected) {
+			t.Fatalf("checkout failure detail missing %q:\n%s", expected, detail)
+		}
+	}
+
+	rejected := githubCheckoutFailureDetail("fatal: repository not found", true, "profile-1")
+	if !strings.Contains(rejected, "A GitHub token was provided") || !strings.Contains(rejected, "not expired") {
+		t.Fatalf("token rejection guidance missing:\n%s", rejected)
+	}
+	if strings.Contains(githubCheckoutFailureDetail("fatal: unable to access: Could not resolve host", false, "profile-1"), "github-token set") {
+		t.Fatal("non-auth GitHub failure should not include token guidance")
+	}
+}
+
 func TestObservabilityScaffoldContainsNoGeneratedSecrets(t *testing.T) {
 	config := observabilityConfig{
 		BaseDomain:    configRepositoryTestDomain,
@@ -239,12 +312,12 @@ func TestObservabilityScaffoldContainsNoGeneratedSecrets(t *testing.T) {
 }
 
 func TestPrepareConfigRepositoryCheckoutRejectsInvalidInputs(t *testing.T) {
-	if _, err := prepareConfigRepositoryCheckout(context.Background(), filepath.Join(t.TempDir(), "repository"), "git@github.com:example/repo.git", ""); err == nil {
+	if _, err := prepareConfigRepositoryCheckout(context.Background(), filepath.Join(t.TempDir(), "repository"), "git@github.com:example/repo.git", "", "profile-1"); err == nil {
 		t.Fatal("invalid GitHub repository URL was accepted")
 	}
 
 	repository := t.TempDir()
-	if _, err := prepareConfigRepositoryCheckout(context.Background(), repository, "", ""); err == nil || !strings.Contains(err.Error(), "not a Git repository") {
+	if _, err := prepareConfigRepositoryCheckout(context.Background(), repository, "", "", "profile-1"); err == nil || !strings.Contains(err.Error(), "not a Git repository") {
 		t.Fatalf("existing non-Git repository returned unexpected error: %v", err)
 	}
 }
