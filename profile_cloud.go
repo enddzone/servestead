@@ -7,8 +7,10 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
+
+const profileCloudNoActiveDropletMessage = "this profile does not have an active DigitalOcean Droplet"
 
 type profileCloudActionMsg struct {
 	action  string
@@ -39,14 +41,14 @@ func (model profileSetupModel) updateProfileCloud(key tea.KeyMsg) (tea.Model, te
 	case "r", "R":
 		_, _, active := model.selectedProfileActiveCloud()
 		if !active {
-			model.err = "this profile does not have an active DigitalOcean Droplet"
+			model.err = profileCloudNoActiveDropletMessage
 			return model, nil
 		}
 		return model.openProfileCloudConfirm("restart"), nil
 	case "d", "D":
 		_, _, active := model.selectedProfileActiveCloud()
 		if !active {
-			model.err = "this profile does not have an active DigitalOcean Droplet"
+			model.err = profileCloudNoActiveDropletMessage
 			return model, nil
 		}
 		return model.openProfileCloudConfirm("destroy"), nil
@@ -94,7 +96,7 @@ func (model profileSetupModel) updateProfileCloudConfirm(key tea.KeyMsg) (tea.Mo
 		}
 		_, cloud, active := model.selectedProfileActiveCloud()
 		if !active {
-			model.err = "this profile does not have an active DigitalOcean Droplet"
+			model.err = profileCloudNoActiveDropletMessage
 			return model, nil
 		}
 		expected := profileCloudConfirmPhrase(model.cloudAction, cloud)
@@ -137,33 +139,48 @@ func (model profileSetupModel) runProfileCloudAction(token string) tea.Cmd {
 	action := model.cloudAction
 	profile := model.profiles[model.selectedIndex].Profile
 	state := model.profiles[model.selectedIndex].State
+	store := model.profileStore
 	return func() tea.Msg {
 		if profile.Cloud == nil {
 			return profileCloudActionMsg{action: action, err: fmt.Errorf("profile %s has no cloud metadata", profile.ID)}
 		}
 		provider := newProvisionCloudProvider(token)
-		switch action {
-		case "restart":
-			if err := provider.Reboot(context.Background(), profile.Cloud.ResourceID); err != nil {
-				return profileCloudActionMsg{action: action, err: fmt.Errorf("restart DigitalOcean Droplet: %w", err)}
-			}
-			return profileCloudActionMsg{action: action, profile: profile}
-		case "destroy":
-			if err := provider.Destroy(context.Background(), profile.Cloud.ResourceID); err != nil {
-				return profileCloudActionMsg{action: action, err: fmt.Errorf("destroy DigitalOcean Droplet: %w", err)}
-			}
-			now := time.Now().UTC()
-			profile.Cloud.DestroyedAt = &now
-			if model.profileStore != nil {
-				if err := model.profileStore.Save(profile, state); err != nil {
-					return profileCloudActionMsg{action: action, err: err}
-				}
-			}
-			return profileCloudActionMsg{action: action, profile: profile}
-		default:
-			return profileCloudActionMsg{action: action, err: fmt.Errorf("unknown cloud action %q", action)}
+		profile, err := performProfileCloudAction(action, provider, store, profile, state)
+		if err != nil {
+			return profileCloudActionMsg{action: action, err: err}
 		}
+		return profileCloudActionMsg{action: action, profile: profile}
 	}
+}
+
+func performProfileCloudAction(action string, provider cloudProvider, store ProfileStore, profile Profile, state ProfileState) (Profile, error) {
+	switch action {
+	case "restart":
+		return restartProfileCloudDroplet(provider, profile)
+	case "destroy":
+		return destroyProfileCloudDroplet(provider, store, profile, state)
+	default:
+		return Profile{}, fmt.Errorf("unknown cloud action %q", action)
+	}
+}
+
+func restartProfileCloudDroplet(provider cloudProvider, profile Profile) (Profile, error) {
+	if err := provider.Reboot(context.Background(), profile.Cloud.ResourceID); err != nil {
+		return Profile{}, fmt.Errorf("restart DigitalOcean Droplet: %w", err)
+	}
+	return profile, nil
+}
+
+func destroyProfileCloudDroplet(provider cloudProvider, store ProfileStore, profile Profile, state ProfileState) (Profile, error) {
+	if err := provider.Destroy(context.Background(), profile.Cloud.ResourceID); err != nil {
+		return Profile{}, fmt.Errorf("destroy DigitalOcean Droplet: %w", err)
+	}
+	now := time.Now().UTC()
+	profile.Cloud.DestroyedAt = &now
+	if store == nil {
+		return profile, nil
+	}
+	return profile, store.Save(profile, state)
 }
 
 func (model profileSetupModel) applyProfileCloudAction(msg profileCloudActionMsg) profileSetupModel {

@@ -17,7 +17,7 @@ permissions:
 
 env:
   GOVULNCHECK_VERSION: v1.5.0
-  TRIVY_VERSION: v0.71.2
+  TRIVY_VERSION: v0.72.0
 
 jobs:
   govulncheck:
@@ -73,7 +73,7 @@ jobs:
           version: ${{ env.TRIVY_VERSION }}
 
       - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@v4.36.2
+        uses: github/codeql-action/upload-sarif@v4.36.3
         with:
           sarif_file: trivy-results.sarif
 

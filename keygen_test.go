@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,6 +64,30 @@ func TestGenerateProviderKeypairRefusesOverwriteWithoutForce(t *testing.T) {
 	err := generateProviderKeypair(context.Background(), keygenConfig{Path: keyPath}, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPrepareKeypairDestinationForceRemovesExistingFiles(t *testing.T) {
+	directory := t.TempDir()
+	privatePath := filepath.Join(directory, "provider")
+	publicPath := privatePath + ".pub"
+	if err := os.WriteFile(privatePath, []byte("private"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(publicPath, []byte("public"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareKeypairDestination(privatePath, publicPath, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(privatePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("private key was not removed: %v", err)
+	}
+	if _, err := os.Stat(publicPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("public key was not removed: %v", err)
+	}
+	if err := prepareKeypairDestination(privatePath, publicPath, true); err != nil {
+		t.Fatalf("force should ignore already-missing files: %v", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,11 @@ import (
 	"time"
 
 	"github.com/digitalocean/godo"
+)
+
+const (
+	cloudTestSize  = "s-1vcpu-1gb"
+	cloudTestImage = "ubuntu-24-04-x64"
 )
 
 func TestDigitalOceanCreate(t *testing.T) {
@@ -25,7 +31,7 @@ func TestDigitalOceanCreate(t *testing.T) {
 			writeJSON(t, response, `{"droplet":{"id":84,"name":"aegis-02","status":"new","networks":{"v4":[]},"created_at":"2026-06-30T12:00:00Z"}}`)
 		case request.Method == http.MethodGet && request.URL.Path == "/v2/droplets/84":
 			polls++
-			writeJSON(t, response, `{"droplet":{"id":84,"name":"aegis-02","status":"active","region":{"slug":"nyc3"},"size_slug":"s-1vcpu-1gb","image":{"slug":"ubuntu-24-04-x64"},"networks":{"v4":[{"ip_address":"10.0.0.2","type":"private"},{"ip_address":"198.51.100.84","type":"public"}]},"created_at":"2026-06-30T12:00:00Z"}}`)
+			writeJSON(t, response, fmt.Sprintf(`{"droplet":{"id":84,"name":"aegis-02","status":"active","region":{"slug":"nyc3"},"size_slug":%q,"image":{"slug":%q},"networks":{"v4":[{"ip_address":"10.0.0.2","type":"private"},{"ip_address":"198.51.100.84","type":"public"}]},"created_at":"2026-06-30T12:00:00Z"}}`, cloudTestSize, cloudTestImage))
 		default:
 			http.NotFound(response, request)
 		}
@@ -35,12 +41,12 @@ func TestDigitalOceanCreate(t *testing.T) {
 	provider := newTestDigitalOceanProvider(t, server)
 	provider.pollInterval = time.Millisecond
 	created, err := provider.Create(context.Background(), provisionConfig{
-		Name: "aegis-02", Region: "nyc3", Size: "s-1vcpu-1gb", Image: "ubuntu-24-04-x64", SSHKey: "12345",
+		Name: "aegis-02", Region: "nyc3", Size: cloudTestSize, Image: cloudTestImage, SSHKey: "12345",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.ID != "84" || created.IPv4 != "198.51.100.84" || created.Region != "nyc3" || created.Size != "s-1vcpu-1gb" {
+	if created.ID != "84" || created.IPv4 != "198.51.100.84" || created.Region != "nyc3" || created.Size != cloudTestSize {
 		t.Fatalf("unexpected server: %+v", created)
 	}
 	if polls != 1 {
@@ -50,8 +56,23 @@ func TestDigitalOceanCreate(t *testing.T) {
 	if !ok || len(keys) != 1 || keys[0] != float64(12345) {
 		t.Fatalf("expected numeric SSH key ID, got %#v", createBody["ssh_keys"])
 	}
-	if createBody["region"] != "nyc3" || createBody["size"] != "s-1vcpu-1gb" || createBody["image"] != "ubuntu-24-04-x64" {
+	if createBody["region"] != "nyc3" || createBody["size"] != cloudTestSize || createBody["image"] != cloudTestImage {
 		t.Fatalf("unexpected create body: %#v", createBody)
+	}
+}
+
+func TestLessDigitalOceanImagePrefersDefaultThenSlug(t *testing.T) {
+	defaultImage := cloudImage{Slug: defaultDigitalOceanImage}
+	olderImage := cloudImage{Slug: "ubuntu-22-04-x64"}
+	newerImage := cloudImage{Slug: "ubuntu-26-04-x64"}
+	if !lessDigitalOceanImage(defaultImage, olderImage) {
+		t.Fatal("default image should sort first")
+	}
+	if lessDigitalOceanImage(olderImage, defaultImage) {
+		t.Fatal("non-default image should not sort before default")
+	}
+	if !lessDigitalOceanImage(olderImage, newerImage) {
+		t.Fatal("non-default images should sort by slug")
 	}
 }
 
@@ -93,29 +114,7 @@ func TestDigitalOceanCatalogIncludesCostAndKeys(t *testing.T) {
 func TestDigitalOceanCreateSSHKeyRebootAndDestroy(t *testing.T) {
 	var actionBody map[string]any
 	destroyed := false
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		switch {
-		case request.Method == http.MethodPost && request.URL.Path == "/v2/account/keys":
-			var body map[string]string
-			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-				t.Fatal(err)
-			}
-			if body["name"] != "servestead-key" || !strings.HasPrefix(body["public_key"], "ssh-ed25519 ") {
-				t.Fatalf("unexpected key create body: %#v", body)
-			}
-			writeJSON(t, response, `{"ssh_key":{"id":11,"name":"servestead-key","fingerprint":"cc:dd"}}`)
-		case request.Method == http.MethodPost && request.URL.Path == "/v2/droplets/84/actions":
-			if err := json.NewDecoder(request.Body).Decode(&actionBody); err != nil {
-				t.Fatal(err)
-			}
-			writeJSON(t, response, `{"action":{"id":1,"status":"in-progress","type":"reboot"}}`)
-		case request.Method == http.MethodDelete && request.URL.Path == "/v2/droplets/84":
-			destroyed = true
-			response.WriteHeader(http.StatusNoContent)
-		default:
-			http.NotFound(response, request)
-		}
-	}))
+	server := newDigitalOceanActionServer(t, &actionBody, &destroyed)
 	defer server.Close()
 
 	provider := newTestDigitalOceanProvider(t, server)
@@ -138,6 +137,43 @@ func TestDigitalOceanCreateSSHKeyRebootAndDestroy(t *testing.T) {
 	if !destroyed {
 		t.Fatal("destroy endpoint was not called")
 	}
+}
+
+func newDigitalOceanActionServer(t *testing.T, actionBody *map[string]any, destroyed *bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodPost && request.URL.Path == "/v2/account/keys":
+			handleDigitalOceanKeyCreate(t, response, request)
+		case request.Method == http.MethodPost && request.URL.Path == "/v2/droplets/84/actions":
+			handleDigitalOceanRebootAction(t, response, request, actionBody)
+		case request.Method == http.MethodDelete && request.URL.Path == "/v2/droplets/84":
+			*destroyed = true
+			response.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+}
+
+func handleDigitalOceanKeyCreate(t *testing.T, response http.ResponseWriter, request *http.Request) {
+	t.Helper()
+	var body map[string]string
+	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["name"] != "servestead-key" || !strings.HasPrefix(body["public_key"], "ssh-ed25519 ") {
+		t.Fatalf("unexpected key create body: %#v", body)
+	}
+	writeJSON(t, response, `{"ssh_key":{"id":11,"name":"servestead-key","fingerprint":"cc:dd"}}`)
+}
+
+func handleDigitalOceanRebootAction(t *testing.T, response http.ResponseWriter, request *http.Request, actionBody *map[string]any) {
+	t.Helper()
+	if err := json.NewDecoder(request.Body).Decode(actionBody); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, response, `{"action":{"id":1,"status":"in-progress","type":"reboot"}}`)
 }
 
 func TestDigitalOceanAPIErrorMessage(t *testing.T) {

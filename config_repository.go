@@ -18,6 +18,15 @@ import (
 )
 
 const observabilityComposeRepositoryPath = "stacks/observability/compose.yaml"
+const gitStatusPorcelainFlag = "--porcelain"
+const gitOriginRemotePrefix = "origin/"
+const trustedCommandPath = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
+
+var trustedGitExecutablePaths = []string{
+	"/usr/bin/git",
+	"/usr/local/bin/git",
+	"/opt/homebrew/bin/git",
+}
 
 var errRepositoryReviewRequired = errors.New("configuration repository scaffold requires review")
 
@@ -49,23 +58,10 @@ func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Pr
 		return profile, config, err
 	}
 	githubToken, _ := effectiveGitHubToken(profileSecrets)
-	path := firstNonEmpty(config.ConfigRepositoryPath, profile.ConfigRepositoryPath)
-	if path == "" {
-		if fileStore, ok := store.(*fileProfileStore); ok && !fileStore.defaultRoot {
-			path = filepath.Join(fileStore.root, "repositories", profile.ID)
-		} else {
-			var err error
-			path, err = defaultConfigRepositoryPath(profile.ID)
-			if err != nil {
-				return profile, config, err
-			}
-		}
-	}
-	absolutePath, err := filepath.Abs(expandUserPath(path))
+	path, err := declarativeConfigRepositoryPath(store, profile, config)
 	if err != nil {
-		return profile, config, fmt.Errorf("resolve configuration repository path: %w", err)
+		return profile, config, err
 	}
-	path = absolutePath
 	scaffold := observabilityComposeFile(observabilityConfig{
 		BaseDomain: config.BaseDomain,
 		AdminEmail: config.PangolinAdminEmail,
@@ -93,39 +89,55 @@ func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Pr
 	config.ConfigRepositoryCompose = revision.Compose
 	config.ConfigRepositorySHA256 = revision.ComposeSHA
 	config.GitHubToken = githubToken
+	config.Stacks, err = configuredStacksFromRevision(ctx, revision, profileSecrets, profile)
+	if err != nil {
+		return profile, config, err
+	}
+	if err := validateConfiguredStackSet(config.Stacks); err != nil {
+		return profile, config, err
+	}
+	if err := store.Save(profile, state); err != nil {
+		return profile, config, err
+	}
+	return profile, config, nil
+}
+
+func declarativeConfigRepositoryPath(store ProfileStore, profile Profile, config setupConfig) (string, error) {
+	path := firstNonEmpty(config.ConfigRepositoryPath, profile.ConfigRepositoryPath)
+	if path == "" {
+		if fileStore, ok := store.(*fileProfileStore); ok && !fileStore.defaultRoot {
+			path = filepath.Join(fileStore.root, "repositories", profile.ID)
+		} else {
+			var err error
+			path, err = defaultConfigRepositoryPath(profile.ID)
+			if err != nil {
+				return "", err
+			}
+		}
+	}
+	absolutePath, err := filepath.Abs(expandUserPath(path))
+	if err != nil {
+		return "", fmt.Errorf("resolve configuration repository path: %w", err)
+	}
+	return absolutePath, nil
+}
+
+func configuredStacksFromRevision(ctx context.Context, revision configRepositoryRevision, secrets ProfileSecrets, profile Profile) ([]configuredStack, error) {
+	stacks := make([]configuredStack, 0, len(revision.Stacks))
 	for _, stack := range revision.Stacks {
 		services, err := inspectComposeServices([]byte(stack.Compose))
 		if err != nil {
-			return profile, config, fmt.Errorf("stack %s: %w", stack.Name, err)
+			return nil, fmt.Errorf("stack %s: %w", stack.Name, err)
 		}
 		override, err := generateStackPangolinOverride(stack.Name, stack.Metadata, services, profile)
 		if err != nil {
-			return profile, config, fmt.Errorf("stack %s: %w", stack.Name, err)
+			return nil, fmt.Errorf("stack %s: %w", stack.Name, err)
 		}
-		var secretValues SecretSet
-		if stack.Metadata.Secrets.HasSecrets() {
-			if revision.Origin == "" || revision.Branch == "" {
-				return profile, config, fmt.Errorf("stack %s has secrets; Dockhand secret sync requires a pushed configuration repository origin", stack.Name)
-			}
-			identity, _, err := profileSecrets.StackSecretIdentityPair()
-			if err != nil {
-				return profile, config, fmt.Errorf("stack %s secrets: %w", stack.Name, err)
-			}
-			provider, err := secretProviderForName(stack.Metadata.Secrets.Provider)
-			if err != nil {
-				return profile, config, fmt.Errorf("stack %s secrets: %w", stack.Name, err)
-			}
-			secretValues, err = provider.GetStackSecrets(ctx, stack.Metadata.Secrets.Ref(revision.Path, stack.Name, identity))
-			if err != nil {
-				return profile, config, fmt.Errorf("stack %s secrets: %w", stack.Name, err)
-			}
-			for _, key := range stack.Metadata.Secrets.KeyNames() {
-				if _, ok := secretValues[key]; !ok {
-					return profile, config, fmt.Errorf("stack %s secrets: missing required key %s", stack.Name, key)
-				}
-			}
+		secretValues, err := stackSecretValuesFromRevision(ctx, revision, stack, secrets)
+		if err != nil {
+			return nil, err
 		}
-		config.Stacks = append(config.Stacks, configuredStack{
+		stacks = append(stacks, configuredStack{
 			Name:          stack.Name,
 			Compose:       stack.Compose,
 			Metadata:      stack.MetadataContent,
@@ -137,60 +149,45 @@ func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Pr
 			SecretValues:  secretValues,
 		})
 	}
-	if err := validateConfiguredStackSet(config.Stacks); err != nil {
-		return profile, config, err
+	return stacks, nil
+}
+
+func stackSecretValuesFromRevision(ctx context.Context, revision configRepositoryRevision, stack repositoryStack, secrets ProfileSecrets) (SecretSet, error) {
+	if !stack.Metadata.Secrets.HasSecrets() {
+		return nil, nil
 	}
-	if err := store.Save(profile, state); err != nil {
-		return profile, config, err
+	if revision.Origin == "" || revision.Branch == "" {
+		return nil, fmt.Errorf("stack %s has secrets; Dockhand secret sync requires a pushed configuration repository origin", stack.Name)
 	}
-	return profile, config, nil
+	identity, _, err := secrets.StackSecretIdentityPair()
+	if err != nil {
+		return nil, fmt.Errorf("stack %s secrets: %w", stack.Name, err)
+	}
+	provider, err := secretProviderForName(stack.Metadata.Secrets.Provider)
+	if err != nil {
+		return nil, fmt.Errorf("stack %s secrets: %w", stack.Name, err)
+	}
+	values, err := provider.GetStackSecrets(ctx, stack.Metadata.Secrets.Ref(revision.Path, stack.Name, identity))
+	if err != nil {
+		return nil, fmt.Errorf("stack %s secrets: %w", stack.Name, err)
+	}
+	for _, key := range stack.Metadata.Secrets.KeyNames() {
+		if _, ok := values[key]; !ok {
+			return nil, fmt.Errorf("stack %s secrets: missing required key %s", stack.Name, key)
+		}
+	}
+	return values, nil
 }
 
 func prepareConfigRepository(ctx context.Context, path, githubURL, token, profileID, scaffold string) (configRepositoryRevision, error) {
-	if githubURL != "" {
-		if err := validateGitHubRepositoryURL(githubURL); err != nil {
-			return configRepositoryRevision{}, err
-		}
-	}
-	if path == "" {
-		var err error
-		path, err = defaultConfigRepositoryPath(profileID)
-		if err != nil {
-			return configRepositoryRevision{}, err
-		}
-	}
-	path, err := filepath.Abs(expandUserPath(path))
+	path, err := resolveConfigRepositoryPath(path, profileID)
 	if err != nil {
-		return configRepositoryRevision{}, fmt.Errorf("resolve configuration repository path: %w", err)
-	}
-
-	_, statErr := os.Stat(path)
-	existed := statErr == nil
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return configRepositoryRevision{}, statErr
-	}
-	if githubURL != "" && !existed {
-		if err := cloneGitHubRepository(ctx, githubURL, path, token, profileID); err != nil {
-			return configRepositoryRevision{}, err
-		}
-		existed = true
-	}
-
-	gitDirectory := filepath.Join(path, ".git")
-	if _, err := os.Stat(gitDirectory); errors.Is(err, os.ErrNotExist) {
-		if existed {
-			return configRepositoryRevision{}, fmt.Errorf("%s is not a Git repository", path)
-		}
-		if err := os.MkdirAll(path, 0700); err != nil {
-			return configRepositoryRevision{}, err
-		}
-		if _, err := runGit(ctx, path, nil, "init", "-b", "main"); err != nil {
-			return configRepositoryRevision{}, err
-		}
-	} else if err != nil {
 		return configRepositoryRevision{}, err
 	}
-
+	existed, err := prepareConfigRepositoryCheckout(ctx, path, githubURL, token, profileID)
+	if err != nil {
+		return configRepositoryRevision{}, err
+	}
 	composePath := filepath.Join(path, filepath.FromSlash(observabilityComposeRepositoryPath))
 	scaffoldChanged, err := ensureConfigRepositoryScaffold(ctx, path, scaffold)
 	if err != nil {
@@ -200,28 +197,95 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 		if existed {
 			return configRepositoryRevision{}, fmt.Errorf("%w: updated %s; review, commit, and rerun Servestead", errRepositoryReviewRequired, composePath)
 		}
-		env := []string{
-			"GIT_AUTHOR_NAME=Servestead",
-			"GIT_AUTHOR_EMAIL=servestead@localhost",
-			"GIT_COMMITTER_NAME=Servestead",
-			"GIT_COMMITTER_EMAIL=servestead@localhost",
-		}
-		if _, err := runGit(ctx, path, env, "add", "--", observabilityComposeRepositoryPath); err != nil {
-			return configRepositoryRevision{}, err
-		}
-		if _, err := runGit(ctx, path, env, "commit", "-m", "Initialize Servestead configuration"); err != nil {
+		if err := commitInitialConfigRepositoryScaffold(ctx, path); err != nil {
 			return configRepositoryRevision{}, err
 		}
 	}
+	return readConfigRepositoryRevision(ctx, path, githubURL)
+}
 
-	status, err := runGit(ctx, path, nil, "status", "--porcelain", "--", observabilityComposeRepositoryPath)
+func resolveConfigRepositoryPath(path, profileID string) (string, error) {
+	if path == "" {
+		var err error
+		path, err = defaultConfigRepositoryPath(profileID)
+		if err != nil {
+			return "", err
+		}
+	}
+	path, err := filepath.Abs(expandUserPath(path))
+	if err != nil {
+		return "", fmt.Errorf("resolve configuration repository path: %w", err)
+	}
+	return path, nil
+}
+
+func prepareConfigRepositoryCheckout(ctx context.Context, path, githubURL, token, profileID string) (bool, error) {
+	if githubURL != "" {
+		if err := validateGitHubRepositoryURL(githubURL); err != nil {
+			return false, err
+		}
+	}
+	existed, err := ensureConfigRepositoryPath(ctx, path, githubURL, token, profileID)
+	if err != nil {
+		return false, err
+	}
+	gitDirectory := filepath.Join(path, ".git")
+	if _, err := os.Stat(gitDirectory); errors.Is(err, os.ErrNotExist) {
+		if existed {
+			return false, fmt.Errorf("%s is not a Git repository", path)
+		}
+		if err := os.MkdirAll(path, 0700); err != nil {
+			return false, err
+		}
+		if _, err := runGit(ctx, path, nil, "init", "-b", "main"); err != nil {
+			return false, err
+		}
+	} else if err != nil {
+		return false, err
+	}
+	return existed, nil
+}
+
+func ensureConfigRepositoryPath(ctx context.Context, path, githubURL, token, profileID string) (bool, error) {
+	_, statErr := os.Stat(path)
+	existed := statErr == nil
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return false, statErr
+	}
+	if githubURL == "" || existed {
+		return existed, nil
+	}
+	if err := cloneGitHubRepository(ctx, githubURL, path, token, profileID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func commitInitialConfigRepositoryScaffold(ctx context.Context, path string) error {
+	env := []string{
+		"GIT_AUTHOR_NAME=Servestead",
+		"GIT_AUTHOR_EMAIL=servestead@localhost",
+		"GIT_COMMITTER_NAME=Servestead",
+		"GIT_COMMITTER_EMAIL=servestead@localhost",
+	}
+	if _, err := runGit(ctx, path, env, "add", "--", observabilityComposeRepositoryPath); err != nil {
+		return err
+	}
+	if _, err := runGit(ctx, path, env, "commit", "-m", "Initialize Servestead configuration"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readConfigRepositoryRevision(ctx context.Context, path, githubURL string) (configRepositoryRevision, error) {
+	status, err := runGit(ctx, path, nil, "status", gitStatusPorcelainFlag, "--", observabilityComposeRepositoryPath)
 	if err != nil {
 		return configRepositoryRevision{}, err
 	}
 	if strings.TrimSpace(status) != "" {
 		return configRepositoryRevision{}, fmt.Errorf("uncommitted changes in %s block deployment", observabilityComposeRepositoryPath)
 	}
-	stackStatus, err := runGit(ctx, path, nil, "status", "--porcelain", "--", "stacks")
+	stackStatus, err := runGit(ctx, path, nil, "status", gitStatusPorcelainFlag, "--", "stacks")
 	if err != nil {
 		return configRepositoryRevision{}, err
 	}
@@ -242,25 +306,11 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 
 	origin := ""
 	branch := ""
-	if output, err := runGit(ctx, path, nil, "remote", "get-url", "origin"); err == nil {
-		origin = strings.TrimSpace(output)
-		if err := validateGitHubRepositoryURL(origin); err != nil {
-			return configRepositoryRevision{}, fmt.Errorf("origin: %w", err)
-		}
-		if githubURL != "" && strings.TrimSuffix(origin, ".git") != strings.TrimSuffix(githubURL, ".git") {
-			return configRepositoryRevision{}, fmt.Errorf("origin %q does not match --github-repo %q", origin, githubURL)
-		}
-		contains, err := runGit(ctx, path, nil, "branch", "-r", "--contains", strings.TrimSpace(commit))
-		if err != nil {
-			return configRepositoryRevision{}, err
-		}
-		if !strings.Contains(contains, "origin/") {
-			return configRepositoryRevision{}, errors.New("configuration commit has not been pushed to origin")
-		}
-		branch, err = resolveConfigRepositoryBranch(ctx, path, contains)
-		if err != nil {
-			return configRepositoryRevision{}, err
-		}
+	if remoteOrigin, remoteBranch, err := resolveConfigRepositoryRemote(ctx, path, githubURL, commit); err != nil {
+		return configRepositoryRevision{}, err
+	} else {
+		origin = remoteOrigin
+		branch = remoteBranch
 	}
 	if githubURL != "" && origin == "" {
 		return configRepositoryRevision{}, errors.New("--github-repo requires the configuration checkout to have a GitHub origin")
@@ -282,6 +332,32 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 	}, nil
 }
 
+func resolveConfigRepositoryRemote(ctx context.Context, path, githubURL, commit string) (string, string, error) {
+	output, err := runGit(ctx, path, nil, "remote", "get-url", "origin")
+	if err != nil {
+		return "", "", nil
+	}
+	origin := strings.TrimSpace(output)
+	if err := validateGitHubRepositoryURL(origin); err != nil {
+		return "", "", fmt.Errorf("origin: %w", err)
+	}
+	if githubURL != "" && strings.TrimSuffix(origin, ".git") != strings.TrimSuffix(githubURL, ".git") {
+		return "", "", fmt.Errorf("origin %q does not match --github-repo %q", origin, githubURL)
+	}
+	contains, err := runGit(ctx, path, nil, "branch", "-r", "--contains", strings.TrimSpace(commit))
+	if err != nil {
+		return "", "", err
+	}
+	if !strings.Contains(contains, gitOriginRemotePrefix) {
+		return "", "", errors.New("configuration commit has not been pushed to origin")
+	}
+	branch, err := resolveConfigRepositoryBranch(ctx, path, contains)
+	if err != nil {
+		return "", "", err
+	}
+	return origin, branch, nil
+}
+
 func resolveConfigRepositoryBranch(ctx context.Context, path, containsOutput string) (string, error) {
 	current, err := runGit(ctx, path, nil, "branch", "--show-current")
 	if err != nil {
@@ -291,10 +367,10 @@ func resolveConfigRepositoryBranch(ctx context.Context, path, containsOutput str
 	remoteBranches := []string{}
 	for _, line := range strings.Split(containsOutput, "\n") {
 		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "*"))
-		if !strings.HasPrefix(line, "origin/") || line == "origin/HEAD" {
+		if !strings.HasPrefix(line, gitOriginRemotePrefix) || line == "origin/HEAD" {
 			continue
 		}
-		name := strings.TrimPrefix(line, "origin/")
+		name := strings.TrimPrefix(line, gitOriginRemotePrefix)
 		remoteBranches = append(remoteBranches, name)
 	}
 	sort.Strings(remoteBranches)
@@ -327,32 +403,36 @@ func ensureConfigRepositoryScaffold(ctx context.Context, path, scaffold string) 
 	}
 	composePath := filepath.Join(path, filepath.FromSlash(observabilityComposeRepositoryPath))
 	if _, err := os.Stat(composePath); err == nil {
-		existing, err := os.ReadFile(composePath)
-		if err != nil {
-			return false, err
-		}
-		if string(existing) == scaffold {
-			return false, nil
-		}
-		status, err := runGit(ctx, path, nil, "status", "--porcelain", "--", observabilityComposeRepositoryPath)
-		if err != nil {
-			return false, err
-		}
-		if strings.TrimSpace(status) != "" {
-			return false, fmt.Errorf("uncommitted changes in %s block managed scaffold refresh", observabilityComposeRepositoryPath)
-		}
-		if !isManagedObservabilityCompose(existing) {
-			return false, nil
-		}
-		if err := os.WriteFile(composePath, []byte(scaffold), 0600); err != nil {
-			return false, err
-		}
-		return true, nil
+		return refreshConfigRepositoryScaffold(ctx, path, composePath, scaffold)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return false, err
 	}
 	if err := os.MkdirAll(filepath.Dir(composePath), 0700); err != nil {
 		return false, err
+	}
+	if err := os.WriteFile(composePath, []byte(scaffold), 0600); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func refreshConfigRepositoryScaffold(ctx context.Context, path, composePath, scaffold string) (bool, error) {
+	existing, err := os.ReadFile(composePath)
+	if err != nil {
+		return false, err
+	}
+	if string(existing) == scaffold {
+		return false, nil
+	}
+	status, err := runGit(ctx, path, nil, "status", gitStatusPorcelainFlag, "--", observabilityComposeRepositoryPath)
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(status) != "" {
+		return false, fmt.Errorf("uncommitted changes in %s block managed scaffold refresh", observabilityComposeRepositoryPath)
+	}
+	if !isManagedObservabilityCompose(existing) {
+		return false, nil
 	}
 	if err := os.WriteFile(composePath, []byte(scaffold), 0600); err != nil {
 		return false, err
@@ -410,43 +490,53 @@ func loadCommittedStacks(ctx context.Context, repositoryPath string) ([]reposito
 	}
 	stacks := []repositoryStack{}
 	for _, name := range strings.Fields(output) {
-		if name == "observability" {
-			continue
-		}
-		if !stackSlugPattern.MatchString(name) {
-			return nil, fmt.Errorf("stack directory %q must be a lowercase DNS label", name)
-		}
-		base := "stacks/" + name + "/"
-		compose, err := runGit(ctx, repositoryPath, nil, "show", "HEAD:"+base+"compose.yaml")
+		stack, include, err := loadCommittedStack(ctx, repositoryPath, name)
 		if err != nil {
-			return nil, fmt.Errorf("stack %s: committed compose.yaml is required", name)
+			return nil, err
 		}
-		metadataContent, err := runGit(ctx, repositoryPath, nil, "show", "HEAD:"+base+stackMetadataFilename)
-		if err != nil {
-			return nil, fmt.Errorf("stack %s is not configured; run servestead stack add --profile <id> --compose %s", name, filepath.Join(repositoryPath, filepath.FromSlash(base+"compose.yaml")))
+		if include {
+			stacks = append(stacks, stack)
 		}
-		var metadata stackMetadata
-		if err := yaml.Unmarshal([]byte(metadataContent), &metadata); err != nil {
-			return nil, fmt.Errorf("stack %s metadata: %w", name, err)
-		}
-		services, err := inspectComposeServices([]byte(compose))
-		if err != nil {
-			return nil, fmt.Errorf("stack %s: %w", name, err)
-		}
-		if err := validateStackMetadata(name, metadata, services); err != nil {
-			return nil, fmt.Errorf("stack %s metadata: %w", name, err)
-		}
-		sum := sha256.Sum256([]byte(compose))
-		files, err := loadCommittedStackFiles(ctx, repositoryPath, base)
-		if err != nil {
-			return nil, fmt.Errorf("stack %s files: %w", name, err)
-		}
-		stacks = append(stacks, repositoryStack{
-			Name: name, Compose: compose, MetadataContent: metadataContent,
-			Metadata: metadata, ComposeSHA256: hex.EncodeToString(sum[:]), Files: files,
-		})
 	}
 	return stacks, nil
+}
+
+func loadCommittedStack(ctx context.Context, repositoryPath, name string) (repositoryStack, bool, error) {
+	if name == "observability" {
+		return repositoryStack{}, false, nil
+	}
+	if !stackSlugPattern.MatchString(name) {
+		return repositoryStack{}, false, fmt.Errorf("stack directory %q must be a lowercase DNS label", name)
+	}
+	base := "stacks/" + name + "/"
+	compose, err := runGit(ctx, repositoryPath, nil, "show", "HEAD:"+base+stackComposeFilename)
+	if err != nil {
+		return repositoryStack{}, false, fmt.Errorf("stack %s: committed %s is required", name, stackComposeFilename)
+	}
+	metadataContent, err := runGit(ctx, repositoryPath, nil, "show", "HEAD:"+base+stackMetadataFilename)
+	if err != nil {
+		return repositoryStack{}, false, fmt.Errorf("stack %s is not configured; run servestead stack add --profile <id> --compose %s", name, filepath.Join(repositoryPath, filepath.FromSlash(base+stackComposeFilename)))
+	}
+	var metadata stackMetadata
+	if err := yaml.Unmarshal([]byte(metadataContent), &metadata); err != nil {
+		return repositoryStack{}, false, fmt.Errorf("stack %s metadata: %w", name, err)
+	}
+	services, err := inspectComposeServices([]byte(compose))
+	if err != nil {
+		return repositoryStack{}, false, fmt.Errorf("stack %s: %w", name, err)
+	}
+	if err := validateStackMetadata(name, metadata, services); err != nil {
+		return repositoryStack{}, false, fmt.Errorf("stack %s metadata: %w", name, err)
+	}
+	sum := sha256.Sum256([]byte(compose))
+	files, err := loadCommittedStackFiles(ctx, repositoryPath, base)
+	if err != nil {
+		return repositoryStack{}, false, fmt.Errorf("stack %s files: %w", name, err)
+	}
+	return repositoryStack{
+		Name: name, Compose: compose, MetadataContent: metadataContent,
+		Metadata: metadata, ComposeSHA256: hex.EncodeToString(sum[:]), Files: files,
+	}, true, nil
 }
 
 func loadCommittedStackFiles(ctx context.Context, repositoryPath, base string) (map[string]string, error) {
@@ -471,8 +561,11 @@ func loadCommittedStackFiles(ctx context.Context, repositoryPath, base string) (
 }
 
 func runGit(ctx context.Context, directory string, extraEnv []string, arguments ...string) (string, error) {
-	command := exec.CommandContext(ctx, "git", append([]string{"-C", directory}, arguments...)...)
-	command.Env = append(os.Environ(), extraEnv...)
+	command, err := newGitCommand(ctx, append([]string{"-C", directory}, arguments...)...)
+	if err != nil {
+		return "", err
+	}
+	command.Env = trustedCommandEnvironment(extraEnv)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -486,7 +579,43 @@ func runGit(ctx context.Context, directory string, extraEnv []string, arguments 
 	return stdout.String(), nil
 }
 
-func cloneGitHubRepository(ctx context.Context, repositoryURL, destination, token string, profileID string) error {
+func newGitCommand(ctx context.Context, arguments ...string) (*exec.Cmd, error) {
+	gitPath, err := trustedGitExecutable()
+	if err != nil {
+		return nil, err
+	}
+	command := exec.CommandContext(ctx, gitPath, arguments...)
+	command.Env = trustedCommandEnvironment(nil)
+	return command, nil
+}
+
+func trustedGitExecutable() (string, error) {
+	for _, path := range trustedGitExecutablePaths {
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() && info.Mode().Perm()&0111 != 0 {
+			return path, nil
+		}
+	}
+	return "", errors.New("git executable not found in trusted system paths")
+}
+
+func trustedCommandEnvironment(extraEnv []string) []string {
+	env := os.Environ()
+	pathSet := false
+	for index, value := range env {
+		if strings.HasPrefix(value, "PATH=") {
+			env[index] = "PATH=" + trustedCommandPath
+			pathSet = true
+			break
+		}
+	}
+	if !pathSet {
+		env = append(env, "PATH="+trustedCommandPath)
+	}
+	return append(env, extraEnv...)
+}
+
+func cloneGitHubRepository(ctx context.Context, repositoryURL, destination, token, profileID string) error {
 	if token == "" {
 		token = os.Getenv("SERVESTEAD_GITHUB_TOKEN")
 	}
@@ -505,12 +634,15 @@ func cloneGitHubRepository(ctx context.Context, repositoryURL, destination, toke
 	if err := os.WriteFile(askpassPath, []byte(askpass), 0700); err != nil {
 		return err
 	}
-	command := exec.CommandContext(ctx, "git", "clone", "--", repositoryURL, destination)
-	command.Env = append(os.Environ(),
-		"GIT_ASKPASS="+askpassPath,
+	command, err := newGitCommand(ctx, "clone", "--", repositoryURL, destination)
+	if err != nil {
+		return err
+	}
+	command.Env = trustedCommandEnvironment([]string{
+		"GIT_ASKPASS=" + askpassPath,
 		"GIT_TERMINAL_PROMPT=0",
-		"SERVESTEAD_GITHUB_TOKEN="+token,
-	)
+		"SERVESTEAD_GITHUB_TOKEN=" + token,
+	})
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
@@ -604,22 +736,33 @@ func validateGitHubRepositoryURL(value string) error {
 	return nil
 }
 
+type observabilityComposeDocument struct {
+	Services map[string]observabilityComposeService `yaml:"services"`
+	Networks map[string]struct {
+		External bool `yaml:"external"`
+	} `yaml:"networks"`
+}
+
+type observabilityComposeService struct {
+	Ports    []any    `yaml:"ports"`
+	Networks []string `yaml:"networks"`
+	Labels   []string `yaml:"labels"`
+}
+
 func validateObservabilityCompose(data []byte) error {
-	var document struct {
-		Services map[string]struct {
-			Ports    []any    `yaml:"ports"`
-			Networks []string `yaml:"networks"`
-			Labels   []string `yaml:"labels"`
-		} `yaml:"services"`
-		Networks map[string]struct {
-			External bool `yaml:"external"`
-		} `yaml:"networks"`
-	}
+	var document observabilityComposeDocument
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(false)
 	if err := decoder.Decode(&document); err != nil {
 		return fmt.Errorf("parse %s: %w", observabilityComposeRepositoryPath, err)
 	}
+	if err := validateObservabilityComposeServices(document); err != nil {
+		return err
+	}
+	return validateObservabilityComposeLabels(document)
+}
+
+func validateObservabilityComposeServices(document observabilityComposeDocument) error {
 	for _, serviceName := range []string{"beszel", "beszel-agent", "dozzle", "dockhand", "dockhand-socket-proxy"} {
 		service, ok := document.Services[serviceName]
 		if !ok {
@@ -635,6 +778,10 @@ func validateObservabilityCompose(data []byte) error {
 	if !document.Networks[servesteadPublicNetwork].External {
 		return fmt.Errorf("%s is incompatible: network %q must be external", observabilityComposeRepositoryPath, servesteadPublicNetwork)
 	}
+	return nil
+}
+
+func validateObservabilityComposeLabels(document observabilityComposeDocument) error {
 	requiredLabels := map[string][]string{
 		"beszel": {
 			"pangolin.public-resources.servestead-beszel.name=Beszel",

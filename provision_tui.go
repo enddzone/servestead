@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -96,26 +95,6 @@ type provisionSSHKeyChoice struct {
 	Upload bool
 }
 
-func collectDigitalOceanProvisionProfile(ctx context.Context, store ProfileStore, output io.Writer) (Profile, error) {
-	model := newDigitalOceanProvisionModel(ctx, store)
-	program := tea.NewProgram(model, tea.WithOutput(output), tea.WithAltScreen())
-	finalModel, err := program.Run()
-	if err != nil {
-		return Profile{}, fmt.Errorf("run provisioning TUI: %w", err)
-	}
-	result, ok := finalModel.(digitalOceanProvisionModel)
-	if !ok {
-		return Profile{}, errors.New("provisioning TUI returned an unexpected model")
-	}
-	if result.cancelled {
-		return Profile{}, errors.New("provisioning cancelled")
-	}
-	if !result.done {
-		return Profile{}, errors.New("provisioning did not complete")
-	}
-	return result.createdProfile, nil
-}
-
 func newDigitalOceanProvisionModel(ctx context.Context, store ProfileStore) digitalOceanProvisionModel {
 	token := firstNonEmpty(os.Getenv("DIGITALOCEAN_ACCESS_TOKEN"), os.Getenv("DIGITALOCEAN_TOKEN"))
 	inputs := newSetupInputs([]setupInputField{
@@ -127,7 +106,7 @@ func newDigitalOceanProvisionModel(ctx context.Context, store ProfileStore) digi
 	confirmInput := textinput.New()
 	confirmInput.Prompt = "Type confirmation: "
 	confirmInput.CharLimit = 256
-	confirmInput.Width = 72
+	confirmInput.SetWidth(72)
 	return digitalOceanProvisionModel{
 		ctx:          ctx,
 		store:        store,
@@ -150,80 +129,112 @@ func (model digitalOceanProvisionModel) Init() tea.Cmd {
 func (model digitalOceanProvisionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		model.width = msg.Width
-		model.height = msg.Height
-		model.resizeLists()
-		return model, nil
+		return model.updateWindowSize(msg)
 	case provisionCatalogMsg:
-		if msg.err != nil {
-			model.screen = provisionScreenInput
-			model.err = msg.err.Error()
-			return model, nil
-		}
-		model.catalog = msg.catalog
-		model.localPublicKey = msg.publicKey
-		model.localKeyFingerprint = msg.fingerprint
-		model.regionList = newProvisionList("DigitalOcean regions", provisionRegionItems(msg.catalog))
-		model.resizeLists()
-		if len(model.regionList.Items()) == 0 {
-			model.screen = provisionScreenInput
-			model.err = "DigitalOcean returned no available regions"
-			return model, nil
-		}
-		model.err = ""
-		model.screen = provisionScreenRegion
-		return model, nil
+		return model.updateCatalog(msg)
 	case provisionCreateMsg:
-		if msg.err != nil {
-			model.screen = provisionScreenReview
-			model.err = msg.err.Error()
-			model.confirmInput.Focus()
-			return model, nil
-		}
-		model.createdProfile = msg.profile
-		model.done = true
-		model.screen = provisionScreenDone
-		return model, nil
+		return model.updateCreatedProfile(msg)
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c":
-			model.cancelled = true
-			return model, tea.Quit
-		case "q":
-			if model.screen == provisionScreenDone {
-				return model, tea.Quit
-			}
-			if model.screen != provisionScreenInput && model.screen != provisionScreenReview && model.screen != provisionScreenCreating {
-				model.cancelled = true
-				return model, tea.Quit
-			}
-		case "esc":
-			model.goBack()
-			model.err = ""
-			return model, nil
-		}
+		return model.updateKey(msg)
+	default:
+		return model, nil
+	}
+}
 
-		switch model.screen {
-		case provisionScreenInput:
-			return model.updateInput(msg)
-		case provisionScreenRegion:
-			return model.updateRegion(msg)
-		case provisionScreenSize:
-			return model.updateSize(msg)
-		case provisionScreenImage:
-			return model.updateImage(msg)
-		case provisionScreenSSHKey:
-			return model.updateSSHKey(msg)
-		case provisionScreenReview:
-			return model.updateReview(msg)
-		case provisionScreenDone:
-			if msg.String() == "enter" {
-				return model, tea.Quit
-			}
-			return model, nil
-		default:
-			return model, nil
+func (model digitalOceanProvisionModel) updateWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
+	model.width = msg.Width
+	model.height = msg.Height
+	model.resizeLists()
+	return model, nil
+}
+
+func (model digitalOceanProvisionModel) updateCatalog(msg provisionCatalogMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		model.screen = provisionScreenInput
+		model.err = msg.err.Error()
+		return model, nil
+	}
+	model.catalog = msg.catalog
+	model.localPublicKey = msg.publicKey
+	model.localKeyFingerprint = msg.fingerprint
+	model.regionList = newProvisionList("DigitalOcean regions", provisionRegionItems(msg.catalog))
+	model.resizeLists()
+	if len(model.regionList.Items()) == 0 {
+		model.screen = provisionScreenInput
+		model.err = "DigitalOcean returned no available regions"
+		return model, nil
+	}
+	model.err = ""
+	model.screen = provisionScreenRegion
+	return model, nil
+}
+
+func (model digitalOceanProvisionModel) updateCreatedProfile(msg provisionCreateMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		model.screen = provisionScreenReview
+		model.err = msg.err.Error()
+		model.confirmInput.Focus()
+		return model, nil
+	}
+	model.createdProfile = msg.profile
+	model.done = true
+	model.screen = provisionScreenDone
+	return model, nil
+}
+
+func (model digitalOceanProvisionModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if updated, cmd, handled := model.updateGlobalKey(msg); handled {
+		return updated, cmd
+	}
+	return model.updateScreenKey(msg)
+}
+
+func (model digitalOceanProvisionModel) updateGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	switch msg.String() {
+	case "ctrl+c":
+		model.cancelled = true
+		return model, tea.Quit, true
+	case "q":
+		return model.updateQuitKey()
+	case "esc":
+		model.goBack()
+		model.err = ""
+		return model, nil, true
+	default:
+		return model, nil, false
+	}
+}
+
+func (model digitalOceanProvisionModel) updateQuitKey() (tea.Model, tea.Cmd, bool) {
+	if model.screen == provisionScreenDone {
+		return model, tea.Quit, true
+	}
+	if model.screen != provisionScreenInput && model.screen != provisionScreenReview && model.screen != provisionScreenCreating {
+		model.cancelled = true
+		return model, tea.Quit, true
+	}
+	return model, nil, false
+}
+
+func (model digitalOceanProvisionModel) updateScreenKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch model.screen {
+	case provisionScreenInput:
+		return model.updateInput(msg)
+	case provisionScreenRegion:
+		return model.updateRegion(msg)
+	case provisionScreenSize:
+		return model.updateSize(msg)
+	case provisionScreenImage:
+		return model.updateImage(msg)
+	case provisionScreenSSHKey:
+		return model.updateSSHKey(msg)
+	case provisionScreenReview:
+		return model.updateReview(msg)
+	case provisionScreenDone:
+		if msg.String() == "enter" {
+			return model, tea.Quit
 		}
+		return model, nil
 	default:
 		return model, nil
 	}
@@ -500,7 +511,7 @@ func (model digitalOceanProvisionModel) selectedKeyReference() string {
 	return model.selectedKey.Key.Fingerprint
 }
 
-func (model digitalOceanProvisionModel) View() string {
+func (model digitalOceanProvisionModel) View() tea.View {
 	var builder strings.Builder
 	builder.WriteString(setupTitleStyle.Render("Provision a DigitalOcean VPS"))
 	builder.WriteString("\n")
@@ -547,7 +558,7 @@ func (model digitalOceanProvisionModel) View() string {
 	}
 	builder.WriteString("\n")
 	builder.WriteString(setupHelpStyle.Render(model.provisionHelpText()))
-	return builder.String()
+	return altScreenView(builder.String())
 }
 
 func (model digitalOceanProvisionModel) provisionReviewView() string {

@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
-	"servestead/resources"
 	"sort"
 	"strings"
+
+	"servestead/resources"
 )
 
 const observabilityStackDirectory = "/opt/servestead/stacks/observability"
@@ -17,6 +19,16 @@ const observabilityRepositoryDirectory = "/opt/servestead/repository"
 const observabilityEnvironmentPath = "/etc/servestead/observability.env"
 const applicationDataDirectory = "/data"
 const stackEnvironmentDirectory = "/etc/servestead/stacks"
+const dockerComposeYAMLPath = "/docker-compose.yml"
+const composeConfigQuietSuffix = " config --quiet"
+const restartNewtCommand = "docker start aegis-newt >/dev/null"
+const servesteadProjectPrefix = "servestead-"
+const dockhandGitStackPrefix = "Dockhand Git stack "
+const shellThenSuffix = "; then"
+const stackTaskNameSuffix = " stack"
+const observabilityBeszelID = servesteadProjectPrefix + "beszel"
+const observabilityDockhandID = servesteadProjectPrefix + "dockhand"
+const observabilityDozzleID = servesteadProjectPrefix + "dozzle"
 
 const (
 	beszelImage      = "docker.io/henrygd/beszel:0.18.7"
@@ -62,7 +74,7 @@ func runObservabilityStepsWithReporter(ctx context.Context, client remoteClient,
 }
 
 func observabilityTasks(config observabilityConfig) []Task {
-	composePath := observabilityStackDirectory + "/docker-compose.yml"
+	composePath := observabilityStackDirectory + dockerComposeYAMLPath
 	composeCommand := "docker compose -f " + shellQuote(composePath)
 	declarative := config.RepositoryCommit != "" && config.RepositoryCompose != ""
 	if declarative {
@@ -72,12 +84,12 @@ func observabilityTasks(config observabilityConfig) []Task {
 	group := firstNonEmpty(config.SSHUser, "root")
 	tasks := []Task{
 		{Name: "Prepare observability directories", Apply: commandScript(
-			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote("/opt/servestead/stacks"),
-			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory),
-			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory+"/beszel_data"),
-			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory+"/agent_keys"),
-			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityStackDirectory+"/dockhand_data"),
-			"install -d -m 0750 -o root -g "+shellQuote(group)+" /etc/servestead",
+			remoteInstallDirectoryCommand("/opt/servestead/stacks", "root", group, 0750),
+			remoteInstallDirectoryCommand(observabilityStackDirectory, "root", group, 0750),
+			remoteInstallDirectoryCommand(observabilityStackDirectory+"/beszel_data", "root", group, 0750),
+			remoteInstallDirectoryCommand(observabilityStackDirectory+"/agent_keys", "root", group, 0750),
+			remoteInstallDirectoryCommand(observabilityStackDirectory+"/dockhand_data", "root", group, 0750),
+			remoteInstallDirectoryCommand("/etc/servestead", "root", group, 0750),
 		)},
 		{Name: "Write Beszel system configuration", Apply: remoteWriteFileCommand(observabilityStackDirectory+"/beszel_data/config.yml", beszelConfigFile(config), "root", group, 0600)},
 		{Name: "Write Beszel Hub private key", Apply: remoteWriteFileCommand(observabilityStackDirectory+"/beszel_data/id_ed25519", config.HubPrivateKey, "root", group, 0600)},
@@ -88,26 +100,26 @@ func observabilityTasks(config observabilityConfig) []Task {
 			Task{Name: "Write observability environment", Apply: remoteWriteFileCommand(observabilityEnvironmentPath, observabilityEnvironmentFile(config), "root", "root", 0600)},
 			observabilityRepositoryTask(config, group),
 			Task{Name: "Validate observability compose file", Apply: commandScript(
-				"[ ! -f "+shellQuote(observabilityStackDirectory+"/docker-compose.yml")+" ] || docker compose -f "+shellQuote(observabilityStackDirectory+"/docker-compose.yml")+" config --quiet",
-				composeCommand+" config --quiet",
+				"[ ! -f "+shellQuote(observabilityStackDirectory+dockerComposeYAMLPath)+" ] || docker compose -f "+shellQuote(observabilityStackDirectory+dockerComposeYAMLPath)+composeConfigQuietSuffix,
+				composeCommand+composeConfigQuietSuffix,
 			)},
 		)
 	} else {
 		tasks = append(tasks,
 			Task{Name: "Write observability compose file", Apply: remoteWriteFileCommand(composePath, observabilityComposeFile(config), "root", group, 0600)},
-			Task{Name: "Validate observability compose file", Apply: commandScript(composeCommand + " config --quiet")},
+			Task{Name: "Validate observability compose file", Apply: commandScript(composeCommand + composeConfigQuietSuffix)},
 		)
 	}
 	tasks = append(tasks,
 		Task{Name: "Reconcile Pangolin observability resources", Apply: observabilityResourceReconcileCommand(config, composeCommand)},
-		Task{Name: "Start observability stack", Apply: commandScript(
+		Task{Name: "Start observability" + stackTaskNameSuffix, Apply: commandScript(
 			"start_result=0",
 			composeCommand+" pull && "+composeCommand+" up -d --remove-orphans || start_result=$?",
-			"docker start aegis-newt >/dev/null",
+			restartNewtCommand,
 			"exit \"$start_result\"",
 		)},
 		Task{Name: "Verify Pangolin observability resources", Apply: observabilityResourceVerifyCommand(config)},
-		Task{Name: "Verify observability stack", Apply: commandScript(
+		Task{Name: "Verify observability" + stackTaskNameSuffix, Apply: commandScript(
 			"running=\"$("+composeCommand+" ps --services --status running)\"",
 			"for service in beszel beszel-agent dozzle dockhand dockhand-socket-proxy; do",
 			"  printf '%s\\n' \"$running\" | grep -Fx \"$service\" >/dev/null",
@@ -121,7 +133,7 @@ func observabilityTasks(config observabilityConfig) []Task {
 	}
 	if declarative {
 		tasks = append(tasks, Task{Name: "Remove migrated legacy compose file", Apply: commandScript(
-			"rm -f " + shellQuote(observabilityStackDirectory+"/docker-compose.yml"),
+			"rm -f " + shellQuote(observabilityStackDirectory+dockerComposeYAMLPath),
 		)})
 	}
 	return tasks
@@ -131,7 +143,7 @@ func configuredStackTasks(config observabilityConfig, stack configuredStack, gro
 	composePath := observabilityRepositoryDirectory + "/stacks/" + stack.Name + "/compose.yaml"
 	overridePath := "/opt/servestead/generated/" + stack.Name + ".pangolin.yaml"
 	deploymentPath := observabilityRepositoryDirectory + ".stack-" + stack.Name + ".deployment"
-	composeCommand := "docker compose -p " + shellQuote("servestead-"+stack.Name) +
+	composeCommand := "docker compose -p " + shellQuote(servesteadProjectPrefix+stack.Name) +
 		" -f " + shellQuote(composePath) + " -f " + shellQuote(overridePath)
 
 	tasks := []Task{}
@@ -147,7 +159,7 @@ func configuredStackTasks(config observabilityConfig, stack configuredStack, gro
 		sort.Strings(names)
 		manifestLines := make([]string, 0, len(names))
 		deployCommands := []string{
-			"if [ -f " + shellQuote(deploymentPath) + " ]; then",
+			"if test -f " + shellQuote(deploymentPath) + shellThenSuffix,
 			"  (cd " + shellQuote(filepath.Dir(composePath)) + " && sha256sum -c " + shellQuote(deploymentPath) + ") || { echo 'remote " + stack.Name + " stack files have drifted' >&2; exit 1; }",
 			"  while IFS= read -r entry; do managed_file=\"${entry#*  }\"; rm -f -- " + shellQuote(filepath.Dir(composePath)) + "/\"$managed_file\"; done < " + shellQuote(deploymentPath),
 			"fi",
@@ -160,16 +172,16 @@ func configuredStackTasks(config observabilityConfig, stack configuredStack, gro
 		deployCommands = append(deployCommands, remoteWriteFileCommand(
 			deploymentPath, strings.Join(manifestLines, "\n")+"\n", "root", group, 0640,
 		))
-		tasks = append(tasks, Task{Name: "Deploy committed " + stack.Name + " stack", Apply: commandScript(deployCommands...)})
+		tasks = append(tasks, Task{Name: "Deploy committed " + stack.Name + stackTaskNameSuffix, Apply: commandScript(deployCommands...)})
 	}
 	tasks = append(tasks,
 		stackDataDirectoryTask(stack),
 		Task{Name: "Generate " + stack.Name + " deployment override", Apply: commandScript(
-			"install -d -m 0750 -o root -g "+shellQuote(group)+" /opt/servestead/generated",
+			remoteInstallDirectoryCommand("/opt/servestead/generated", "root", group, 0750),
 			remoteWriteFileCommand(overridePath, stack.Override, "root", group, 0640),
 		)},
 	)
-	validationCommands := []string{composeCommand + " config --quiet"}
+	validationCommands := []string{composeCommand + composeConfigQuietSuffix}
 	validationName := "Validate " + stack.Name + " Compose"
 	if len(stack.Resources) > 0 {
 		validationName += " and Pangolin labels"
@@ -184,21 +196,21 @@ sys.exit(0 if ok else 1)`))
 	}
 	tasks = append(tasks, stackComposeTask(validationName, validationCommands, stack))
 	if len(stack.Resources) > 0 {
-		tasks = append(tasks, stackComposeTask("Start "+stack.Name+" stack and reconcile Pangolin", []string{
+		tasks = append(tasks, stackComposeTask("Start "+stack.Name+stackTaskNameSuffix+" and reconcile Pangolin", []string{
 			"docker stop aegis-newt >/dev/null",
 			"start_result=0",
 			composeCommand + " pull && " + composeCommand + " up -d --remove-orphans || start_result=$?",
-			"docker start aegis-newt >/dev/null",
+			restartNewtCommand,
 			"exit \"$start_result\"",
 		}, stack))
 		tasks = append(tasks, Task{Name: "Verify " + stack.Name + " Pangolin public resources", Apply: stackResourceVerifyCommand(config, stack)})
 	} else {
-		tasks = append(tasks, stackComposeTask("Start "+stack.Name+" stack", []string{
+		tasks = append(tasks, stackComposeTask("Start "+stack.Name+stackTaskNameSuffix, []string{
 			composeCommand + " pull",
 			composeCommand + " up -d --remove-orphans",
 		}, stack))
 	}
-	tasks = append(tasks, stackComposeTask("Verify "+stack.Name+" stack", []string{
+	tasks = append(tasks, stackComposeTask("Verify "+stack.Name+stackTaskNameSuffix, []string{
 		"expected=\"$(" + composeCommand + " config --services)\"",
 		"running=\"$(" + composeCommand + " ps --services --status running)\"",
 		"for service in $expected; do printf '%s\\n' \"$running\" | grep -Fx \"$service\" >/dev/null; done",
@@ -260,7 +272,7 @@ func stackDataDirectoryTask(stack configuredStack) Task {
 	dataDirectory := applicationDataDirectory + "/" + stack.Name
 	return Task{Name: "Prepare " + stack.Name + " data directory", Apply: commandScript(
 		"install -d -m 0755 -o root -g root "+shellQuote(applicationDataDirectory),
-		"if [ ! -e "+shellQuote(dataDirectory)+" ]; then",
+		"if ! test -e "+shellQuote(dataDirectory)+shellThenSuffix,
 		"  install -d -m 0750 -o 1000 -g 1000 "+shellQuote(dataDirectory),
 		"fi",
 	)}
@@ -299,13 +311,13 @@ resources=json.load(sys.stdin)["data"]["resources"]
 names=sys.argv[1:]
 for resource in resources:
  nice_id=resource.get("niceId","")
- if any(nice_id.startswith("servestead-"+name+"-") for name in names):
+ if any(nice_id.startswith("` + servesteadProjectPrefix + `"+name+"-") for name in names):
   print(resource["resourceId"])`
 	commands := []string{
 		"desired=" + shellQuote(desired),
 		"removed=''",
 		"for candidate in " + shellQuote(observabilityRepositoryDirectory) + ".stack-*.deployment /opt/servestead/generated/*.pangolin.yaml; do",
-		"  [ -e \"$candidate\" ] || continue",
+		"  test -e \"$candidate\" || continue",
 		"  case \"$candidate\" in",
 		"    " + shellQuote(observabilityRepositoryDirectory) + ".stack-*.deployment) name=\"${candidate#" + observabilityRepositoryDirectory + ".stack-}\"; name=\"${name%.deployment}\" ;;",
 		"    /opt/servestead/generated/*.pangolin.yaml) name=\"${candidate#/opt/servestead/generated/}\"; name=\"${name%.pangolin.yaml}\" ;;",
@@ -315,17 +327,17 @@ for resource in resources:
 		"  case \" $removed \" in *\" $name \"*) continue ;; esac",
 		"  removed=\"$removed $name\"",
 		"done",
-		"[ -n \"$removed\" ] || exit 0",
+		"test -n \"$removed\" || exit 0",
 		`cookie_file="$(mktemp)"`,
-		`cleanup_removed_stacks() { rm -f "$cookie_file"; docker start aegis-newt >/dev/null 2>&1 || true; }`,
+		`cleanup_removed_stacks() { rm -f "$cookie_file"; ` + restartNewtCommand + ` 2>&1 || true; }`,
 		"trap cleanup_removed_stacks EXIT",
 		"docker stop aegis-newt >/dev/null 2>&1 || true",
 		"for name in $removed; do",
-		"  project=\"servestead-$name\"",
+		"  project=\"" + servesteadProjectPrefix + "$name\"",
 		"  containers=\"$(docker ps -aq --filter label=com.docker.compose.project=\"$project\")\"",
-		"  [ -z \"$containers\" ] || docker rm -f $containers",
+		"  test -z \"$containers\" || docker rm -f $containers",
 		"  networks=\"$(docker network ls -q --filter label=com.docker.compose.project=\"$project\")\"",
-		"  [ -z \"$networks\" ] || docker network rm $networks",
+		"  test -z \"$networks\" || docker network rm $networks",
 		"  rm -rf -- " + shellQuote(observabilityRepositoryDirectory) + "/stacks/\"$name\"",
 		"  rm -f -- /opt/servestead/generated/\"$name\".pangolin.yaml " + shellQuote(observabilityRepositoryDirectory) + ".stack-\"$name\".deployment",
 		"  rm -f -- " + shellQuote(stackEnvironmentDirectory) + "/\"$name\".env",
@@ -339,7 +351,7 @@ for resource in resources:
 		`for resource_id in $delete_ids; do`,
 		`  curl -fsS -b "$cookie_file" -X DELETE "$api/resource/$resource_id" -H 'X-CSRF-Token: x-csrf-protection' >/dev/null`,
 		`done`,
-		"docker start aegis-newt >/dev/null",
+		restartNewtCommand,
 		`rm -f "$cookie_file"`,
 		"trap - EXIT",
 	)
@@ -361,16 +373,16 @@ func removedDockhandGitStackCleanupTask(config observabilityConfig) Task {
 desired=set(json.loads(sys.argv[1]))
 for stack in json.load(sys.stdin):
  name=stack.get("stackName","")
- if name.startswith("servestead-") and name not in desired:
+ if name.startswith("` + servesteadProjectPrefix + `") and name not in desired:
   print(stack["id"])`
 	commands := dockhandEnvironmentCommandPrelude("")
 	commands = append(commands,
-		`if ! dockhand_available; then echo 'Dockhand API is unavailable; skipping stale Dockhand Git stack cleanup.'; exit 0; fi`,
+		`if ! dockhand_available`+shellThenSuffix+` echo 'Dockhand API is unavailable; skipping stale Dockhand Git stack cleanup.'; exit 0; fi`,
 		`dockhand_environment_id="$(dockhand_ensure_environment)" || { echo 'Dockhand environment could not be prepared; skipping stale Dockhand Git stack cleanup.' >&2; exit 0; }`,
-		`stacks="$(dockhand_request GET "$dockhand_api/git/stacks?env=$dockhand_environment_id")" || { echo 'Dockhand Git stack listing failed; skipping cleanup.' >&2; exit 0; }`,
+		`stacks="$(dockhand_request GET "$dockhand_api/git/stacks?env=$dockhand_environment_id")" || { echo '`+dockhandGitStackPrefix+`listing failed; skipping cleanup.' >&2; exit 0; }`,
 		`delete_ids="$(printf '%s' "$stacks" | python3 -c `+shellQuote(selectDeletes)+` `+shellQuote(desired)+`)"`,
 		`for stack_id in $delete_ids; do`,
-		`  dockhand_request DELETE "$dockhand_api/git/stacks/$stack_id" >/dev/null || echo "Dockhand Git stack $stack_id could not be deleted; continuing." >&2`,
+		`  dockhand_request DELETE "$dockhand_api/git/stacks/$stack_id" >/dev/null || echo "`+dockhandGitStackPrefix+`$stack_id could not be deleted; continuing." >&2`,
 		`done`,
 	)
 	return Task{Name: "Remove Dockhand Git stacks deleted from committed configuration", Apply: commandScript(commands...)}
@@ -479,29 +491,29 @@ data=json.load(sys.stdin)
 print(str(data.get("commit") or ""))`
 	commands := dockhandEnvironmentCommandPrelude("")
 	commands = append(commands,
-		`if ! dockhand_available; then echo `+shellQuote("Dockhand API is unavailable; skipping Dockhand Git stack reconciliation for "+stack.Name+".")+`; exit 0; fi`,
+		`if ! dockhand_available`+shellThenSuffix+` echo `+shellQuote("Dockhand API is unavailable; skipping Dockhand Git stack reconciliation for "+stack.Name+".")+`; exit 0; fi`,
 		`dockhand_environment_id="$(dockhand_ensure_environment)" || { echo `+shellQuote("Dockhand environment could not be prepared; skipping "+stack.Name+".")+` >&2; exit 0; }`,
 		`dockhand_stack_payload_template=`+shellQuote(payloadTemplate),
 		`desired_payload="$(printf '%s' "$dockhand_stack_payload_template" | python3 -c `+shellQuote(setEnvironmentID)+` "$dockhand_environment_id")"`,
-		`stacks="$(dockhand_request GET "$dockhand_api/git/stacks?env=$dockhand_environment_id")" || { echo `+shellQuote("Dockhand Git stack listing failed; skipping "+stack.Name+".")+` >&2; exit 0; }`,
+		`stacks="$(dockhand_request GET "$dockhand_api/git/stacks?env=$dockhand_environment_id")" || { echo `+shellQuote(dockhandGitStackPrefix+"listing failed; skipping "+stack.Name+".")+` >&2; exit 0; }`,
 		`existing="$(printf '%s' "$stacks" | python3 -c `+shellQuote(selectExisting)+` `+shellQuote(stackName)+`)"`,
-		`if [ -n "$existing" ] && ! printf '%s' "$existing" | python3 -c `+shellQuote(validateExisting)+` "$desired_payload"; then`,
+		`if test -n "$existing" && ! printf '%s' "$existing" | python3 -c `+shellQuote(validateExisting)+` "$desired_payload"`+shellThenSuffix,
 		`  stack_id="$(printf '%s' "$existing" | python3 -c `+shellQuote(extractID)+`)"`,
-		`  dockhand_request DELETE "$dockhand_api/git/stacks/$stack_id" >/dev/null || { echo `+shellQuote("Dockhand Git stack "+stack.Name+" exists with incompatible settings and could not be recreated; continuing.")+` >&2; exit 0; }`,
+		`  dockhand_request DELETE "$dockhand_api/git/stacks/$stack_id" >/dev/null || { echo `+shellQuote(dockhandGitStackPrefix+stack.Name+" exists with incompatible settings and could not be recreated; continuing.")+` >&2; exit 0; }`,
 		`  existing=''`,
 		`fi`,
-		`if [ -z "$existing" ]; then`,
-		`  existing="$(dockhand_request POST "$dockhand_api/git/stacks" "$desired_payload")" || { echo `+shellQuote("Dockhand Git stack "+stack.Name+" could not be created; continuing.")+` >&2; exit 0; }`,
+		`if test -z "$existing"`+shellThenSuffix,
+		`  existing="$(dockhand_request POST "$dockhand_api/git/stacks" "$desired_payload")" || { echo `+shellQuote(dockhandGitStackPrefix+stack.Name+" could not be created; continuing.")+` >&2; exit 0; }`,
 		`fi`,
-		`if printf '%s' "$existing" | python3 -c `+shellQuote(commitMatches)+` `+shellQuote(commitPrefix)+`; then`,
-		`  echo `+shellQuote("Dockhand Git stack "+stack.Name+" already matches "+commitPrefix+".")+`; exit 0`,
+		`if printf '%s' "$existing" | python3 -c `+shellQuote(commitMatches)+` `+shellQuote(commitPrefix)+shellThenSuffix,
+		`  echo `+shellQuote(dockhandGitStackPrefix+stack.Name+" already matches "+commitPrefix+".")+`; exit 0`,
 		`fi`,
 		`stack_id="$(printf '%s' "$existing" | python3 -c `+shellQuote(extractID)+`)"`,
-		`sync_result="$(dockhand_request POST "$dockhand_api/git/stacks/$stack_id/sync")" || { echo `+shellQuote("Dockhand Git stack "+stack.Name+" sync failed; continuing.")+` >&2; exit 0; }`,
+		`sync_result="$(dockhand_request POST "$dockhand_api/git/stacks/$stack_id/sync")" || { echo `+shellQuote(dockhandGitStackPrefix+stack.Name+" sync failed; continuing.")+` >&2; exit 0; }`,
 		`sync_commit="$(printf '%s' "$sync_result" | python3 -c `+shellQuote(extractCommit)+`)"`,
 		`case "$sync_commit" in`,
-		`  `+commitPrefix+`*) echo `+shellQuote("Dockhand Git stack "+stack.Name+" synced to "+commitPrefix+".")+` ;;`,
-		`  *) echo `+shellQuote("Dockhand Git stack "+stack.Name+" synced, but did not report the committed Servestead revision "+commitPrefix+".")+` >&2 ;;`,
+		`  `+commitPrefix+`*) echo `+shellQuote(dockhandGitStackPrefix+stack.Name+" synced to "+commitPrefix+".")+` ;;`,
+		`  *) echo `+shellQuote(dockhandGitStackPrefix+stack.Name+" synced, but did not report the committed Servestead revision "+commitPrefix+".")+` >&2 ;;`,
 		`esac`,
 	)
 	return commandScript(commands...)
@@ -524,13 +536,13 @@ sys.exit(0 if isinstance(containers,list) and len(containers)>0 else 1)`
 		`esac`,
 		`dockhand_environment_id="$(dockhand_ensure_environment)" || { echo 'Dockhand local Docker environment could not be created or updated.' >&2; exit 1; }`,
 		`test_result="$(dockhand_request POST "$dockhand_api/environments/$dockhand_environment_id/test")"`,
-		`if ! printf '%s' "$test_result" | python3 -c `+shellQuote(checkSuccess)+`; then`,
+		`if ! printf '%s' "$test_result" | python3 -c `+shellQuote(checkSuccess)+shellThenSuffix,
 		`  echo 'Dockhand local Docker environment did not pass its connection test.' >&2`,
 		`  printf '%s\n' "$test_result" >&2`,
 		`  exit 1`,
 		`fi`,
 		`containers="$(dockhand_request GET "$dockhand_api/containers?env=$dockhand_environment_id")"`,
-		`if ! printf '%s' "$containers" | python3 -c `+shellQuote(checkContainers)+`; then`,
+		`if ! printf '%s' "$containers" | python3 -c `+shellQuote(checkContainers)+shellThenSuffix,
 		`  echo 'Dockhand local Docker environment is connected but returned no visible containers.' >&2`,
 		`  exit 1`,
 		`fi`,
@@ -566,9 +578,9 @@ print(json.load(sys.stdin)["id"])`
 		`dockhand_ensure_environment() {`,
 		`  environments="$(dockhand_request GET "$dockhand_api/environments")" || return 1`,
 		`  existing="$(printf '%s' "$environments" | python3 -c `+shellQuote(selectEnvironment)+` `+shellQuote(dockhandEnvironmentName)+`)" || return 1`,
-		`  if [ -n "$existing" ]; then`,
+		`  if test -n "$existing"`+shellThenSuffix,
 		`    environment_id="$(printf '%s' "$existing" | python3 -c `+shellQuote(extractID)+`)" || return 1`,
-		`    if ! printf '%s' "$existing" | python3 -c `+shellQuote(environmentMatches)+` "$dockhand_environment_payload"; then`,
+		`    if ! printf '%s' "$existing" | python3 -c `+shellQuote(environmentMatches)+` "$dockhand_environment_payload"`+shellThenSuffix,
 		`      existing="$(dockhand_request PUT "$dockhand_api/environments/$environment_id" "$dockhand_environment_payload")" || return 1`,
 		`    fi`,
 		`  else`,
@@ -602,13 +614,13 @@ func dockhandCommandPrelude() []string {
 		`  method="$1"`,
 		`  url="$2"`,
 		`  response_file="$(mktemp)"`,
-		`  if [ "$#" -eq 3 ]; then`,
+		`  if test "$#" -eq 3` + shellThenSuffix,
 		`    status="$(curl -sS -o "$response_file" -w '%{http_code}' -X "$method" "$url" -H 'Content-Type: application/json' --data "$3")"`,
 		`  else`,
 		`    status="$(curl -sS -o "$response_file" -w '%{http_code}' -X "$method" "$url")"`,
 		`  fi`,
 		`  result=$?`,
-		`  if [ "$result" -ne 0 ]; then`,
+		`  if test "$result" -ne 0` + shellThenSuffix,
 		`    rm -f "$response_file"`,
 		`    return "$result"`,
 		`  fi`,
@@ -626,7 +638,7 @@ func dockhandCommandPrelude() []string {
 		`}`,
 		`dockhand_available() {`,
 		`  session="$(curl -fsS "$dockhand_api/auth/session" 2>/dev/null)" || return 1`,
-		`  if printf '%s' "$session" | grep -Eq '"authEnabled"[[:space:]]*:[[:space:]]*true' && ! printf '%s' "$session" | grep -Eq '"authenticated"[[:space:]]*:[[:space:]]*true'; then`,
+		`  if printf '%s' "$session" | grep -Eq '"authEnabled"[[:space:]]*:[[:space:]]*true' && ! printf '%s' "$session" | grep -Eq '"authenticated"[[:space:]]*:[[:space:]]*true'` + shellThenSuffix,
 		`    echo 'Dockhand authentication is enabled and Servestead has no Dockhand API session; skipping Dockhand API reconciliation.' >&2`,
 		`    return 2`,
 		`  fi`,
@@ -636,7 +648,7 @@ func dockhandCommandPrelude() []string {
 		`  for attempt in $(seq 1 30); do`,
 		`    status=0`,
 		`    dockhand_available || status=$?`,
-		`    if [ "$status" -eq 0 ] || [ "$status" -eq 2 ]; then return "$status"; fi`,
+		`    if test "$status" -eq 0 || test "$status" -eq 2` + shellThenSuffix + ` return "$status"; fi`,
 		`    sleep 2`,
 		`  done`,
 		`  return 1`,
@@ -645,24 +657,23 @@ func dockhandCommandPrelude() []string {
 }
 
 func dockhandGitStackName(stackName string) string {
-	return "servestead-" + stackName
+	return servesteadProjectPrefix + stackName
 }
 
 func stackResourceVerifyCommand(config observabilityConfig, stack configuredStack) string {
-	specs := make([]string, 0, len(stack.Resources))
+	specs := make([]stackResourceVerificationSpec, 0, len(stack.Resources))
 	for _, resource := range stack.Resources {
-		specs = append(specs, fmt.Sprintf(
-			`{"nice_id":%s,"domain":%s}`,
-			jsonString("servestead-"+stack.Name+"-"+resource.ID),
-			jsonString(resource.Subdomain+"."+config.BaseDomain),
-		))
+		specs = append(specs, stackResourceVerificationSpec{
+			NiceID: servesteadProjectPrefix + stack.Name + "-" + resource.ID,
+			Domain: resource.Subdomain + "." + config.BaseDomain,
+		})
 	}
-	specification := "[" + strings.Join(specs, ",") + "]"
+	specification := mustJSON(specs)
 	loginPayload := fmt.Sprintf(`{"email":%s,"password":%s}`,
 		jsonString(config.AdminEmail), jsonString(config.PangolinPassword))
 	verify := `import json,sys
 resources=json.load(sys.stdin)["data"]["resources"]
-specs=json.loads(sys.argv[1])
+specs=json.load(open(sys.argv[1], encoding="utf-8"))
 ok=True
 for spec in specs:
  matches=[r for r in resources if r.get("niceId")==spec["nice_id"] and r.get("fullDomain")==spec["domain"]]
@@ -701,11 +712,11 @@ func observabilityEnvironmentFile(config observabilityConfig) string {
 func observabilityRepositoryTask(config observabilityConfig, group string) Task {
 	deploymentPath := observabilityRepositoryDirectory + ".deployment"
 	verifySnapshot := commandScript(
-		"if [ -e "+shellQuote(observabilityRepositoryDirectory)+" ] && [ ! -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+" ] && [ ! -f "+shellQuote(deploymentPath)+" ]; then",
+		"if test -e "+shellQuote(observabilityRepositoryDirectory)+" && ! test -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+" && ! test -f "+shellQuote(deploymentPath)+shellThenSuffix,
 		"  echo 'remote configuration directory is not managed by Servestead' >&2",
 		"  exit 1",
 		"fi",
-		"if [ -f "+shellQuote(deploymentPath)+" ] && [ ! -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+" ]; then",
+		"if test -f "+shellQuote(deploymentPath)+" && ! test -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+shellThenSuffix,
 		"  recorded_hash=\"$(sed -n 's/^sha256=//p' "+shellQuote(deploymentPath)+")\"",
 		"  actual_hash=\"$(sha256sum "+shellQuote(observabilityRepositoryDirectory+"/"+observabilityComposeRepositoryPath)+" | awk '{print $1}')\"",
 		"  [ \"$recorded_hash\" = \"$actual_hash\" ] || { echo 'remote configuration snapshot has drifted' >&2; exit 1; }",
@@ -715,8 +726,8 @@ func observabilityRepositoryTask(config observabilityConfig, group string) Task 
 		metadata := "commit=" + config.RepositoryCommit + "\nsha256=" + config.RepositorySHA256 + "\n"
 		return Task{Name: "Deploy committed configuration snapshot", Apply: commandScript(
 			verifySnapshot,
-			"if [ -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+" ]; then echo 'remote Git checkout exists; refusing snapshot overwrite' >&2; exit 1; fi",
-			"install -d -m 0750 -o root -g "+shellQuote(group)+" "+shellQuote(observabilityRepositoryDirectory+"/stacks/observability"),
+			"if test -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+shellThenSuffix+" echo 'remote Git checkout exists; refusing snapshot overwrite' >&2; exit 1; fi",
+			remoteInstallDirectoryCommand(observabilityRepositoryDirectory+"/stacks/observability", "root", group, 0750),
 			remoteWriteFileCommand(observabilityRepositoryDirectory+"/"+observabilityComposeRepositoryPath, config.RepositoryCompose, "root", group, 0640),
 			remoteWriteFileCommand(deploymentPath, metadata, "root", group, 0640),
 		)}
@@ -745,8 +756,8 @@ func observabilityRepositoryTask(config observabilityConfig, group string) Task 
 		"chmod 0700 \"$askpass\"",
 		"export GIT_ASKPASS=\"$askpass\" GIT_TERMINAL_PROMPT=0",
 		verifySnapshot,
-		"if [ -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+" ]; then",
-		"  [ -z \"$(git -C "+shellQuote(observabilityRepositoryDirectory)+" status --porcelain)\" ] || { echo 'remote configuration checkout is dirty' >&2; exit 1; }",
+		"if test -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+shellThenSuffix,
+		"  test -z \"$(git -C "+shellQuote(observabilityRepositoryDirectory)+" status --porcelain)\" || { echo 'remote configuration checkout is dirty' >&2; exit 1; }",
 		"  [ \"$(git -C "+shellQuote(observabilityRepositoryDirectory)+" remote get-url origin)\" = "+shellQuote(config.RepositoryOrigin)+" ] || { echo 'remote configuration origin differs' >&2; exit 1; }",
 		"  git -C "+shellQuote(observabilityRepositoryDirectory)+" fetch --prune origin || { servestead_github_checkout_help; exit 1; }",
 		"else",
@@ -791,13 +802,13 @@ func observabilityComposeFile(config observabilityConfig) string {
 		ServesteadPublicNetwork:     servesteadPublicNetwork,
 		BeszelAgentImage:            beszelAgentImage,
 		BeszelImage:                 beszelImage,
-		BeszelLabels:                observabilityComposeLabels(config, "servestead-beszel", "Beszel", "beszel", 8090, "/"),
+		BeszelLabels:                observabilityComposeLabels(config, observabilityBeszelID, "Beszel", "beszel", 8090, "/"),
 		BeszelURL:                   "https://beszel." + config.BaseDomain,
 		DockhandDataDirectory:       observabilityStackDirectory + "/dockhand_data",
 		DockhandImage:               dockhandImage,
-		DockhandLabels:              observabilityComposeLabels(config, "servestead-dockhand", "Dockhand", "dockhand", 3000, "/api/auth/session"),
+		DockhandLabels:              observabilityComposeLabels(config, observabilityDockhandID, "Dockhand", "dockhand", 3000, "/api/auth/session"),
 		DozzleImage:                 dozzleImage,
-		DozzleLabels:                observabilityComposeLabels(config, "servestead-dozzle", "Dozzle", "dozzle", 8080, "/healthcheck"),
+		DozzleLabels:                observabilityComposeLabels(config, observabilityDozzleID, "Dozzle", "dozzle", 8080, "/healthcheck"),
 		ObservabilityStackDirectory: observabilityStackDirectory,
 		SocketProxyImage:            socketProxyImage,
 	})
@@ -828,7 +839,7 @@ func observabilityResourceReconcileCommand(config observabilityConfig, composeCo
 	specs := observabilityResourceSpecs(config.BaseDomain)
 	selectDeletes := `import json,sys
 data=json.load(sys.stdin)["data"]["resources"]
-specs=json.loads(sys.argv[1])
+specs=json.load(open(sys.argv[1], encoding="utf-8"))
 for spec in specs:
  matches=[r for r in data if r.get("name")==spec["name"] and r.get("fullDomain")==spec["domain"]]
  canonical=[r for r in matches if r.get("niceId")==spec["nice_id"]]
@@ -855,7 +866,7 @@ func observabilityResourceVerifyCommand(config observabilityConfig) string {
 	specs := observabilityResourceSpecs(config.BaseDomain)
 	verifyResources := `import json,sys
 data=json.load(sys.stdin)["data"]["resources"]
-specs=json.loads(sys.argv[1])
+specs=json.load(open(sys.argv[1], encoding="utf-8"))
 ok=True
 for spec in specs:
  matches=[r for r in data if r.get("name")==spec["name"] and r.get("fullDomain")==spec["domain"]]
@@ -883,8 +894,29 @@ sys.exit(0 if ok else 1)`
 }
 
 func observabilityResourceSpecs(baseDomain string) string {
-	return fmt.Sprintf(
-		`[{"name":"Beszel","domain":%s,"nice_id":"servestead-beszel"},{"name":"Dozzle","domain":%s,"nice_id":"servestead-dozzle"},{"name":"Dockhand","domain":%s,"nice_id":"servestead-dockhand"}]`,
-		jsonString("beszel."+baseDomain), jsonString("dozzle."+baseDomain), jsonString("dockhand."+baseDomain),
-	)
+	specs := []observabilityResourceSpec{
+		{Name: "Beszel", Domain: "beszel." + baseDomain, NiceID: observabilityBeszelID},
+		{Name: "Dozzle", Domain: "dozzle." + baseDomain, NiceID: observabilityDozzleID},
+		{Name: "Dockhand", Domain: "dockhand." + baseDomain, NiceID: observabilityDockhandID},
+	}
+	return mustJSON(specs)
+}
+
+func mustJSON(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return string(data)
+}
+
+type stackResourceVerificationSpec struct {
+	NiceID string `json:"nice_id"`
+	Domain string `json:"domain"`
+}
+
+type observabilityResourceSpec struct {
+	Name   string `json:"name"`
+	Domain string `json:"domain"`
+	NiceID string `json:"nice_id"`
 }

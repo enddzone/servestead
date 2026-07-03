@@ -20,7 +20,7 @@ permissions:
 env:
   GORELEASER_VERSION: v2.16.0
   SYFT_VERSION: v1.46.0
-  TRIVY_VERSION: v0.71.2
+  TRIVY_VERSION: v0.72.0
 
 jobs:
   binaries:
@@ -56,7 +56,7 @@ jobs:
           syft version
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7.2.2
+        uses: goreleaser/goreleaser-action@v7.2.3
         with:
           version: ${{ env.GORELEASER_VERSION }}
           args: release --clean
@@ -93,13 +93,13 @@ jobs:
           ref: ${{ steps.release.outputs.tag }}
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4.1.0
+        uses: docker/setup-qemu-action@v4.2.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.1.0
+        uses: docker/setup-buildx-action@v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4.2.0
+        uses: docker/login-action@v4.3.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -107,7 +107,7 @@ jobs:
 
       - name: Build and push image
         id: build
-        uses: docker/build-push-action@v7.2.0
+        uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: Dockerfile.release
@@ -144,7 +144,7 @@ jobs:
           version: ${{ env.TRIVY_VERSION }}
 
       - name: Upload image SARIF
-        uses: github/codeql-action/upload-sarif@v4.36.2
+        uses: github/codeql-action/upload-sarif@v4.36.3
         with:
           sarif_file: trivy-image.sarif
 
