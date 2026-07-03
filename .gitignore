@@ -5,3 +5,4 @@
 docs/.astro/
 docs/dist/
 docs/node_modules/
+examples/arr-vpn/.env
