@@ -173,3 +173,31 @@ func TestObservabilityTasksValidateAndVerifyStack(t *testing.T) {
 		}
 	}
 }
+
+func TestObservabilityRepositoryTaskGuidesGitHubTokenSetup(t *testing.T) {
+	task := observabilityRepositoryTask(observabilityConfig{
+		ProfileID:        "profile-1",
+		RepositoryOrigin: "https://github.com/example/config.git",
+		RepositoryCommit: "0123456789abcdef0123456789abcdef01234567",
+		RepositorySHA256: "abc123",
+		GitHubToken:      "github_pat_secret",
+	}, "servestead")
+	for _, expected := range []string{
+		"servestead_github_checkout_help()",
+		"fine-grained PAT, selected repository only, Contents: Read-only",
+		"servestead github-token set --profile profile-1 --file /path/to/token.txt",
+		"set SERVESTEAD_GITHUB_TOKEN before launching Servestead",
+		"fetch --prune origin || { servestead_github_checkout_help; exit 1; }",
+		"git clone --no-checkout -- 'https://github.com/example/config.git' \"$checkout/repository\" || { servestead_github_checkout_help; exit 1; }",
+	} {
+		if !strings.Contains(task.Apply, expected) {
+			t.Fatalf("repository task missing %q:\n%s", expected, task.Apply)
+		}
+	}
+	if strings.Contains(task.Apply, "github_pat_secret") {
+		t.Fatal("repository task leaked the GitHub token into the remote script")
+	}
+	if task.Stdin != "github_pat_secret\n" {
+		t.Fatalf("repository task did not pass the token over stdin: %q", task.Stdin)
+	}
+}

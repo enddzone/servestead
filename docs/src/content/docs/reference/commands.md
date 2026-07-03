@@ -79,6 +79,13 @@ bin/servestead pangolin-credentials --profile <profile-id>
 bin/servestead pangolin-credentials --ip 203.0.113.10
 ```
 
+```sh
+bin/servestead github-token set --profile <profile-id> --file /path/to/github-token.txt
+bin/servestead github-token set --profile <profile-id> --from-env
+bin/servestead github-token status --profile <profile-id>
+bin/servestead github-token remove --profile <profile-id>
+```
+
 ## Stack Management
 
 ```sh
@@ -91,4 +98,12 @@ bin/servestead stack add \
 ```sh
 bin/servestead stack env set --profile <profile-id> --stack <name> --file /path/to/.env
 bin/servestead stack env remove --profile <profile-id> --stack <name>
+```
+
+```sh
+bin/servestead secrets init --profile <profile-id>
+bin/servestead secrets status --profile <profile-id>
+bin/servestead secrets export-key --profile <profile-id>
+bin/servestead secrets import-key --profile <profile-id> --file /path/to/stack-secret-key.txt
+SOPS_AGE_KEY_FILE=/path/to/stack-secret-key.txt sops -d stacks/<name>/servestead.secrets.yaml
 ```

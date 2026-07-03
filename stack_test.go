@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,90 @@ const testApplicationCompose = `services:
   worker:
     image: example/worker
 `
+
+type recordingSecretProvider struct {
+	values  map[string]SecretSet
+	deleted []string
+}
+
+func installRecordingSecretProvider(t *testing.T) *recordingSecretProvider {
+	t.Helper()
+	provider := &recordingSecretProvider{values: map[string]SecretSet{}}
+	original := secretProviderForName
+	secretProviderForName = func(name string) (SecretProvider, error) {
+		if name != stackSecretProviderAge {
+			return nil, errors.New("unexpected provider")
+		}
+		return provider, nil
+	}
+	t.Cleanup(func() {
+		secretProviderForName = original
+	})
+	return provider
+}
+
+func (provider *recordingSecretProvider) Name() string {
+	return stackSecretProviderAge
+}
+
+func (provider *recordingSecretProvider) Capabilities() SecretCapabilities {
+	return SecretCapabilities{Read: true, Write: true, Delete: true, List: true}
+}
+
+func (provider *recordingSecretProvider) GetStackSecrets(_ context.Context, ref StackSecretRef) (SecretSet, error) {
+	values, ok := provider.values[ref.Source]
+	if !ok {
+		return nil, errors.New("missing recorded secrets")
+	}
+	return copySecretSet(values), nil
+}
+
+func (provider *recordingSecretProvider) PutStackSecrets(_ context.Context, ref StackSecretRef, values SecretSet) error {
+	provider.values[ref.Source] = copySecretSet(values)
+	path, err := stackSecretPath(ref)
+	if err != nil {
+		return err
+	}
+	content := "version: 1\nkind: servestead-stack-secrets\nstack: " + ref.StackName + "\nvalues:\n"
+	for _, key := range secretSetKeys(values) {
+		content += "  " + key + ": ENC[recorded]\n"
+	}
+	return atomicWriteFile(path, []byte(content), 0600)
+}
+
+func (provider *recordingSecretProvider) DeleteStackSecrets(_ context.Context, ref StackSecretRef, _ []string) error {
+	provider.deleted = append(provider.deleted, ref.Source)
+	delete(provider.values, ref.Source)
+	path, err := stackSecretPath(ref)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func (provider *recordingSecretProvider) ListStackSecretKeys(_ context.Context, ref StackSecretRef) ([]SecretKeyMeta, error) {
+	values, ok := provider.values[ref.Source]
+	if !ok {
+		return nil, errors.New("missing recorded secrets")
+	}
+	keys := secretSetKeys(values)
+	metas := make([]SecretKeyMeta, 0, len(keys))
+	for _, key := range keys {
+		metas = append(metas, SecretKeyMeta{Name: key, Required: true})
+	}
+	return metas, nil
+}
+
+func copySecretSet(values SecretSet) SecretSet {
+	copied := SecretSet{}
+	for key, value := range values {
+		copied[key] = value
+	}
+	return copied
+}
 
 func TestInspectComposeServicesFindsContainerPorts(t *testing.T) {
 	services, err := inspectComposeServices([]byte(testApplicationCompose))
@@ -121,6 +206,25 @@ func TestGenerateStackPangolinOverrideGroupsMultipleResourcesByService(t *testin
 	}
 }
 
+func TestValidateStackMetadataRejectsUnsupportedPangolinProtocol(t *testing.T) {
+	services, err := inspectComposeServices([]byte(testApplicationCompose))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = validateStackMetadata("site", stackMetadata{
+		Version: 1,
+		PublicResources: []stackPublicResource{{
+			ID: "web", Service: "web", Name: "Site", Subdomain: "site", Port: 80,
+			Protocol: "https",
+		}},
+	}, services)
+	if err == nil ||
+		!strings.Contains(err.Error(), "protocol must be one of http, tcp, udp, ssh, rdp, vnc") ||
+		!strings.Contains(err.Error(), "use http for web apps") {
+		t.Fatalf("expected actionable protocol validation error, got %v", err)
+	}
+}
+
 func TestPrivateStackGeneratesDockhandOnlyOverride(t *testing.T) {
 	services, err := inspectComposeServices([]byte(testApplicationCompose))
 	if err != nil {
@@ -172,6 +276,7 @@ func TestParseStackPublications(t *testing.T) {
 
 func TestRunStackAddImportsMultiplePublicationsAndEnvironment(t *testing.T) {
 	requireGit(t)
+	provider := installRecordingSecretProvider(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -215,15 +320,27 @@ func TestRunStackAddImportsMultiplePublicationsAndEnvironment(t *testing.T) {
 	if len(stacks) != 1 || len(stacks[0].Metadata.PublicResources) != 2 {
 		t.Fatalf("multiple publications were not imported: %+v", stacks)
 	}
-	secrets, err := store.LoadSecrets(profile.ID)
-	if err != nil {
-		t.Fatal(err)
+	metadataSecrets := stacks[0].Metadata.Secrets
+	if metadataSecrets.Provider != stackSecretProviderAge ||
+		metadataSecrets.Source != defaultStackSecretSource("suite") ||
+		strings.Join(metadataSecrets.KeyNames(), ",") != "API_KEY" {
+		t.Fatalf("stack secret metadata was not imported: %+v", metadataSecrets)
 	}
-	if secrets.StackEnvironments["suite"] != "API_KEY=secret\n" {
-		t.Fatal("runtime environment was not imported")
+	recorded := provider.values[defaultStackSecretSource("suite")]
+	if recorded["API_KEY"] != "secret" {
+		t.Fatalf("runtime secret was not imported through provider: %+v", recorded.Redacted())
+	}
+	if _, err := os.Stat(filepath.Join(repository, filepath.FromSlash(defaultStackSecretSource("suite")))); err != nil {
+		t.Fatalf("encrypted secret file was not written: %v", err)
 	}
 	if strings.Contains(stdout.String(), "API_KEY=secret") {
 		t.Fatalf("stack add exposed an environment value:\n%s", stdout.String())
+	}
+	if fileStore, ok := store.(*fileProfileStore); ok {
+		if data, err := os.ReadFile(fileStore.secretsPath(profile.ID)); err == nil &&
+			(strings.Contains(string(data), "API_KEY") || strings.Contains(string(data), `"secret"`)) {
+			t.Fatalf("profile secrets leaked stack value:\n%s", data)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(repository, filepath.FromSlash(observabilityComposeRepositoryPath))); err != nil {
 		t.Fatalf("stack add did not complete the repository scaffold: %v", err)
@@ -279,51 +396,49 @@ func TestGeneratedStackOverridePassesDockerComposeMerge(t *testing.T) {
 	}
 }
 
-func TestStackEnvironmentIsStoredOutsideRepositoryAndSentOverStdin(t *testing.T) {
-	store := newFileProfileStore(t.TempDir())
-	profile, err := store.Create(Profile{IP: "203.0.113.10"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	environment, keys, err := readStackEnvironmentContent("# runtime\nAPI_KEY=secret-value\nPORT=3000")
+func TestStackSecretsAreSentToDockhandOverStdin(t *testing.T) {
+	values, keys, err := parseEnvironmentSecretSet("# runtime\nAPI_KEY=secret-value\nPORT=3000")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(keys, ",") != "API_KEY,PORT" {
 		t.Fatalf("unexpected environment keys: %v", keys)
 	}
-	if err := saveStackEnvironment(store, profile.ID, "site", environment); err != nil {
-		t.Fatal(err)
-	}
-	secrets, err := store.LoadSecrets(profile.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if secrets.StackEnvironments["site"] != environment {
-		t.Fatal("stack environment was not persisted")
-	}
-	info, err := os.Stat(store.secretsPath(profile.ID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Fatalf("secrets file mode = %o, want 0600", info.Mode().Perm())
-	}
 
 	stack := configuredStack{
-		Name: "site", Override: "services: {}\n", Environment: environment,
+		Name: "site", Override: "services: {}\n", Secrets: ageStackSecretMetadata("site", values, "age1w7e2rccr8prd58v8u4073zut0e3vm94ukf6gucwge50u2m35hgcq0xzvrd"), SecretValues: values,
 	}
-	tasks := configuredStackTasks(observabilityConfig{}, stack, "servestead")
+	tasks := configuredStackTasks(observabilityConfig{
+		RepositoryOrigin: "https://github.com/example/config.git",
+		RepositoryBranch: "main",
+		RepositoryCommit: "abcdef1234567890",
+	}, stack, "servestead")
 	var dataTask Task
-	var writeTask Task
+	var validationTask Task
+	var startTask Task
+	gitStackTaskIndex := -1
+	secretTaskIndex := -1
+	var gitStackTask Task
+	var secretTask Task
 	joinedApply := ""
-	for _, task := range tasks {
+	for index, task := range tasks {
 		joinedApply += task.Apply
 		if task.Name == "Prepare site data directory" {
 			dataTask = task
 		}
-		if task.Name == "Write site environment" {
-			writeTask = task
+		if strings.HasPrefix(task.Name, "Validate site Compose") {
+			validationTask = task
+		}
+		if strings.HasPrefix(task.Name, "Start site stack") {
+			startTask = task
+		}
+		if task.Name == "Reconcile site Dockhand Git stack" {
+			gitStackTask = task
+			gitStackTaskIndex = index
+		}
+		if task.Name == "Reconcile site Dockhand secret environment" {
+			secretTask = task
+			secretTaskIndex = index
 		}
 	}
 	if !strings.Contains(dataTask.Apply, "install -d -m 0755 -o root -g root '/data'") ||
@@ -336,12 +451,42 @@ func TestStackEnvironmentIsStoredOutsideRepositoryAndSentOverStdin(t *testing.T)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("data directory task is not valid shell: %v\n%s\n%s", err, output, dataTask.Apply)
 	}
-	if writeTask.Stdin != environment || strings.Contains(writeTask.Apply, "secret-value") ||
-		strings.Contains(joinedApply, "secret-value") {
-		t.Fatal("environment value was not isolated to task stdin")
+	if secretTask.Stdin == "" {
+		t.Fatal("Dockhand secret task was not created")
 	}
-	if !strings.Contains(joinedApply, "--env-file '/etc/servestead/stacks/site.env'") {
-		t.Fatalf("Compose commands do not use the managed environment:\n%s", joinedApply)
+	if gitStackTaskIndex < 0 || secretTaskIndex < 0 || gitStackTaskIndex > secretTaskIndex {
+		t.Fatalf("Dockhand Git stack should be reconciled before secret environment: git=%d secret=%d", gitStackTaskIndex, secretTaskIndex)
+	}
+	if gitStackTask.Apply == "" {
+		t.Fatal("Dockhand Git stack task was not created")
+	}
+	command = exec.Command("sh", "-n")
+	command.Stdin = strings.NewReader(gitStackTask.Apply)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Dockhand Git stack task is not valid shell: %v\n%s\n%s", err, output, gitStackTask.Apply)
+	}
+	if !strings.Contains(validationTask.Stdin, "secret-value") ||
+		!strings.Contains(startTask.Stdin, "secret-value") ||
+		strings.Contains(validationTask.Apply, "secret-value") ||
+		strings.Contains(startTask.Apply, "secret-value") {
+		t.Fatal("compose secret values were not isolated to task stdin")
+	}
+	if !strings.Contains(secretTask.Stdin, "secret-value") ||
+		strings.Contains(secretTask.Apply, "secret-value") ||
+		strings.Contains(joinedApply, "secret-value") {
+		t.Fatal("secret value was not isolated to Dockhand task stdin")
+	}
+	if !strings.Contains(secretTask.Apply, "http://127.0.0.1:3003/api") ||
+		!strings.Contains(secretTask.Apply, "--data-binary @-") ||
+		strings.Contains(secretTask.Apply, "--data '") ||
+		strings.Contains(secretTask.Apply, "/etc/servestead/stacks/site.env") ||
+		strings.Contains(joinedApply, "--env-file") {
+		t.Fatalf("Dockhand secret command does not use the expected stdin/local API path:\n%s", secretTask.Apply)
+	}
+	command = exec.Command("sh", "-n")
+	command.Stdin = strings.NewReader(secretTask.Apply)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Dockhand secret task is not valid shell: %v\n%s\n%s", err, output, secretTask.Apply)
 	}
 }
 
@@ -389,8 +534,9 @@ public_resources:
 	}
 }
 
-func TestPrepareDeclarativeSetupAttachesStackEnvironment(t *testing.T) {
+func TestPrepareDeclarativeSetupAttachesStackSecrets(t *testing.T) {
 	requireGit(t)
+	provider := installRecordingSecretProvider(t)
 	store := newFileProfileStore(t.TempDir())
 	repository := filepath.Join(t.TempDir(), "repository")
 	profile, err := store.Create(Profile{
@@ -398,6 +544,13 @@ func TestPrepareDeclarativeSetupAttachesStackEnvironment(t *testing.T) {
 		PangolinAdminEmail: "admin@example.com", ConfigRepositoryPath: repository,
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	identity, recipient, err := generateStackSecretIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSecrets(profile.ID, ProfileSecrets{StackSecretIdentity: identity, StackSecretRecipient: recipient}); err != nil {
 		t.Fatal(err)
 	}
 	scaffold := observabilityComposeFile(observabilityConfig{
@@ -425,15 +578,29 @@ public_resources:
     healthcheck:
       enabled: true
       path: /
+secrets:
+  provider: age
+  source: stacks/site/servestead.secrets.yaml
+  recipients:
+    - ` + recipient + `
+  runtime:
+    sink: dockhand
+    mode: env
+  keys:
+    - name: API_KEY
+      required: true
 `
 	if err := os.WriteFile(filepath.Join(stackDirectory, stackMetadataFilename), []byte(metadata), 0600); err != nil {
 		t.Fatal(err)
 	}
-	runGitCommand(t, repository, "add", "stacks/site")
-	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Add site")
-	if err := saveStackEnvironment(store, profile.ID, "site", "API_KEY=secret\n"); err != nil {
+	provider.values[defaultStackSecretSource("site")] = SecretSet{"API_KEY": "secret"}
+	if err := atomicWriteFile(filepath.Join(stackDirectory, stackSecretFilename), []byte("encrypted\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	runGitCommand(t, repository, "add", "stacks/site")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Add site")
+	runGitCommand(t, repository, "remote", "add", "origin", "https://github.com/example/config.git")
+	runGitCommand(t, repository, "update-ref", "refs/remotes/origin/main", "HEAD")
 	_, config, err := prepareDeclarativeSetup(
 		context.Background(), store, profile, ProfileState{Runs: map[string]SetupRun{}},
 		setupConfig{BaseDomain: profile.BaseDomain, PangolinAdminEmail: profile.PangolinAdminEmail},
@@ -441,8 +608,8 @@ public_resources:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(config.Stacks) != 1 || config.Stacks[0].Environment != "API_KEY=secret\n" {
-		t.Fatalf("stack environment was not attached: %+v", config.Stacks)
+	if len(config.Stacks) != 1 || config.Stacks[0].SecretValues["API_KEY"] != "secret" {
+		t.Fatalf("stack secrets were not attached: %+v", config.Stacks)
 	}
 }
 

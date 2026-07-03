@@ -38,7 +38,7 @@ With one profile-aware run, Servestead can:
 
 - It does not create DNS records at your registrar.
 - It does not make live cloud API calls during tests.
-- It does not store runtime secrets in the Git-backed configuration repository.
+- It does not store plaintext runtime secrets in the Git-backed configuration repository.
 - It does not disable external SSH until the requested setup stages do so.
 - It does not bootstrap or harden a newly provisioned Droplet until you explicitly run setup actions.
 

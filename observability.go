@@ -31,6 +31,7 @@ const dockhandEnvironmentHost = "dockhand-socket-proxy"
 const dockhandEnvironmentPort = 2375
 
 type observabilityConfig struct {
+	ProfileID         string
 	Host              string
 	SSHUser           string
 	PrivateKeyPath    string
@@ -130,9 +131,7 @@ func configuredStackTasks(config observabilityConfig, stack configuredStack, gro
 	composePath := observabilityRepositoryDirectory + "/stacks/" + stack.Name + "/compose.yaml"
 	overridePath := "/opt/servestead/generated/" + stack.Name + ".pangolin.yaml"
 	deploymentPath := observabilityRepositoryDirectory + ".stack-" + stack.Name + ".deployment"
-	environmentPath := stackEnvironmentDirectory + "/" + stack.Name + ".env"
-	composeCommand := "docker compose --env-file " + shellQuote(environmentPath) +
-		" -p " + shellQuote("servestead-"+stack.Name) +
+	composeCommand := "docker compose -p " + shellQuote("servestead-"+stack.Name) +
 		" -f " + shellQuote(composePath) + " -f " + shellQuote(overridePath)
 
 	tasks := []Task{}
@@ -165,7 +164,6 @@ func configuredStackTasks(config observabilityConfig, stack configuredStack, gro
 	}
 	tasks = append(tasks,
 		stackDataDirectoryTask(stack),
-		stackEnvironmentTask(stack, environmentPath),
 		Task{Name: "Generate " + stack.Name + " deployment override", Apply: commandScript(
 			"install -d -m 0750 -o root -g "+shellQuote(group)+" /opt/servestead/generated",
 			remoteWriteFileCommand(overridePath, stack.Override, "root", group, 0640),
@@ -184,32 +182,78 @@ required=[".full-domain",".targets[0].hostname",".targets[0].port"]
 ok=all(any(key.endswith(suffix) for key in labels) for suffix in required)
 sys.exit(0 if ok else 1)`))
 	}
-	tasks = append(tasks, Task{Name: validationName, Apply: commandScript(validationCommands...)})
+	tasks = append(tasks, stackComposeTask(validationName, validationCommands, stack))
 	if len(stack.Resources) > 0 {
-		tasks = append(tasks, Task{Name: "Start " + stack.Name + " stack and reconcile Pangolin", Apply: commandScript(
+		tasks = append(tasks, stackComposeTask("Start "+stack.Name+" stack and reconcile Pangolin", []string{
 			"docker stop aegis-newt >/dev/null",
 			"start_result=0",
-			composeCommand+" pull && "+composeCommand+" up -d --remove-orphans || start_result=$?",
+			composeCommand + " pull && " + composeCommand + " up -d --remove-orphans || start_result=$?",
 			"docker start aegis-newt >/dev/null",
 			"exit \"$start_result\"",
-		)})
+		}, stack))
 		tasks = append(tasks, Task{Name: "Verify " + stack.Name + " Pangolin public resources", Apply: stackResourceVerifyCommand(config, stack)})
 	} else {
-		tasks = append(tasks, Task{Name: "Start " + stack.Name + " stack", Apply: commandScript(
-			composeCommand+" pull",
-			composeCommand+" up -d --remove-orphans",
-		)})
+		tasks = append(tasks, stackComposeTask("Start "+stack.Name+" stack", []string{
+			composeCommand + " pull",
+			composeCommand + " up -d --remove-orphans",
+		}, stack))
 	}
-	tasks = append(tasks, Task{Name: "Verify " + stack.Name + " stack", Apply: commandScript(
-		"expected=\"$("+composeCommand+" config --services)\"",
-		"running=\"$("+composeCommand+" ps --services --status running)\"",
+	tasks = append(tasks, stackComposeTask("Verify "+stack.Name+" stack", []string{
+		"expected=\"$(" + composeCommand + " config --services)\"",
+		"running=\"$(" + composeCommand + " ps --services --status running)\"",
 		"for service in $expected; do printf '%s\\n' \"$running\" | grep -Fx \"$service\" >/dev/null; done",
-		composeCommand+" ps",
-	)})
+		composeCommand + " ps",
+	}, stack))
 	if shouldReconcileDockhandGitStacks(config) {
 		tasks = append(tasks, dockhandGitStackReconcileTask(config, stack))
+		if len(stack.SecretValues) > 0 {
+			tasks = append(tasks, dockhandStackSecretReconcileTask(stack))
+		}
 	}
 	return tasks
+}
+
+func stackComposeTask(name string, commands []string, stack configuredStack) Task {
+	taskCommands := append(stackSecretEnvironmentPrelude(stack.SecretValues), commands...)
+	task := Task{Name: name, Apply: commandScript(taskCommands...)}
+	if len(stack.SecretValues) > 0 {
+		task.Stdin = stackSecretEnvironmentPayload(stack.SecretValues)
+	}
+	return task
+}
+
+func stackSecretEnvironmentPrelude(secrets SecretSet) []string {
+	if len(secrets) == 0 {
+		return nil
+	}
+	exportScript := `import json,re,shlex,sys
+data=json.load(sys.stdin)
+pattern=re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+for key in sorted(data):
+ if not pattern.match(key):
+  raise SystemExit("invalid environment key: "+key)
+ print("export "+key+"="+shlex.quote(str(data[key])))`
+	return []string{
+		`secret_environment_payload="$(cat)"`,
+		`eval "$(printf '%s' "$secret_environment_payload" | python3 -c ` + shellQuote(exportScript) + `)"`,
+		`unset secret_environment_payload`,
+	}
+}
+
+func stackSecretEnvironmentPayload(secrets SecretSet) string {
+	keys := secretSetKeys(secrets)
+	var builder strings.Builder
+	builder.WriteByte('{')
+	for index, key := range keys {
+		if index > 0 {
+			builder.WriteByte(',')
+		}
+		builder.WriteString(jsonString(key))
+		builder.WriteByte(':')
+		builder.WriteString(jsonString(secrets[key]))
+	}
+	builder.WriteByte('}')
+	return builder.String()
 }
 
 func stackDataDirectoryTask(stack configuredStack) Task {
@@ -220,21 +264,6 @@ func stackDataDirectoryTask(stack configuredStack) Task {
 		"  install -d -m 0750 -o 1000 -g 1000 "+shellQuote(dataDirectory),
 		"fi",
 	)}
-}
-
-func stackEnvironmentTask(stack configuredStack, path string) Task {
-	script := commandScript(
-		"install -d -m 0700 -o root -g root "+shellQuote(stackEnvironmentDirectory),
-		"temporary="+shellQuote(path+".servestead.tmp"),
-		"cat > \"$temporary\"",
-		"chown root:root \"$temporary\"",
-		"chmod 0600 \"$temporary\"",
-		"mv \"$temporary\" "+shellQuote(path),
-	)
-	if stack.Environment == "" {
-		return Task{Name: "Write " + stack.Name + " environment", Apply: remoteWriteFileCommand(path, "", "root", "root", 0600)}
-	}
-	return Task{Name: "Write " + stack.Name + " environment", Apply: script, Stdin: stack.Environment}
 }
 
 func stackRepositoryReconcileTasks(config observabilityConfig, group string) []Task {
@@ -349,6 +378,55 @@ for stack in json.load(sys.stdin):
 
 func dockhandGitStackReconcileTask(config observabilityConfig, stack configuredStack) Task {
 	return Task{Name: "Reconcile " + stack.Name + " Dockhand Git stack", Apply: dockhandGitStackReconcileCommand(config, stack)}
+}
+
+func dockhandStackSecretReconcileTask(stack configuredStack) Task {
+	return Task{
+		Name:  "Reconcile " + stack.Name + " Dockhand secret environment",
+		Apply: dockhandStackSecretReconcileCommand(stack),
+		Stdin: dockhandStackSecretPayload(stack.SecretValues),
+	}
+}
+
+func dockhandStackSecretPayload(secrets SecretSet) string {
+	keys := secretSetKeys(secrets)
+	var builder strings.Builder
+	builder.WriteString(`{"variables":[`)
+	for index, key := range keys {
+		if index > 0 {
+			builder.WriteByte(',')
+		}
+		builder.WriteString(`{"key":`)
+		builder.WriteString(jsonString(key))
+		builder.WriteString(`,"value":`)
+		builder.WriteString(jsonString(secrets[key]))
+		builder.WriteString(`,"isSecret":true}`)
+	}
+	builder.WriteString(`]}`)
+	return builder.String()
+}
+
+func dockhandStackSecretReconcileCommand(stack configuredStack) string {
+	stackName := dockhandGitStackName(stack.Name)
+	commands := dockhandEnvironmentCommandPrelude("")
+	commands = append(commands,
+		`secret_payload="$(cat)"`,
+		`if ! dockhand_available; then echo `+shellQuote("Dockhand API is unavailable; cannot reconcile secret environment for "+stack.Name+".")+` >&2; exit 1; fi`,
+		`dockhand_environment_id="$(dockhand_ensure_environment)" || { echo `+shellQuote("Dockhand environment could not be prepared; cannot reconcile secret environment for "+stack.Name+".")+` >&2; exit 1; }`,
+		`dockhand_stack_name=`+shellQuote(stackName),
+		`response_file="$(mktemp)"`,
+		`cleanup_secret_reconcile() { rm -f "$response_file"; }`,
+		`trap cleanup_secret_reconcile EXIT`,
+		`secret_env_url="$dockhand_api/stacks/$dockhand_stack_name/env?env=$dockhand_environment_id"`,
+		`status="$(printf '%s' "$secret_payload" | curl -sS -o "$response_file" -w '%{http_code}' -X PUT "$secret_env_url" -H 'Content-Type: application/json' --data-binary @-)"`,
+		`curl_result=$?`,
+		`if [ "$curl_result" -ne 0 ]; then echo `+shellQuote("Dockhand secret environment request failed for "+stack.Name+".")+` >&2; exit "$curl_result"; fi`,
+		`case "$status" in`,
+		`  2??) echo `+shellQuote("Dockhand secret environment updated for "+stack.Name+".")+` ;;`,
+		`  *) echo `+shellQuote("Dockhand secret environment update failed for "+stack.Name+" (HTTP ")+`"$status"`+shellQuote(").")+` >&2; exit 1 ;;`,
+		`esac`,
+	)
+	return commandScript(commands...)
 }
 
 func dockhandGitStackReconcileCommand(config observabilityConfig, stack configuredStack) string {
@@ -651,6 +729,18 @@ func observabilityRepositoryTask(config observabilityConfig, group string) Task 
 		"checkout=\"$(mktemp -d)\"",
 		"cleanup_git_credentials() { rm -f \"$askpass\"; rm -rf \"$checkout\"; unset SERVESTEAD_GITHUB_TOKEN; }",
 		"trap cleanup_git_credentials EXIT",
+		"servestead_github_checkout_help() {",
+		"  if [ -n \"$SERVESTEAD_GITHUB_TOKEN\" ]; then",
+		"    echo 'GitHub checkout failed. A GitHub token was provided, but GitHub rejected it or the repository is not accessible.' >&2",
+		"    echo 'Check that the token is not expired and can read this repository.' >&2",
+		"  else",
+		"    echo 'GitHub checkout failed. No GitHub token was provided.' >&2",
+		"  fi",
+		"  echo 'Private GitHub repositories require a personal access token; public repositories can also use one to avoid anonymous rate limits.' >&2",
+		"  echo 'Recommended token: fine-grained PAT, selected repository only, Contents: Read-only.' >&2",
+		"  echo "+shellQuote("Store it locally with: "+githubTokenSetCommand(config.ProfileID))+" >&2",
+		"  echo 'Or set SERVESTEAD_GITHUB_TOKEN before launching Servestead.' >&2",
+		"}",
 		"printf '%s\\n' '#!/bin/sh' 'case \"$1\" in *Username*) printf \"%s\\\\n\" x-access-token;; *) printf \"%s\\\\n\" \"$SERVESTEAD_GITHUB_TOKEN\";; esac' >\"$askpass\"",
 		"chmod 0700 \"$askpass\"",
 		"export GIT_ASKPASS=\"$askpass\" GIT_TERMINAL_PROMPT=0",
@@ -658,9 +748,9 @@ func observabilityRepositoryTask(config observabilityConfig, group string) Task 
 		"if [ -d "+shellQuote(observabilityRepositoryDirectory+"/.git")+" ]; then",
 		"  [ -z \"$(git -C "+shellQuote(observabilityRepositoryDirectory)+" status --porcelain)\" ] || { echo 'remote configuration checkout is dirty' >&2; exit 1; }",
 		"  [ \"$(git -C "+shellQuote(observabilityRepositoryDirectory)+" remote get-url origin)\" = "+shellQuote(config.RepositoryOrigin)+" ] || { echo 'remote configuration origin differs' >&2; exit 1; }",
-		"  git -C "+shellQuote(observabilityRepositoryDirectory)+" fetch --prune origin",
+		"  git -C "+shellQuote(observabilityRepositoryDirectory)+" fetch --prune origin || { servestead_github_checkout_help; exit 1; }",
 		"else",
-		"  git clone --no-checkout -- "+shellQuote(config.RepositoryOrigin)+" \"$checkout/repository\"",
+		"  git clone --no-checkout -- "+shellQuote(config.RepositoryOrigin)+" \"$checkout/repository\" || { servestead_github_checkout_help; exit 1; }",
 		"  rm -rf "+shellQuote(observabilityRepositoryDirectory),
 		"  mv \"$checkout/repository\" "+shellQuote(observabilityRepositoryDirectory),
 		"fi",

@@ -448,6 +448,79 @@ func TestAdvancedSetupMasksPangolinPassword(t *testing.T) {
 	}
 }
 
+func TestProfileSetupGitHubTokenScreenManagesProfileSecret(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		IP: "203.0.113.10",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: profile,
+		State:   ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenDashboard
+
+	updated, command := model.updateProfileDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	result := updated.(profileSetupModel)
+	if result.screen != profileSetupScreenGitHubToken || command == nil {
+		t.Fatalf("g should open GitHub token screen: screen=%d command=%v", result.screen, command)
+	}
+	if result.githubTokenInput.EchoMode != textinput.EchoPassword {
+		t.Fatal("GitHub token input is not masked")
+	}
+	if !containsAll(result.View(), "GitHub repository token", "Profile token: not configured", "Effective source: none") {
+		t.Fatalf("GitHub token view missing initial status:\n%s", result.View())
+	}
+
+	result.githubTokenInput.SetValue(" github_pat_profile_secret\n")
+	updated, _ = result.updateGitHubToken(tea.KeyMsg{Type: tea.KeyEnter})
+	result = updated.(profileSetupModel)
+	secrets, err := store.LoadSecrets(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secrets.GitHubToken != "github_pat_profile_secret" || result.profiles[0].Secrets.GitHubToken != "github_pat_profile_secret" {
+		t.Fatalf("GitHub token was not saved: stored=%+v model=%+v", secrets, result.profiles[0].Secrets)
+	}
+	if strings.Contains(result.View(), "github_pat_profile_secret") {
+		t.Fatal("GitHub token view leaked the saved token")
+	}
+	if !containsAll(result.View(), "Profile token: configured", "Effective source: profile") {
+		t.Fatalf("GitHub token view missing saved status:\n%s", result.View())
+	}
+
+	t.Setenv("SERVESTEAD_GITHUB_TOKEN", "github_pat_env_secret")
+	updated, _ = result.updateGitHubToken(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	result = updated.(profileSetupModel)
+	secrets, err = store.LoadSecrets(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secrets.GitHubToken != "github_pat_env_secret" {
+		t.Fatalf("environment GitHub token was not saved: %+v", secrets)
+	}
+	if strings.Contains(result.View(), "github_pat_env_secret") {
+		t.Fatal("GitHub token view leaked the environment token")
+	}
+	if !containsAll(result.View(), "Environment token: configured", "Effective source: environment") {
+		t.Fatalf("GitHub token view missing environment status:\n%s", result.View())
+	}
+
+	updated, _ = result.updateGitHubToken(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	result = updated.(profileSetupModel)
+	secrets, err = store.LoadSecrets(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secrets.GitHubToken != "" || result.profiles[0].Secrets.GitHubToken != "" {
+		t.Fatalf("GitHub token was not removed: stored=%+v model=%+v", secrets, result.profiles[0].Secrets)
+	}
+}
+
 func TestFailedProxyRetryCollectsPangolinCredentials(t *testing.T) {
 	state := ProfileState{
 		ActiveRunID: "failed-run",
@@ -674,6 +747,7 @@ func TestProfileSetupModelRendersDashboardFromProfileState(t *testing.T) {
 
 func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
 	requireGit(t)
+	provider := installRecordingSecretProvider(t)
 	directory := t.TempDir()
 	repository := filepath.Join(directory, "repository")
 	if err := os.MkdirAll(repository, 0700); err != nil {
@@ -778,6 +852,13 @@ func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
 	if len(result.stacks[0].Metadata.PublicResources) != 2 {
 		t.Fatalf("multi-service routes were not saved: %+v", result.stacks[0].Metadata.PublicResources)
 	}
+	if result.stacks[0].Metadata.Secrets.Provider != stackSecretProviderAge ||
+		strings.Join(result.stacks[0].Metadata.Secrets.KeyNames(), ",") != "API_KEY" {
+		t.Fatalf("runtime secret metadata was not saved: %+v", result.stacks[0].Metadata.Secrets)
+	}
+	if provider.values[defaultStackSecretSource("site")]["API_KEY"] != "secret" {
+		t.Fatalf("runtime secret was not saved through provider: %+v", provider.values)
+	}
 	if _, err := os.Stat(filepath.Join(repository, filepath.FromSlash(observabilityComposeRepositoryPath))); err != nil {
 		t.Fatalf("repository scaffold was not prepared before commit: %v", err)
 	}
@@ -835,6 +916,7 @@ func TestStackFilePickersSelectComposeAndShowHiddenEnvironmentFiles(t *testing.T
 
 func TestStackEditorManagesMultipleResourcesAndRuntimeEnvironment(t *testing.T) {
 	requireGit(t)
+	provider := installRecordingSecretProvider(t)
 	repository := t.TempDir()
 	runGitCommand(t, repository, "init")
 	compose := []byte(`services:
@@ -903,12 +985,9 @@ func TestStackEditorManagesMultipleResourcesAndRuntimeEnvironment(t *testing.T) 
 	if model.screen != profileSetupScreenStacks || model.err != "" {
 		t.Fatalf("stack editor did not save: %v %s", model.screen, model.err)
 	}
-	secrets, err := store.LoadSecrets(profile.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if secrets.StackEnvironments["suite"] != "API_KEY=secret\n" {
-		t.Fatal("runtime environment was not saved in profile secrets")
+	recorded := provider.values[defaultStackSecretSource("suite")]
+	if recorded["API_KEY"] != "secret" {
+		t.Fatalf("runtime secret was not saved through provider: %+v", recorded.Redacted())
 	}
 	reloaded, err := loadEditableStacks(repository)
 	if err != nil {
@@ -917,6 +996,21 @@ func TestStackEditorManagesMultipleResourcesAndRuntimeEnvironment(t *testing.T) 
 	if len(reloaded[0].Metadata.PublicResources) != 2 ||
 		reloaded[0].Metadata.PublicResources[0].Subdomain != "app" {
 		t.Fatalf("multi-resource metadata was not saved: %+v", reloaded[0].Metadata)
+	}
+	if reloaded[0].Metadata.Secrets.Provider != stackSecretProviderAge ||
+		strings.Join(reloaded[0].Metadata.Secrets.KeyNames(), ",") != "API_KEY" {
+		t.Fatalf("secret metadata was not saved: %+v", reloaded[0].Metadata.Secrets)
+	}
+	model.openStackEditor(reloaded[0])
+	model.stackInputs[0].SetValue("suite-renamed")
+	updated, _ = model.updateStackEditor(tea.KeyMsg{Type: tea.KeyCtrlS})
+	model = updated.(profileSetupModel)
+	if model.screen != profileSetupScreenStacks || model.err != "" {
+		t.Fatalf("stack editor did not rename with secrets: %v %s", model.screen, model.err)
+	}
+	recorded = provider.values[defaultStackSecretSource("suite-renamed")]
+	if recorded["API_KEY"] != "secret" {
+		t.Fatalf("runtime secret was not re-encrypted for renamed stack: %+v", provider.values)
 	}
 }
 

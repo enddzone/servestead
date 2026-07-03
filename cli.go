@@ -24,6 +24,8 @@ Direct commands:
   servestead network --host <ipv4> --private-key <path>
   servestead proxy --host <ipv4> --private-key <path> --domain <domain> --email <email> --server-secret <secret>
   servestead pangolin-credentials (--profile <id> | --ip <ipv4>)
+  servestead github-token <set|status|remove> --profile <id>
+  servestead secrets <init|status|export-key|import-key> --profile <id>
   servestead stack add --profile <id> --compose <path> [--publish <service:port:subdomain[:id]> ...] [--env-file <path>]
   servestead stack env set --profile <id> --stack <name> --file <path>
   servestead stack env remove --profile <id> --stack <name>
@@ -76,6 +78,18 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv ge
 		return err
 	case "pangolin-credentials":
 		err := runPangolinCredentials(args[1:], stdout, stderr)
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	case "github-token":
+		err := runGitHubToken(args[1:], stdout, stderr)
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	case "secrets":
+		err := runSecrets(ctx, args[1:], stdout, stderr)
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}

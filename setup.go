@@ -379,6 +379,7 @@ const (
 	profileSetupScreenAdvanced
 	profileSetupScreenRepository
 	profileSetupScreenRepositoryDetails
+	profileSetupScreenGitHubToken
 	profileSetupScreenStacks
 	profileSetupScreenStackCompose
 	profileSetupScreenStackServices
@@ -445,6 +446,8 @@ type profileSetupModel struct {
 	inputs                   []textinput.Model
 	advanced                 []textinput.Model
 	repositoryInputs         []textinput.Model
+	githubTokenInput         textinput.Model
+	githubTokenNotice        string
 	stackComposeInput        textinput.Model
 	stackComposePicker       filepicker.Model
 	stackComposeManual       bool
@@ -581,11 +584,14 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 	model.advanced = setupAdvancedInputs(setupCLIOptions{})
 	model.repositoryInputs = setupRepositoryInputs(setupCLIOptions{})
 	model.repositoryMode = "create"
+	model.githubTokenInput = newSetupInputs([]setupInputField{{
+		label: "GitHub PAT", placeholder: "paste token", secret: true,
+	}})[0]
 	model.stackComposeInput = newSetupInputs([]setupInputField{{
 		label: "Docker Compose file", placeholder: "/path/to/docker-compose.yml",
 	}})[0]
 	model.stackEnvironmentInput = newSetupInputs([]setupInputField{{
-		label: "Runtime .env file", placeholder: "/path/to/.env",
+		label: "Runtime secret .env file", placeholder: "/path/to/.env",
 	}})[0]
 	model.stackComposePicker = newStackFilePicker(".", []string{".yaml", ".yml"}, false)
 	model.stackEnvironmentPicker = newStackFilePicker(".", nil, true)
@@ -884,6 +890,8 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return model.updateRepositoryChoice(msg)
 		case profileSetupScreenRepositoryDetails:
 			return model.updateRepositoryDetails(msg)
+		case profileSetupScreenGitHubToken:
+			return model.updateGitHubToken(msg)
 		case profileSetupScreenStacks:
 			return model.updateStacks(msg)
 		case profileSetupScreenStackCompose:
@@ -931,7 +939,7 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func profileSetupScreenAcceptsText(screen profileSetupScreen) bool {
 	switch screen {
 	case profileSetupScreenIntake, profileSetupScreenAdvanced, profileSetupScreenRepositoryDetails,
-		profileSetupScreenStackCompose, profileSetupScreenStackEditor, profileSetupScreenStackResourceEditor,
+		profileSetupScreenGitHubToken, profileSetupScreenStackCompose, profileSetupScreenStackEditor, profileSetupScreenStackResourceEditor,
 		profileSetupScreenStackEnvironment, profileSetupScreenStackReview, profileSetupScreenStackCommit,
 		profileSetupScreenCloudConfirm:
 		return true
@@ -1029,6 +1037,13 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 		model.screen = profileSetupScreenStacks
 		model.refreshStacks()
 		model.stackTable.Focus()
+	case "g", "G":
+		model.err = ""
+		model.githubTokenNotice = ""
+		model.githubTokenInput.SetValue("")
+		model.githubTokenInput.Focus()
+		model.screen = profileSetupScreenGitHubToken
+		return model, textinput.Blink
 	case "f", "F":
 		model.fresh = true
 		model.setInputsFromChoice(true)
@@ -1274,6 +1289,76 @@ func (model profileSetupModel) updateRepositoryDetails(key tea.KeyMsg) (tea.Mode
 	var cmd tea.Cmd
 	model.repositoryInputs[model.focus], cmd = model.repositoryInputs[model.focus].Update(key)
 	return model, cmd
+}
+
+func (model profileSetupModel) updateGitHubToken(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "enter":
+		token, err := normalizeGitHubToken(model.githubTokenInput.Value())
+		if err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		return model.saveSelectedGitHubToken(token), nil
+	case "e", "E":
+		token, err := normalizeGitHubToken(os.Getenv("SERVESTEAD_GITHUB_TOKEN"))
+		if err != nil {
+			model.err = "SERVESTEAD_GITHUB_TOKEN: " + err.Error()
+			return model, nil
+		}
+		model = model.saveSelectedGitHubToken(token)
+		if model.err == "" {
+			model.githubTokenNotice = "Stored SERVESTEAD_GITHUB_TOKEN in the selected profile."
+		}
+		return model, nil
+	case "x", "X", "d", "D":
+		return model.removeSelectedGitHubToken(), nil
+	}
+	var cmd tea.Cmd
+	model.githubTokenInput, cmd = model.githubTokenInput.Update(key)
+	return model, cmd
+}
+
+func (model profileSetupModel) saveSelectedGitHubToken(token string) profileSetupModel {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		model.err = "no profile selected"
+		return model
+	}
+	if model.profileStore == nil {
+		model.err = "profile store is unavailable"
+		return model
+	}
+	choice := &model.profiles[model.selectedIndex]
+	choice.Secrets.GitHubToken = token
+	if err := model.profileStore.SaveSecrets(choice.Profile.ID, choice.Secrets); err != nil {
+		model.err = err.Error()
+		return model
+	}
+	model.githubTokenInput.SetValue("")
+	model.githubTokenNotice = "Stored GitHub token in the selected profile."
+	model.err = ""
+	return model
+}
+
+func (model profileSetupModel) removeSelectedGitHubToken() profileSetupModel {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		model.err = "no profile selected"
+		return model
+	}
+	if model.profileStore == nil {
+		model.err = "profile store is unavailable"
+		return model
+	}
+	choice := &model.profiles[model.selectedIndex]
+	choice.Secrets.GitHubToken = ""
+	if err := model.profileStore.SaveSecrets(choice.Profile.ID, choice.Secrets); err != nil {
+		model.err = err.Error()
+		return model
+	}
+	model.githubTokenInput.SetValue("")
+	model.githubTokenNotice = "Removed stored GitHub token from the selected profile."
+	model.err = ""
+	return model
 }
 
 func (model profileSetupModel) updateStackCompose(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1564,12 +1649,6 @@ func (model profileSetupModel) updateStackEditor(key tea.KeyMsg) (tea.Model, tea
 
 func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
 	name := strings.TrimSpace(model.stackInputs[0].Value())
-	metadata := stackMetadata{Version: 1, PublicResources: model.stackResources}
-	if err := validateStackMetadata(name, metadata, model.stackServices); err != nil {
-		model.err = err.Error()
-		return model, nil
-	}
-	options := stackAddOptions{Name: name, Resources: model.stackResources}
 	repositoryPath, err := model.selectedRepositoryPath()
 	if err != nil {
 		model.err = err.Error()
@@ -1577,6 +1656,62 @@ func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
 	}
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
 		model.err = "no profile selected"
+		return model, nil
+	}
+	currentSecrets := stackSecretMetadata{}
+	if model.stackOriginalName != "" {
+		metadataPath := filepath.Join(repositoryPath, "stacks", model.stackOriginalName, stackMetadataFilename)
+		if existing, err := readStackMetadataFile(metadataPath); err == nil {
+			currentSecrets = existing.Secrets
+		}
+	}
+	var secretValues SecretSet
+	var stackSecretIdentity string
+	renameExistingSecrets := false
+	options := stackAddOptions{Name: name, Resources: model.stackResources}
+	if model.stackEnvironmentDirty {
+		if model.stackEnvironment != "" {
+			values, _, err := parseEnvironmentSecretSet(model.stackEnvironment)
+			if err != nil {
+				model.err = err.Error()
+				return model, nil
+			}
+			secretValues = values
+			identity, recipient, err := model.ensureSelectedStackSecretIdentity()
+			if err != nil {
+				model.err = err.Error()
+				return model, nil
+			}
+			stackSecretIdentity = identity
+			options.Secrets = ageStackSecretMetadata(name, values, recipient)
+		}
+	} else if currentSecrets.HasSecrets() {
+		if model.stackOriginalName != "" && model.stackOriginalName != name {
+			identity, _, err := model.profiles[model.selectedIndex].Secrets.StackSecretIdentityPair()
+			if err != nil {
+				model.err = err.Error()
+				return model, nil
+			}
+			provider, err := secretProviderForName(currentSecrets.Provider)
+			if err != nil {
+				model.err = err.Error()
+				return model, nil
+			}
+			values, err := provider.GetStackSecrets(context.Background(), currentSecrets.Ref(repositoryPath, model.stackOriginalName, identity))
+			if err != nil {
+				model.err = err.Error()
+				return model, nil
+			}
+			secretValues = values
+			stackSecretIdentity = identity
+			renameExistingSecrets = true
+		}
+		currentSecrets.Source = defaultStackSecretSource(name)
+		options.Secrets = currentSecrets
+	}
+	metadata := stackMetadata{Version: 1, PublicResources: model.stackResources, Secrets: options.Secrets}
+	if err := validateStackMetadata(name, metadata, model.stackServices); err != nil {
+		model.err = err.Error()
 		return model, nil
 	}
 	profile := model.profiles[model.selectedIndex].Profile
@@ -1588,30 +1723,43 @@ func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
 		model.err = err.Error()
 		return model, nil
 	}
+	secretsWritten := false
+	canWriteSecretsBeforeMetadata := model.stackEnvironmentDirty &&
+		options.Secrets.HasSecrets() &&
+		(model.stackOriginalName == "" || model.stackOriginalName == options.Name)
+	if canWriteSecretsBeforeMetadata {
+		if err := putStackSecrets(context.Background(), repositoryPath, options.Name, options.Secrets, stackSecretIdentity, secretValues); err != nil {
+			model.err = err.Error()
+			return model, nil
+		}
+		secretsWritten = true
+	}
 	if err := writeEditableStack(repositoryPath, model.stackOriginalName, options, []byte(model.stackCompose)); err != nil {
 		model.err = err.Error()
 		return model, nil
 	}
-	environmentChanged := model.stackEnvironmentDirty ||
-		(model.stackOriginalName != "" && model.stackOriginalName != options.Name)
-	if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
-		choice := &model.profiles[model.selectedIndex]
-		if choice.Secrets.StackEnvironments == nil {
-			choice.Secrets.StackEnvironments = map[string]string{}
-		}
-		if model.stackOriginalName != "" && model.stackOriginalName != options.Name {
-			delete(choice.Secrets.StackEnvironments, model.stackOriginalName)
-		}
-		if model.stackEnvironment == "" {
-			delete(choice.Secrets.StackEnvironments, options.Name)
-		} else {
-			choice.Secrets.StackEnvironments[options.Name] = model.stackEnvironment
-		}
-		if environmentChanged && model.profileStore != nil {
-			if err := model.profileStore.SaveSecrets(choice.Profile.ID, choice.Secrets); err != nil {
+	if model.stackEnvironmentDirty {
+		if options.Secrets.HasSecrets() && !secretsWritten {
+			if err := putStackSecrets(context.Background(), repositoryPath, options.Name, options.Secrets, stackSecretIdentity, secretValues); err != nil {
 				model.err = err.Error()
 				return model, nil
 			}
+		} else if currentSecrets.HasSecrets() {
+			currentSecrets.Source = defaultStackSecretSource(options.Name)
+			identity, _, err := model.profiles[model.selectedIndex].Secrets.StackSecretIdentityPair()
+			if err != nil {
+				model.err = err.Error()
+				return model, nil
+			}
+			if err := removeStackSecrets(context.Background(), repositoryPath, options.Name, currentSecrets, identity); err != nil {
+				model.err = err.Error()
+				return model, nil
+			}
+		}
+	} else if renameExistingSecrets {
+		if err := putStackSecrets(context.Background(), repositoryPath, options.Name, options.Secrets, stackSecretIdentity, secretValues); err != nil {
+			model.err = err.Error()
+			return model, nil
 		}
 	}
 	action := "updated"
@@ -1625,11 +1773,28 @@ func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
 	model.err = ""
 	model.screen = profileSetupScreenStacks
 	model.refreshStacks()
-	if environmentChanged && model.stackGitStatus == "clean" {
-		model.stackNotice = "Runtime environment updated outside Git. Press r to deploy this stack."
+	if model.stackEnvironmentDirty && model.stackGitStatus == "clean" {
+		model.stackNotice = "Runtime secrets updated in Git-backed encrypted state. Review and commit the stack changes."
 	}
 	model.stackTable.Focus()
 	return model, nil
+}
+
+func (model *profileSetupModel) ensureSelectedStackSecretIdentity() (string, string, error) {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		return "", "", errors.New("no profile selected")
+	}
+	choice := &model.profiles[model.selectedIndex]
+	recipient, changed, err := choice.Secrets.EnsureStackSecretIdentity()
+	if err != nil {
+		return "", "", err
+	}
+	if changed && model.profileStore != nil {
+		if err := model.profileStore.SaveSecrets(choice.Profile.ID, choice.Secrets); err != nil {
+			return "", "", err
+		}
+	}
+	return choice.Secrets.StackSecretIdentity, recipient, nil
 }
 
 func (model profileSetupModel) updateStackResourceEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1733,14 +1898,14 @@ func (model *profileSetupModel) openStackEnvironment(returnScreen profileSetupSc
 	model.stackEnvironmentMode = stackEnvironmentChoose
 	model.stackEnvironmentCursor = 0
 	model.stackEnvironmentOptions = nil
-	if model.stackEnvironment != "" {
+	if model.stackEnvironment != "" || len(model.stackEnvironmentKeys) > 0 {
 		model.stackEnvironmentOptions = append(model.stackEnvironmentOptions, stackEnvironmentOption{
-			kind: "keep", label: "Keep current runtime environment",
+			kind: "keep", label: "Keep current runtime secrets",
 			detail: fmt.Sprintf("%d key(s)", len(model.stackEnvironmentKeys)),
 		})
 	}
 	model.stackEnvironmentOptions = append(model.stackEnvironmentOptions, stackEnvironmentOption{
-		kind: "none", label: "No runtime environment",
+		kind: "none", label: "No runtime secrets",
 	})
 	if model.stackComposePath != "" {
 		adjacent := filepath.Join(filepath.Dir(model.stackComposePath), ".env")
@@ -1777,7 +1942,7 @@ func (model profileSetupModel) updateStackEnvironment(msg tea.Msg) (tea.Model, t
 			}
 		case "enter":
 			if model.stackEnvironmentCursor < 0 || model.stackEnvironmentCursor >= len(model.stackEnvironmentOptions) {
-				model.err = "no runtime environment option selected"
+				model.err = "no runtime secret option selected"
 				return model, nil
 			}
 			option := model.stackEnvironmentOptions[model.stackEnvironmentCursor]
@@ -1829,7 +1994,7 @@ func (model profileSetupModel) updateStackEnvironment(msg tea.Msg) (tea.Model, t
 func (model profileSetupModel) loadStackEnvironment(path string) (tea.Model, tea.Cmd) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		model.err = "runtime environment file path is required"
+		model.err = "runtime secret file path is required"
 		return model, nil
 	}
 	environment, keys, err := readStackEnvironmentFile(path)
@@ -1885,17 +2050,6 @@ func (model profileSetupModel) updateStackDeleteConfirm(key tea.KeyMsg) (tea.Mod
 			model.err = err.Error()
 			model.screen = profileSetupScreenStacks
 			return model, nil
-		}
-		if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
-			choice := &model.profiles[model.selectedIndex]
-			delete(choice.Secrets.StackEnvironments, stack.Name)
-			if model.profileStore != nil {
-				if err := model.profileStore.SaveSecrets(choice.Profile.ID, choice.Secrets); err != nil {
-					model.err = err.Error()
-					model.screen = profileSetupScreenStacks
-					return model, nil
-				}
-			}
 		}
 		model.stackNotice = fmt.Sprintf("Stack %s removed. Review and commit the deletion before deployment.", stack.Name)
 		model.err = ""
@@ -1958,7 +2112,7 @@ func stackResourceInputs(resource stackPublicResource) []textinput.Model {
 		}()},
 		{label: "Public subdomain", value: resource.Subdomain},
 		{label: "Pangolin display name", value: resource.Name},
-		{label: "Protocol (http/https)", value: firstNonEmpty(resource.Protocol, "http")},
+		{label: "Protocol (http/tcp/udp/ssh/rdp/vnc)", value: firstNonEmpty(resource.Protocol, "http")},
 		{label: "Health-check path (blank disables)", value: resource.Healthcheck.Path},
 		{label: "Require Pangolin SSO (yes/no)", value: sso},
 	})
@@ -1994,14 +2148,8 @@ func (model *profileSetupModel) openStackEditor(stack editableStack) {
 	model.stackInputs = stackEditorInputs(options)
 	model.stackEnvironment = ""
 	model.stackEnvironmentOriginal = ""
-	model.stackEnvironmentKeys = nil
+	model.stackEnvironmentKeys = stack.Metadata.Secrets.KeyNames()
 	model.stackEnvironmentDirty = false
-	if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
-		model.stackEnvironment = model.profiles[model.selectedIndex].Secrets.StackEnvironments[stack.Name]
-		model.stackEnvironmentOriginal = model.stackEnvironment
-		_, keys, _ := readStackEnvironmentContent(model.stackEnvironment)
-		model.stackEnvironmentKeys = keys
-	}
 	model.focus = 1
 	model.stackInputs[0].Blur()
 	model.stackResourceTable.Focus()
@@ -2339,6 +2487,10 @@ func (model *profileSetupModel) goBack() {
 		model.screen = profileSetupScreenIntake
 	case profileSetupScreenRepositoryDetails:
 		model.screen = profileSetupScreenRepository
+	case profileSetupScreenGitHubToken:
+		model.githubTokenInput.Blur()
+		model.githubTokenInput.SetValue("")
+		model.screen = profileSetupScreenDashboard
 	case profileSetupScreenStacks:
 		model.screen = profileSetupScreenDashboard
 	case profileSetupScreenStackCompose:
@@ -2721,6 +2873,8 @@ func (model profileSetupModel) View() string {
 		builder.WriteString(model.repositoryChoiceView())
 	case profileSetupScreenRepositoryDetails:
 		builder.WriteString(model.repositoryDetailsView())
+	case profileSetupScreenGitHubToken:
+		builder.WriteString(model.githubTokenView())
 	case profileSetupScreenStacks:
 		builder.WriteString(model.stacksView())
 	case profileSetupScreenStackCompose:
@@ -2795,10 +2949,11 @@ func (model profileSetupModel) dashboardView() string {
 	if repositoryPath == "" {
 		builder.WriteString("Config repository: not created; choose one during full setup review.\n\n")
 	} else if _, err := os.Stat(expandUserPath(repositoryPath)); errors.Is(err, os.ErrNotExist) {
-		builder.WriteString(fmt.Sprintf("Config repository: %s (will be created before the next run)\n\n", repositoryPath))
+		builder.WriteString(fmt.Sprintf("Config repository: %s (will be created before the next run)\n", repositoryPath))
 	} else {
-		builder.WriteString(fmt.Sprintf("Config repository: %s\n\n", repositoryPath))
+		builder.WriteString(fmt.Sprintf("Config repository: %s\n", repositoryPath))
 	}
+	builder.WriteString(fmt.Sprintf("GitHub token: %s\n\n", githubTokenStatusSummary(choice.Secrets)))
 	builder.WriteString(model.pangolinRegistrationView(choice))
 	builder.WriteString("\n\n")
 	if choice.Profile.Cloud != nil {
@@ -2816,8 +2971,55 @@ func (model profileSetupModel) dashboardView() string {
 		builder.WriteString(model.stackTable.View())
 	}
 	builder.WriteString("\n")
-	builder.WriteString(setupHelpStyle.Render("Platform runs Network, Proxy, and Observability. Press r to run an action; press s to manage stacks."))
+	builder.WriteString(setupHelpStyle.Render("Platform runs Network, Proxy, and Observability. Press r to run an action; press s to manage stacks; press g to manage the GitHub token."))
 	return builder.String()
+}
+
+func (model profileSetupModel) githubTokenView() string {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		return "No profile selected."
+	}
+	choice := model.profiles[model.selectedIndex]
+	var builder strings.Builder
+	builder.WriteString("GitHub repository token\n")
+	builder.WriteString(setupHelpStyle.Render("Private repositories require a PAT. Public repositories can also use one to avoid anonymous rate limits. Recommended scope: fine-grained PAT, selected repository only, Contents read-only."))
+	builder.WriteString("\n\n")
+	builder.WriteString(fmt.Sprintf("Profile token: %s\n", configuredStatus(strings.TrimSpace(choice.Secrets.GitHubToken) != "")))
+	builder.WriteString(fmt.Sprintf("Environment token: %s\n", configuredStatus(strings.TrimSpace(os.Getenv("SERVESTEAD_GITHUB_TOKEN")) != "")))
+	_, source := effectiveGitHubToken(choice.Secrets)
+	builder.WriteString(fmt.Sprintf("Effective source: %s\n", source))
+	if model.githubTokenNotice != "" {
+		builder.WriteString("\n")
+		builder.WriteString(setupHelpStyle.Render(model.githubTokenNotice))
+		builder.WriteString("\n")
+	}
+	builder.WriteString("\n")
+	builder.WriteString(model.githubTokenInput.View())
+	builder.WriteString("\n\n")
+	builder.WriteString(setupHelpStyle.Render("Paste a token and press enter to save. Press e to store SERVESTEAD_GITHUB_TOKEN. Press x to remove the saved profile token."))
+	return builder.String()
+}
+
+func githubTokenStatusSummary(secrets ProfileSecrets) string {
+	_, source := effectiveGitHubToken(secrets)
+	switch source {
+	case "environment":
+		if strings.TrimSpace(secrets.GitHubToken) != "" {
+			return "environment override active; profile token configured"
+		}
+		return "environment override active"
+	case "profile":
+		return "profile token configured"
+	default:
+		return "not configured"
+	}
+}
+
+func configuredStatus(configured bool) string {
+	if configured {
+		return "configured"
+	}
+	return "not configured"
 }
 
 func (model profileSetupModel) stacksView() string {
@@ -2914,7 +3116,7 @@ func (model profileSetupModel) stackEditorView() string {
 	} else {
 		builder.WriteString(model.stackResourceTable.View())
 	}
-	builder.WriteString("\nRuntime environment: ")
+	builder.WriteString("\nRuntime secrets: ")
 	if len(model.stackEnvironmentKeys) == 0 {
 		builder.WriteString("none")
 	} else {
@@ -2926,8 +3128,8 @@ func (model profileSetupModel) stackEditorView() string {
 
 func (model profileSetupModel) stackEnvironmentView() string {
 	var builder strings.Builder
-	builder.WriteString("Runtime environment\n")
-	builder.WriteString(setupHelpStyle.Render("Values are stored in the owner-only profile secret store and never written to Git."))
+	builder.WriteString("Runtime secrets\n")
+	builder.WriteString(setupHelpStyle.Render("Values are written to the encrypted stack secret file in the configuration repository. Only key names are shown after save."))
 	builder.WriteString("\n\n")
 	switch model.stackEnvironmentMode {
 	case stackEnvironmentManual:
@@ -2960,7 +3162,7 @@ func (model profileSetupModel) stackEnvironmentView() string {
 func (model profileSetupModel) stackReviewView() string {
 	var builder strings.Builder
 	builder.WriteString("Review application stack\n")
-	builder.WriteString(setupHelpStyle.Render("Saving writes local repository files and profile secrets. It does not deploy or commit."))
+	builder.WriteString(setupHelpStyle.Render("Saving writes local repository files. It does not deploy or commit."))
 	builder.WriteString("\n\n")
 	builder.WriteString(model.stackInputs[0].View())
 	builder.WriteString("\n\n")
@@ -2979,9 +3181,9 @@ func (model profileSetupModel) stackReviewView() string {
 		}
 	}
 	if len(model.stackEnvironmentKeys) == 0 {
-		builder.WriteString("Runtime environment: none\n")
+		builder.WriteString("Runtime secrets: none\n")
 	} else {
-		builder.WriteString(fmt.Sprintf("Runtime environment: %d key(s); values hidden\n", len(model.stackEnvironmentKeys)))
+		builder.WriteString(fmt.Sprintf("Runtime secrets: %d key(s); values hidden\n", len(model.stackEnvironmentKeys)))
 	}
 	builder.WriteString("\n")
 	builder.WriteString(setupWarningStyle.Render("Next: review the diff, stage, and commit from the stack manager."))
@@ -3253,6 +3455,7 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
 			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "advanced")),
 			key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "stacks")),
+			key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "GitHub token")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 			key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		}
@@ -3267,6 +3470,13 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 			bindings = append(bindings, key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "cloud")))
 		}
 		return bindings
+	case profileSetupScreenGitHubToken:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "save")),
+			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "store env")),
+			key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "remove")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		}
 	case profileSetupScreenIntake:
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "next")),
@@ -4327,7 +4537,8 @@ func runFullSetupStages(ctx context.Context, profile Profile, config setupConfig
 	} else {
 		fmt.Fprintln(stageStdout, "Step 5/5: deploy observability stack.")
 		observabilityConfig := observabilityConfig{
-			Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
+			ProfileID: firstNonEmpty(config.ProfileID, profile.ID),
+			Host:      profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
 			BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
 			AdminPassword: config.BeszelAdminPassword, PangolinPassword: config.PangolinAdminPassword, SystemToken: config.BeszelSystemToken,
 			HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
@@ -4364,7 +4575,8 @@ func runSetupStage(ctx context.Context, profile Profile, config setupConfig, run
 	switch stage {
 	case "stacks":
 		syncConfig := observabilityConfig{
-			Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
+			ProfileID: firstNonEmpty(config.ProfileID, profile.ID),
+			Host:      profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
 			BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
 			PangolinPassword: config.PangolinAdminPassword,
 			RepositoryCommit: config.ConfigRepositoryCommit, RepositoryBranch: config.ConfigRepositoryBranch, RepositoryOrigin: config.ConfigRepositoryOrigin,
@@ -4469,7 +4681,8 @@ func runSetupStage(ctx context.Context, profile Profile, config setupConfig, run
 		return proxyClient.Close()
 	case "observability":
 		observabilityConfig := observabilityConfig{
-			Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
+			ProfileID: firstNonEmpty(config.ProfileID, profile.ID),
+			Host:      profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
 			BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
 			AdminPassword: config.BeszelAdminPassword, PangolinPassword: config.PangolinAdminPassword, SystemToken: config.BeszelSystemToken,
 			HubPrivateKey: config.BeszelHubPrivateKey, HubPublicKey: config.BeszelHubPublicKey,
@@ -4506,7 +4719,8 @@ func runConfiguredStackStage(ctx context.Context, profile Profile, config setupC
 	stageStdout := setupStageWriter(stdout, stage, "stdout")
 	stageStderr := setupStageWriter(stderr, stage, "stderr")
 	observabilityConfig := observabilityConfig{
-		Host: profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
+		ProfileID: firstNonEmpty(config.ProfileID, profile.ID),
+		Host:      profile.IP, SSHUser: config.AdminUser, PrivateKeyPath: config.PrivateKeyPath,
 		BaseDomain: config.BaseDomain, AdminEmail: config.PangolinAdminEmail,
 		PangolinPassword: config.PangolinAdminPassword, RepositoryCommit: config.ConfigRepositoryCommit,
 		RepositoryBranch: config.ConfigRepositoryBranch, RepositoryOrigin: config.ConfigRepositoryOrigin,

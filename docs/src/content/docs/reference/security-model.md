@@ -52,16 +52,19 @@ Docker group membership applies to new login sessions. Disconnect and reconnect 
 
 ## Secret Handling
 
-Generated runtime secrets are stored outside Git in owner-only profile files or on the remote server:
+Generated platform secrets are stored in owner-only profile files or on the remote server. Imported application stack secrets are Git-backed, but only as SOPS-compatible encrypted files:
 
 | Secret | Storage |
 | --- | --- |
 | Pangolin server secret | Local profile secrets and remote config. |
 | Pangolin administrator password | Local profile secrets. |
-| Stack environment values | Local profile secrets and remote `/etc/servestead/stacks/<name>.env`. |
+| GitHub repository token | Local profile secrets; sent over SSH stdin only for Git checkout. |
+| Stack environment values | `stacks/<name>/servestead.secrets.yaml` in the config repository; Dockhand secret envs at runtime. |
 | Observability environment values | Remote `/etc/servestead/observability.env`. |
 
-Configuration repositories should contain reviewed Compose and metadata files, not populated secret values.
+Configuration repositories should contain reviewed Compose, metadata, and SOPS-compatible stack secret files, not populated plaintext secret values. The profile stack secret identity is stored in the owner-only local profile secrets file and can be managed with `servestead secrets init`, `servestead secrets export-key`, and `servestead secrets import-key`. The exported identity can also be used with `SOPS_AGE_KEY` or `SOPS_AGE_KEY_FILE` and `sops -d` as a recovery path. Deployment exports decrypted stack secrets only for the remote Compose task, and stack secret sync uses the server-local Dockhand API over SSH stdin; it does not require exposing Dockhand's API publicly.
+
+GitHub personal access tokens are managed with `servestead github-token set`, `servestead github-token status`, and `servestead github-token remove`. The saved token is stored in local profile secrets and is not persisted on the remote server. During Git-backed deployment, Servestead sends the token over SSH stdin to the checkout task, exposes it only through a temporary `GIT_ASKPASS` script environment, and unsets it when the task exits. `SERVESTEAD_GITHUB_TOKEN` overrides the saved token for the current run.
 
 ## Provisioning Boundary
 

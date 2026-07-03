@@ -44,6 +44,11 @@ func defaultConfigRepositoryPath(profileID string) (string, error) {
 }
 
 func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Profile, state ProfileState, config setupConfig) (Profile, setupConfig, error) {
+	profileSecrets, err := store.LoadSecrets(profile.ID)
+	if err != nil {
+		return profile, config, err
+	}
+	githubToken, _ := effectiveGitHubToken(profileSecrets)
 	path := firstNonEmpty(config.ConfigRepositoryPath, profile.ConfigRepositoryPath)
 	if path == "" {
 		if fileStore, ok := store.(*fileProfileStore); ok && !fileStore.defaultRoot {
@@ -69,7 +74,7 @@ func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Pr
 		ctx,
 		path,
 		config.GitHubRepositoryURL,
-		os.Getenv("SERVESTEAD_GITHUB_TOKEN"),
+		githubToken,
 		profile.ID,
 		scaffold,
 	)
@@ -87,11 +92,7 @@ func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Pr
 	config.ConfigRepositoryOrigin = revision.Origin
 	config.ConfigRepositoryCompose = revision.Compose
 	config.ConfigRepositorySHA256 = revision.ComposeSHA
-	config.GitHubToken = os.Getenv("SERVESTEAD_GITHUB_TOKEN")
-	secrets, err := store.LoadSecrets(profile.ID)
-	if err != nil {
-		return profile, config, err
-	}
+	config.GitHubToken = githubToken
 	for _, stack := range revision.Stacks {
 		services, err := inspectComposeServices([]byte(stack.Compose))
 		if err != nil {
@@ -101,6 +102,29 @@ func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Pr
 		if err != nil {
 			return profile, config, fmt.Errorf("stack %s: %w", stack.Name, err)
 		}
+		var secretValues SecretSet
+		if stack.Metadata.Secrets.HasSecrets() {
+			if revision.Origin == "" || revision.Branch == "" {
+				return profile, config, fmt.Errorf("stack %s has secrets; Dockhand secret sync requires a pushed configuration repository origin", stack.Name)
+			}
+			identity, _, err := profileSecrets.StackSecretIdentityPair()
+			if err != nil {
+				return profile, config, fmt.Errorf("stack %s secrets: %w", stack.Name, err)
+			}
+			provider, err := secretProviderForName(stack.Metadata.Secrets.Provider)
+			if err != nil {
+				return profile, config, fmt.Errorf("stack %s secrets: %w", stack.Name, err)
+			}
+			secretValues, err = provider.GetStackSecrets(ctx, stack.Metadata.Secrets.Ref(revision.Path, stack.Name, identity))
+			if err != nil {
+				return profile, config, fmt.Errorf("stack %s secrets: %w", stack.Name, err)
+			}
+			for _, key := range stack.Metadata.Secrets.KeyNames() {
+				if _, ok := secretValues[key]; !ok {
+					return profile, config, fmt.Errorf("stack %s secrets: missing required key %s", stack.Name, key)
+				}
+			}
+		}
 		config.Stacks = append(config.Stacks, configuredStack{
 			Name:          stack.Name,
 			Compose:       stack.Compose,
@@ -109,7 +133,8 @@ func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Pr
 			ComposeSHA256: stack.ComposeSHA256,
 			Resources:     stack.Metadata.PublicResources,
 			Files:         stack.Files,
-			Environment:   secrets.StackEnvironments[stack.Name],
+			Secrets:       stack.Metadata.Secrets,
+			SecretValues:  secretValues,
 		})
 	}
 	if err := validateConfiguredStackSet(config.Stacks); err != nil {
@@ -145,7 +170,7 @@ func prepareConfigRepository(ctx context.Context, path, githubURL, token, profil
 		return configRepositoryRevision{}, statErr
 	}
 	if githubURL != "" && !existed {
-		if err := cloneGitHubRepository(ctx, githubURL, path, token); err != nil {
+		if err := cloneGitHubRepository(ctx, githubURL, path, token, profileID); err != nil {
 			return configRepositoryRevision{}, err
 		}
 		existed = true
@@ -461,10 +486,11 @@ func runGit(ctx context.Context, directory string, extraEnv []string, arguments 
 	return stdout.String(), nil
 }
 
-func cloneGitHubRepository(ctx context.Context, repositoryURL, destination, token string) error {
+func cloneGitHubRepository(ctx context.Context, repositoryURL, destination, token string, profileID string) error {
 	if token == "" {
 		token = os.Getenv("SERVESTEAD_GITHUB_TOKEN")
 	}
+	tokenProvided := strings.TrimSpace(token) != ""
 	parent := filepath.Dir(destination)
 	if err := os.MkdirAll(parent, 0700); err != nil {
 		return err
@@ -488,9 +514,79 @@ func cloneGitHubRepository(ctx context.Context, repositoryURL, destination, toke
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
-		return fmt.Errorf("clone GitHub repository: %s", strings.TrimSpace(stderr.String()))
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("clone GitHub repository: %s", githubCheckoutFailureDetail(detail, tokenProvided, profileID))
 	}
 	return nil
+}
+
+func effectiveGitHubToken(secrets ProfileSecrets) (string, string) {
+	if token := strings.TrimSpace(os.Getenv("SERVESTEAD_GITHUB_TOKEN")); token != "" {
+		return token, "environment"
+	}
+	if token := strings.TrimSpace(secrets.GitHubToken); token != "" {
+		return token, "profile"
+	}
+	return "", "none"
+}
+
+func githubCheckoutFailureDetail(detail string, tokenProvided bool, profileID string) string {
+	if !githubCheckoutNeedsTokenGuidance(detail) {
+		return detail
+	}
+	return detail + "\n\n" + githubTokenGuidance(tokenProvided, profileID)
+}
+
+func githubCheckoutNeedsTokenGuidance(detail string) bool {
+	lower := strings.ToLower(detail)
+	for _, marker := range []string{
+		"authentication failed",
+		"authentication required",
+		"could not read username",
+		"invalid username or token",
+		"password authentication is not supported",
+		"rate limit",
+		"repository not found",
+		"support for password authentication",
+		"the requested url returned error: 403",
+		"the requested url returned error: 429",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func githubTokenGuidance(tokenProvided bool, profileID string) string {
+	commandProfileID := profileID
+	if commandProfileID == "" {
+		commandProfileID = "<profile-id>"
+	}
+	var builder strings.Builder
+	if tokenProvided {
+		builder.WriteString("A GitHub token was provided, but GitHub rejected it or the repository is not accessible.\n")
+		builder.WriteString("Check that the token is not expired and can read this repository.\n")
+	} else {
+		builder.WriteString("No GitHub token was provided.\n")
+	}
+	builder.WriteString("Private GitHub repositories require a personal access token; public repositories can also use one to avoid anonymous rate limits.\n")
+	builder.WriteString("Recommended token: fine-grained PAT, selected repository only, Contents: Read-only.\n")
+	builder.WriteString("Store it locally with: ")
+	builder.WriteString(githubTokenSetCommand(commandProfileID))
+	builder.WriteByte('\n')
+	builder.WriteString("Or set SERVESTEAD_GITHUB_TOKEN before launching Servestead.")
+	return builder.String()
+}
+
+func githubTokenSetCommand(profileID string) string {
+	if profileID == "" {
+		profileID = "<profile-id>"
+	}
+	return "servestead github-token set --profile " + profileID + " --file /path/to/token.txt"
 }
 
 func validateGitHubRepositoryURL(value string) error {

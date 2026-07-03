@@ -89,16 +89,18 @@ type SetupStageStatus struct {
 }
 
 type ProfileSecrets struct {
-	ServerSecret          string            `json:"server_secret"`
-	PangolinSetupToken    string            `json:"pangolin_setup_token"`
-	PangolinAdminPassword string            `json:"pangolin_admin_password"`
-	NewtID                string            `json:"newt_id"`
-	NewtSecret            string            `json:"newt_secret"`
-	BeszelAdminPassword   string            `json:"beszel_admin_password"`
-	BeszelSystemToken     string            `json:"beszel_system_token"`
-	BeszelHubPrivateKey   string            `json:"beszel_hub_private_key"`
-	BeszelHubPublicKey    string            `json:"beszel_hub_public_key"`
-	StackEnvironments     map[string]string `json:"stack_environments,omitempty"`
+	ServerSecret          string `json:"server_secret"`
+	PangolinSetupToken    string `json:"pangolin_setup_token"`
+	PangolinAdminPassword string `json:"pangolin_admin_password"`
+	NewtID                string `json:"newt_id"`
+	NewtSecret            string `json:"newt_secret"`
+	BeszelAdminPassword   string `json:"beszel_admin_password"`
+	BeszelSystemToken     string `json:"beszel_system_token"`
+	BeszelHubPrivateKey   string `json:"beszel_hub_private_key"`
+	BeszelHubPublicKey    string `json:"beszel_hub_public_key"`
+	GitHubToken           string `json:"github_token,omitempty"`
+	StackSecretIdentity   string `json:"stack_secret_identity,omitempty"`
+	StackSecretRecipient  string `json:"stack_secret_recipient,omitempty"`
 }
 
 func (secrets *ProfileSecrets) EnsureServerSecret() error {
