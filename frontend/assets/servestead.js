@@ -41,6 +41,10 @@
       const data = JSON.parse(event.data);
       const panel = document.getElementById("recovery-panel");
       if (!panel) return;
+      if (data.html) {
+        panel.innerHTML = data.html;
+        return;
+      }
       panel.innerHTML = `<div class="recovery"><div class="alert"><strong>${escapeHTML(data.kind || "failed")}</strong>: <span>${escapeHTML(data.message || "Run failed.")}</span></div></div>`;
     });
     source.addEventListener("done", (event) => {

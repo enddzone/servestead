@@ -144,15 +144,17 @@ type webDraft struct {
 
 func newWebServer(store ProfileStore, token string) *webServer {
 	broker := newWebEventBroker()
-	return &webServer{
+	server := &webServer{
 		store:   store,
-		manager: newWebRunManager(store, broker),
 		token:   token,
 		session: randomURLToken(),
 		csrf:    randomURLToken(),
 		done:    make(chan struct{}),
 		drafts:  map[string]webDraft{},
 	}
+	server.manager = newWebRunManager(store, broker)
+	server.manager.recoveryHTML = server.recoveryHTML
+	return server
 }
 
 func (server *webServer) routes() http.Handler {
@@ -229,6 +231,7 @@ func (server *webServer) authorized(response http.ResponseWriter, request *http.
 	if request.URL.Path == "/ui" && request.Method == http.MethodGet {
 		token := request.URL.Query().Get("token")
 		if token != "" && server.validToken(token) {
+			// codeql[go/cookie-secure-not-set] This UI is forced to loopback HTTP; Secure would make the local session unusable.
 			http.SetCookie(response, &http.Cookie{
 				Name:     uiSessionCookie,
 				Value:    server.session,
@@ -265,6 +268,22 @@ func (server *webServer) render(response http.ResponseWriter, request *http.Requ
 	if err := component.Render(request.Context(), response); err != nil {
 		http.Error(response, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func (server *webServer) recoveryHTML(runID, profileID, kind, message string) string {
+	var builder strings.Builder
+	err := frontend.RecoveryPanel(frontend.RecoveryData{
+		CSRFToken: server.csrf,
+		ProfileID: profileID,
+		RunID:     runID,
+		Kind:      kind,
+		Message:   message,
+		CanRetry:  true,
+	}).Render(context.Background(), &builder)
+	if err != nil {
+		return ""
+	}
+	return builder.String()
 }
 
 func (server *webServer) startData(notice, errorText string) frontend.StartData {
@@ -745,12 +764,13 @@ type webRun struct {
 }
 
 type webRunManager struct {
-	store   ProfileStore
-	broker  *webEventBroker
-	active  map[string]*webRun
-	history map[string]webRunHistory
-	runFunc func(context.Context, webRunRequest, string)
-	mu      sync.Mutex
+	store        ProfileStore
+	broker       *webEventBroker
+	active       map[string]*webRun
+	history      map[string]webRunHistory
+	runFunc      func(context.Context, webRunRequest, string)
+	recoveryHTML func(runID, profileID, kind, message string) string
+	mu           sync.Mutex
 }
 
 func newWebRunManager(store ProfileStore, broker *webEventBroker) *webRunManager {
@@ -876,7 +896,7 @@ func (manager *webRunManager) run(ctx context.Context, request webRunRequest, ru
 		}
 		profileReporter.finishRun(runStatusFailed)
 		manager.broker.Emit(webEvent{Type: "status", RunID: runID, Status: runStatusFailed, Line: "Run failed: " + err.Error()})
-		manager.recover(runID, err)
+		manager.recover(runID, profile.ID, err)
 		manager.broker.Emit(webEvent{Type: "done", RunID: runID, Status: runStatusFailed})
 		return
 	}
@@ -902,7 +922,7 @@ func (manager *webRunManager) fail(profile Profile, state *ProfileState, runID s
 	}
 	manager.broker.Emit(webEvent{Type: "log", RunID: runID, Line: "Run failed: " + err.Error()})
 	manager.broker.Emit(webEvent{Type: "status", RunID: runID, Status: runStatusFailed, Line: "Run failed: " + err.Error()})
-	manager.recover(runID, err)
+	manager.recover(runID, profile.ID, err)
 	manager.broker.Emit(webEvent{Type: "done", RunID: runID, Status: runStatusFailed})
 }
 
@@ -924,9 +944,13 @@ func (manager *webRunManager) emitTerminalStatus(runID, status, line string) {
 	manager.broker.Emit(webEvent{Type: "done", RunID: runID, Status: status})
 }
 
-func (manager *webRunManager) recover(runID string, err error) {
+func (manager *webRunManager) recover(runID, profileID string, err error) {
 	kind, message := classifyWebRecovery(err)
-	manager.broker.Emit(webEvent{Type: "recovery", RunID: runID, Kind: kind, Message: message, Error: err.Error()})
+	event := webEvent{Type: "recovery", RunID: runID, ProfileID: profileID, Kind: kind, Message: message, Error: err.Error()}
+	if manager.recoveryHTML != nil {
+		event.HTML = manager.recoveryHTML(runID, profileID, kind, message)
+	}
+	manager.broker.Emit(event)
 }
 
 func classifyWebRecovery(err error) (string, string) {
@@ -948,6 +972,7 @@ type webEvent struct {
 	ID        int       `json:"-"`
 	Type      string    `json:"type"`
 	RunID     string    `json:"run_id"`
+	ProfileID string    `json:"profile_id,omitempty"`
 	Status    string    `json:"status,omitempty"`
 	Stage     string    `json:"stage,omitempty"`
 	TaskName  string    `json:"task_name,omitempty"`
@@ -958,6 +983,7 @@ type webEvent struct {
 	Error     string    `json:"error,omitempty"`
 	Kind      string    `json:"kind,omitempty"`
 	Message   string    `json:"message,omitempty"`
+	HTML      string    `json:"html,omitempty"`
 	Time      time.Time `json:"time"`
 }
 
@@ -1020,12 +1046,16 @@ func (broker *webEventBroker) Emit(event webEvent) {
 }
 
 func (broker *webEventBroker) Subscribe(runID string, lastID int) (<-chan webEvent, func()) {
-	channel := make(chan webEvent, 128)
 	broker.mu.Lock()
+	replay := make([]webEvent, 0, len(broker.buffer[runID]))
 	for _, event := range broker.buffer[runID] {
 		if event.ID > lastID {
-			channel <- event
+			replay = append(replay, event)
 		}
+	}
+	channel := make(chan webEvent, len(replay)+128)
+	for _, event := range replay {
+		channel <- event
 	}
 	if broker.subscribers[runID] == nil {
 		broker.subscribers[runID] = map[chan webEvent]bool{}

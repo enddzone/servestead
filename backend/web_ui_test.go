@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -197,6 +198,41 @@ func TestWebEventBrokerReplaysAfterLastEventID(t *testing.T) {
 	}
 }
 
+func TestWebEventBrokerReplaysLargeBufferWithoutBlocking(t *testing.T) {
+	broker := newWebEventBroker()
+	for index := range 200 {
+		broker.Emit(webEvent{Type: "log", RunID: "run-1", Line: strconv.Itoa(index)})
+	}
+
+	type subscription struct {
+		events      <-chan webEvent
+		unsubscribe func()
+	}
+	subscribed := make(chan subscription, 1)
+	go func() {
+		events, unsubscribe := broker.Subscribe("run-1", 0)
+		subscribed <- subscription{events: events, unsubscribe: unsubscribe}
+	}()
+
+	var sub subscription
+	select {
+	case sub = <-subscribed:
+	case <-time.After(time.Second):
+		t.Fatal("Subscribe blocked while replaying a large event buffer")
+	}
+	defer sub.unsubscribe()
+	for index := range 200 {
+		select {
+		case event := <-sub.events:
+			if event.Line != strconv.Itoa(index) {
+				t.Fatalf("replayed event %d = %q", index, event.Line)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for replayed event %d", index)
+		}
+	}
+}
+
 func TestClassifyWebRecovery(t *testing.T) {
 	tests := []struct {
 		err  error
@@ -211,6 +247,33 @@ func TestClassifyWebRecovery(t *testing.T) {
 		got, _ := classifyWebRecovery(test.err)
 		if got != test.want {
 			t.Fatalf("classifyWebRecovery(%v) = %s, want %s", test.err, got, test.want)
+		}
+	}
+}
+
+func TestWebRunManagerRecoveryEventIncludesRenderedControls(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{IP: "203.0.113.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newWebServer(store, "token")
+	events, unsubscribe := server.manager.broker.Subscribe("run-1", 0)
+	defer unsubscribe()
+
+	server.manager.fail(profile, &ProfileState{Runs: map[string]SetupRun{"run-1": {ID: "run-1"}}}, "run-1", errString("missing Pangolin administrator credentials"))
+
+	event := nextWebEventOfType(t, events, "recovery")
+	if event.ProfileID != profile.ID {
+		t.Fatalf("recovery profile id = %q, want %q", event.ProfileID, profile.ID)
+	}
+	for _, expected := range []string{
+		`hx-post="/setup/credentials"`,
+		`hx-post="/setup/retry"`,
+		`name="csrf" value="` + server.csrf + `"`,
+	} {
+		if !strings.Contains(event.HTML, expected) {
+			t.Fatalf("recovery HTML missing %q:\n%s", expected, event.HTML)
 		}
 	}
 }
@@ -334,6 +397,7 @@ func TestFrontendRunLogAssetsKeepFixedScrollableColoredTerminal(t *testing.T) {
 	jsText := string(js)
 	for _, expected := range []string{
 		"line.innerHTML = renderTerminalLine(data.line)",
+		"if (data.html)",
 		"function renderTerminalLine",
 		"function applyAnsiCodes",
 		"function logLineClass",
@@ -348,6 +412,20 @@ type authenticatedWebTestServer struct {
 	server *webServer
 	url    string
 	close  func()
+}
+
+func nextWebEventOfType(t *testing.T, events <-chan webEvent, eventType string) webEvent {
+	t.Helper()
+	for {
+		select {
+		case event := <-events:
+			if event.Type == eventType {
+				return event
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s event", eventType)
+		}
+	}
 }
 
 func newAuthenticatedWebTestServer(t *testing.T) (authenticatedWebTestServer, *http.Cookie) {
