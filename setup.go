@@ -122,6 +122,7 @@ const (
 	setupNoProfileSelectedMessage = "no profile selected"
 	setupNoProfileSelectedView    = "No profile selected."
 	setupNoStackSelectedMessage   = "no stack selected"
+	setupProfileStoreUnavailable  = "profile store is unavailable"
 	setupSelectedPlanHeader       = "Selected plan:"
 	setupAdminPublicKeyLabel      = "admin public key"
 	setupKeyCtrlA                 = "ctrl+a"
@@ -559,6 +560,7 @@ type profileSetupModel struct {
 	stackEnvironmentKeys     []string
 	stackEnvironmentDirty    bool
 	profileStore             ProfileStore
+	profileNotice            string
 	stackNotice              string
 	stackGitStatus           string
 	stackHead                string
@@ -1121,9 +1123,11 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 		return model.runSelectedDashboardStage()
 	case "e", "E":
 		model.err = ""
+		model.profileNotice = ""
 		model.screen = profileSetupScreenIntake
 	case "a", "A":
 		model.err = ""
+		model.profileNotice = ""
 		model.screen = profileSetupScreenAdvanced
 	case "s", "S":
 		model.openStacksScreen()
@@ -1288,6 +1292,9 @@ func (model profileSetupModel) updateProfileInput(key tea.KeyMsg, advanced bool)
 			model.screen = profileSetupScreenIntake
 			return model, nil
 		}
+	case setupKeyCtrlS:
+		model.storeFocusedInputs(inputs, advanced)
+		return model.saveSelectedProfileSettings(), nil
 	case "enter":
 		if model.focus < len(inputs)-1 {
 			inputs[model.focus].Blur()
@@ -1395,7 +1402,7 @@ func (model profileSetupModel) saveSelectedGitHubToken(token string) profileSetu
 		return model
 	}
 	if model.profileStore == nil {
-		model.err = "profile store is unavailable"
+		model.err = setupProfileStoreUnavailable
 		return model
 	}
 	choice := &model.profiles[model.selectedIndex]
@@ -1416,7 +1423,7 @@ func (model profileSetupModel) removeSelectedGitHubToken() profileSetupModel {
 		return model
 	}
 	if model.profileStore == nil {
-		model.err = "profile store is unavailable"
+		model.err = setupProfileStoreUnavailable
 		return model
 	}
 	choice := &model.profiles[model.selectedIndex]
@@ -1429,6 +1436,80 @@ func (model profileSetupModel) removeSelectedGitHubToken() profileSetupModel {
 	model.githubTokenNotice = "Removed stored GitHub token from the selected profile."
 	model.err = ""
 	return model
+}
+
+func (model profileSetupModel) saveSelectedProfileSettings() profileSetupModel {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		model.err = setupNoProfileSelectedMessage
+		return model
+	}
+	if model.profileStore == nil {
+		model.err = setupProfileStoreUnavailable
+		return model
+	}
+	options, err := model.optionsForSelectedProfile()
+	if err != nil {
+		model.err = err.Error()
+		return model
+	}
+	if err := validateSavedProfileOptions(options); err != nil {
+		model.err = err.Error()
+		return model
+	}
+
+	choice := &model.profiles[model.selectedIndex]
+	profile := choice.Profile
+	profile.Name = firstNonEmpty(options.Name, profile.IP)
+	profile.InitialSSHUser = firstNonEmpty(options.InitialSSHUser, "root")
+	profile.AdminUser = firstNonEmpty(options.AdminUser, "servestead")
+	profile.PrivateKeyPath = expandUserPath(options.PrivateKeyPath)
+	profile.BaseDomain = strings.TrimSpace(options.BaseDomain)
+	profile.LetsEncryptEmail = strings.TrimSpace(options.LetsEncryptEmail)
+	profile.PangolinAdminEmail = firstNonEmpty(strings.TrimSpace(options.PangolinAdminEmail), profile.LetsEncryptEmail)
+	profile.ConfigRepositoryPath = expandUserPath(strings.TrimSpace(options.ConfigRepositoryPath))
+	if err := model.profileStore.Save(profile, choice.State); err != nil {
+		model.err = err.Error()
+		return model
+	}
+	choice.Profile = profile
+
+	if password := strings.TrimSpace(options.PangolinAdminPassword); password != "" {
+		choice.Secrets.PangolinAdminPassword = password
+		if err := model.profileStore.SaveSecrets(profile.ID, choice.Secrets); err != nil {
+			model.err = err.Error()
+			return model
+		}
+	}
+
+	model.err = ""
+	model.profileNotice = "Saved profile settings."
+	model.setInputsFromChoice(false)
+	model.refreshDashboard()
+	model.screen = profileSetupScreenDashboard
+	return model
+}
+
+func validateSavedProfileOptions(options setupCLIOptions) error {
+	if options.PrivateKeyPath == "" {
+		return errors.New("private key path is required")
+	}
+	if !linuxUsername.MatchString(firstNonEmpty(options.InitialSSHUser, "root")) || !linuxUsername.MatchString(firstNonEmpty(options.AdminUser, "servestead")) {
+		return errors.New("SSH users must be valid Linux usernames")
+	}
+	if options.BaseDomain != "" && !domainName.MatchString(options.BaseDomain) {
+		return errors.New("domain must be a valid base domain such as example.com")
+	}
+	if options.LetsEncryptEmail != "" && !setupEmailLike(options.LetsEncryptEmail) {
+		return errors.New("Let's Encrypt email must be a valid email address")
+	}
+	if options.PangolinAdminEmail != "" && !setupEmailLike(options.PangolinAdminEmail) {
+		return errors.New("Pangolin administrator email must be a valid email address")
+	}
+	return nil
+}
+
+func setupEmailLike(value string) bool {
+	return !strings.ContainsAny(value, " \t\r\n") && strings.Contains(value, "@")
 }
 
 func (model profileSetupModel) moveRepositoryDetailFocus(indexes []int, direction int) profileSetupModel {
@@ -3116,17 +3197,23 @@ func (model profileSetupModel) optionsForSelectedProfile() (setupCLIOptions, err
 		}
 		return strings.TrimSpace(model.inputs[index].Value())
 	}
+	advancedValue := func(index int) string {
+		if index < 0 || index >= len(model.advanced) {
+			return ""
+		}
+		return strings.TrimSpace(model.advanced[index].Value())
+	}
 	options := setupCLIOptions{
 		IP:                    profile.IP,
 		ProfileID:             profile.ID,
-		Name:                  profile.Name,
-		InitialSSHUser:        profile.InitialSSHUser,
-		AdminUser:             profile.AdminUser,
+		Name:                  firstNonEmpty(advancedValue(0), profile.Name),
+		InitialSSHUser:        firstNonEmpty(advancedValue(1), profile.InitialSSHUser),
+		AdminUser:             firstNonEmpty(advancedValue(2), profile.AdminUser),
 		PrivateKeyPath:        expandUserPath(firstNonEmpty(inputValue(1), profile.PrivateKeyPath)),
 		BaseDomain:            firstNonEmpty(inputValue(2), profile.BaseDomain),
 		LetsEncryptEmail:      firstNonEmpty(inputValue(3), profile.LetsEncryptEmail),
-		PangolinAdminEmail:    firstNonEmpty(strings.TrimSpace(model.advanced[3].Value()), profile.PangolinAdminEmail, firstNonEmpty(inputValue(3), profile.LetsEncryptEmail)),
-		PangolinAdminPassword: strings.TrimSpace(model.advanced[4].Value()),
+		PangolinAdminEmail:    firstNonEmpty(advancedValue(3), profile.PangolinAdminEmail, firstNonEmpty(inputValue(3), profile.LetsEncryptEmail)),
+		PangolinAdminPassword: advancedValue(4),
 	}
 	switch model.repositoryMode {
 	case "create", "existing":
@@ -3250,6 +3337,10 @@ func (model profileSetupModel) dashboardView() string {
 		builder.WriteString(fmt.Sprintf("Config repository: %s\n", repositoryPath))
 	}
 	builder.WriteString(fmt.Sprintf("GitHub token: %s\n\n", githubTokenStatusSummary(choice.Secrets)))
+	if model.profileNotice != "" {
+		builder.WriteString(setupHelpStyle.Render(model.profileNotice))
+		builder.WriteString("\n\n")
+	}
 	builder.WriteString(model.pangolinRegistrationView(choice))
 	builder.WriteString("\n\n")
 	if choice.Profile.Cloud != nil {
@@ -3600,6 +3691,11 @@ func (model profileSetupModel) inputView(advanced bool) string {
 			builder.WriteString(input.View())
 			builder.WriteString("\n")
 		}
+		if model.selectedIndex >= 0 {
+			builder.WriteString("\n")
+			builder.WriteString(setupHelpStyle.Render("Press ctrl+s to save profile settings without starting a run."))
+			builder.WriteString("\n")
+		}
 		return builder.String()
 	}
 	builder.WriteString("Upfront setup intake\n")
@@ -3611,6 +3707,10 @@ func (model profileSetupModel) inputView(advanced bool) string {
 	}
 	builder.WriteString("\n")
 	builder.WriteString("Server secret: generated and saved in the profile secrets file.\n")
+	if model.selectedIndex >= 0 {
+		builder.WriteString(setupHelpStyle.Render("Press ctrl+s to save profile settings without starting a run."))
+		builder.WriteString("\n")
+	}
 	return builder.String()
 }
 
@@ -3785,19 +3885,9 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		}
 	case profileSetupScreenIntake:
-		return []key.Binding{
-			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "next")),
-			key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "field")),
-			key.NewBinding(key.WithKeys(setupKeyCtrlA), key.WithHelp(setupKeyCtrlA, "advanced")),
-			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-		}
+		return profileIntakeHelp(helpMap.hasProfile)
 	case profileSetupScreenAdvanced:
-		return []key.Binding{
-			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "review")),
-			key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "field")),
-			key.NewBinding(key.WithKeys(setupKeyCtrlE), key.WithHelp(setupKeyCtrlE, "intake")),
-			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-		}
+		return profileAdvancedHelp(helpMap.hasProfile)
 	case profileSetupScreenRepository:
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "select")),
@@ -3955,6 +4045,33 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 
 func (helpMap profileSetupHelp) FullHelp() [][]key.Binding {
 	return [][]key.Binding{helpMap.ShortHelp()}
+}
+
+func profileIntakeHelp(hasProfile bool) []key.Binding {
+	bindings := []key.Binding{
+		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "next")),
+		key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "field")),
+		key.NewBinding(key.WithKeys(setupKeyCtrlA), key.WithHelp(setupKeyCtrlA, "advanced")),
+		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+	}
+	return prependProfileSaveHelp(bindings, hasProfile)
+}
+
+func profileAdvancedHelp(hasProfile bool) []key.Binding {
+	bindings := []key.Binding{
+		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "review")),
+		key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "field")),
+		key.NewBinding(key.WithKeys(setupKeyCtrlE), key.WithHelp(setupKeyCtrlE, "intake")),
+		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+	}
+	return prependProfileSaveHelp(bindings, hasProfile)
+}
+
+func prependProfileSaveHelp(bindings []key.Binding, hasProfile bool) []key.Binding {
+	if !hasProfile {
+		return bindings
+	}
+	return append([]key.Binding{key.NewBinding(key.WithKeys(setupKeyCtrlS), key.WithHelp(setupKeyCtrlS, "save"))}, bindings...)
 }
 
 func clampInt(value, minimum, maximum int) int {
