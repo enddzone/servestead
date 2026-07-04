@@ -39,6 +39,11 @@ jobs:
       - name: Run govulncheck
         run: govulncheck ./...
 
+      - name: Check frontend assets
+        run: |
+          test -s frontend/assets/htmx.min.js
+          test -s frontend/assets/htmx-ext-sse.js
+
   dependency-review:
     name: Dependency review
     runs-on: ubuntu-latest

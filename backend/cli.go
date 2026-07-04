@@ -15,6 +15,7 @@ const usage = `Servestead provisions and hardens Ubuntu VPS instances.
 
 Usage:
   servestead setup
+  servestead ui
 
 Direct commands:
   servestead keygen
@@ -71,6 +72,7 @@ func cliHandlers(ctx context.Context, args []string, stdout, stderr io.Writer, g
 		"keygen":               func() error { return runKeygen(ctx, args, stdout, stderr) },
 		"stack":                func() error { return runStack(ctx, args, stdout, stderr) },
 		"setup":                func() error { return runSetup(ctx, args, stdout, stderr) },
+		"ui":                   func() error { return runUI(ctx, args, stdout, stderr, getenv) },
 		"doctor":               func() error { return runDoctor(args, stdout, stderr) },
 	}
 }

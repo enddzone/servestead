@@ -8,8 +8,10 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/servestead .
+COPY backend ./backend
+COPY frontend ./frontend
+RUN go tool templ generate
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/servestead ./backend
 
 FROM cgr.dev/chainguard/git:latest-glibc
 COPY --from=build /out/servestead /servestead

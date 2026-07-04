@@ -19,10 +19,11 @@ import (
 )
 
 const (
-	runStatusPlanned  = "planned"
-	runStatusRunning  = "running"
-	runStatusComplete = "complete"
-	runStatusFailed   = "failed"
+	runStatusPlanned   = "planned"
+	runStatusRunning   = "running"
+	runStatusComplete  = "complete"
+	runStatusFailed    = "failed"
+	runStatusCancelled = "cancelled"
 
 	stageStatusPending  = "pending"
 	stageStatusRunning  = "running"

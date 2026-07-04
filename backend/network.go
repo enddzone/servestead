@@ -10,7 +10,7 @@ import (
 	"os"
 	"strings"
 
-	"servestead/resources"
+	"servestead/backend/resources"
 )
 
 type networkConfig struct {

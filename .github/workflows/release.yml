@@ -48,6 +48,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Generate templ components
+        run: go tool templ generate
+
+      - name: Check generated templ output
+        run: git diff --exit-code -- frontend
+
       - name: Install Syft
         run: |
           mkdir -p "$HOME/.local/bin"

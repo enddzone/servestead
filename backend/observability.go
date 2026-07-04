@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"servestead/resources"
+	"servestead/backend/resources"
 )
 
 const observabilityStackDirectory = "/opt/servestead/stacks/observability"
