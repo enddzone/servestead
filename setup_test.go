@@ -851,6 +851,96 @@ func TestOptionsForSelectedProfileUsesEditedIntakeValues(t *testing.T) {
 	}
 }
 
+func TestSavedProfileSettingsCanBeUpdatedFromIntake(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		ID:                 setupTestProfileID,
+		Name:               "production",
+		IP:                 setupTestHost,
+		InitialSSHUser:     "root",
+		AdminUser:          "servestead",
+		PrivateKeyPath:     setupTestPrivateKey,
+		BaseDomain:         "mngo.org",
+		LetsEncryptEmail:   setupTestEmail,
+		PangolinAdminEmail: setupTestEmail,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, state, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel([]profileChoice{{Profile: profile, State: state}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.setInputsFromChoice(false)
+	model.screen = profileSetupScreenIntake
+	model.inputs[2].SetValue("mngo.pro")
+
+	updated, command := model.updateProfileInput(keyCtrl('s'), false)
+	result := updated.(profileSetupModel)
+	if command != nil || result.screen != profileSetupScreenDashboard || result.err != "" {
+		t.Fatalf("saving profile settings did not return to dashboard cleanly: %+v", result)
+	}
+	if result.profiles[0].Profile.BaseDomain != "mngo.pro" || result.profileNotice == "" {
+		t.Fatalf("saved profile was not reflected in the TUI model: %+v", result.profiles[0].Profile)
+	}
+	loadedProfile, _, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedProfile.BaseDomain != "mngo.pro" {
+		t.Fatalf("saved profile domain was not persisted: %+v", loadedProfile)
+	}
+	_, _, config, err := prepareProfileStageSetup(setupCLIOptions{ProfileID: profile.ID}, store, "platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.BaseDomain != "mngo.pro" {
+		t.Fatalf("platform stage did not use saved profile domain: %+v", config)
+	}
+}
+
+func TestSavedProfileSettingsRejectInvalidDomain(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		ID:               setupTestProfileID,
+		IP:               setupTestHost,
+		InitialSSHUser:   "root",
+		AdminUser:        "servestead",
+		PrivateKeyPath:   setupTestPrivateKey,
+		BaseDomain:       setupTestDomain,
+		LetsEncryptEmail: setupTestEmail,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, state, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel([]profileChoice{{Profile: profile, State: state}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.setInputsFromChoice(false)
+	model.screen = profileSetupScreenIntake
+	model.inputs[2].SetValue("not a domain")
+
+	updated, command := model.updateProfileInput(keyCtrl('s'), false)
+	result := updated.(profileSetupModel)
+	if command != nil || result.screen != profileSetupScreenIntake || !strings.Contains(result.err, "valid base domain") {
+		t.Fatalf("invalid profile domain was not rejected: %+v", result)
+	}
+	loadedProfile, _, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedProfile.BaseDomain != setupTestDomain {
+		t.Fatalf("invalid domain changed the saved profile: %+v", loadedProfile)
+	}
+}
+
 func TestFailedStackSyncRetryCollectsPangolinCredentials(t *testing.T) {
 	state := ProfileState{
 		ActiveRunID: setupTestFailedRunID,
