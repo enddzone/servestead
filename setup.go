@@ -122,6 +122,7 @@ const (
 	setupNoProfileSelectedMessage = "no profile selected"
 	setupNoProfileSelectedView    = "No profile selected."
 	setupNoStackSelectedMessage   = "no stack selected"
+	setupProfileStoreUnavailable  = "profile store is unavailable"
 	setupSelectedPlanHeader       = "Selected plan:"
 	setupAdminPublicKeyLabel      = "admin public key"
 	setupKeyCtrlA                 = "ctrl+a"
@@ -1401,7 +1402,7 @@ func (model profileSetupModel) saveSelectedGitHubToken(token string) profileSetu
 		return model
 	}
 	if model.profileStore == nil {
-		model.err = "profile store is unavailable"
+		model.err = setupProfileStoreUnavailable
 		return model
 	}
 	choice := &model.profiles[model.selectedIndex]
@@ -1422,7 +1423,7 @@ func (model profileSetupModel) removeSelectedGitHubToken() profileSetupModel {
 		return model
 	}
 	if model.profileStore == nil {
-		model.err = "profile store is unavailable"
+		model.err = setupProfileStoreUnavailable
 		return model
 	}
 	choice := &model.profiles[model.selectedIndex]
@@ -1443,7 +1444,7 @@ func (model profileSetupModel) saveSelectedProfileSettings() profileSetupModel {
 		return model
 	}
 	if model.profileStore == nil {
-		model.err = "profile store is unavailable"
+		model.err = setupProfileStoreUnavailable
 		return model
 	}
 	options, err := model.optionsForSelectedProfile()
@@ -3196,17 +3197,23 @@ func (model profileSetupModel) optionsForSelectedProfile() (setupCLIOptions, err
 		}
 		return strings.TrimSpace(model.inputs[index].Value())
 	}
+	advancedValue := func(index int) string {
+		if index < 0 || index >= len(model.advanced) {
+			return ""
+		}
+		return strings.TrimSpace(model.advanced[index].Value())
+	}
 	options := setupCLIOptions{
 		IP:                    profile.IP,
 		ProfileID:             profile.ID,
-		Name:                  profile.Name,
-		InitialSSHUser:        profile.InitialSSHUser,
-		AdminUser:             profile.AdminUser,
+		Name:                  firstNonEmpty(advancedValue(0), profile.Name),
+		InitialSSHUser:        firstNonEmpty(advancedValue(1), profile.InitialSSHUser),
+		AdminUser:             firstNonEmpty(advancedValue(2), profile.AdminUser),
 		PrivateKeyPath:        expandUserPath(firstNonEmpty(inputValue(1), profile.PrivateKeyPath)),
 		BaseDomain:            firstNonEmpty(inputValue(2), profile.BaseDomain),
 		LetsEncryptEmail:      firstNonEmpty(inputValue(3), profile.LetsEncryptEmail),
-		PangolinAdminEmail:    firstNonEmpty(strings.TrimSpace(model.advanced[3].Value()), profile.PangolinAdminEmail, firstNonEmpty(inputValue(3), profile.LetsEncryptEmail)),
-		PangolinAdminPassword: strings.TrimSpace(model.advanced[4].Value()),
+		PangolinAdminEmail:    firstNonEmpty(advancedValue(3), profile.PangolinAdminEmail, firstNonEmpty(inputValue(3), profile.LetsEncryptEmail)),
+		PangolinAdminPassword: advancedValue(4),
 	}
 	switch model.repositoryMode {
 	case "create", "existing":

@@ -902,6 +902,49 @@ func TestSavedProfileSettingsCanBeUpdatedFromIntake(t *testing.T) {
 	}
 }
 
+func TestSavedProfileSettingsCanBeUpdatedFromAdvanced(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		ID:                 setupTestProfileID,
+		Name:               "production",
+		IP:                 setupTestHost,
+		InitialSSHUser:     "root",
+		AdminUser:          "servestead",
+		PrivateKeyPath:     setupTestPrivateKey,
+		BaseDomain:         setupTestDomain,
+		LetsEncryptEmail:   setupTestEmail,
+		PangolinAdminEmail: setupTestEmail,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, state, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel([]profileChoice{{Profile: profile, State: state}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.setInputsFromChoice(false)
+	model.screen = profileSetupScreenAdvanced
+	model.advanced[0].SetValue("renamed")
+	model.advanced[1].SetValue("ubuntu")
+	model.advanced[2].SetValue("adminuser")
+
+	updated, command := model.updateProfileInput(keyCtrl('s'), true)
+	result := updated.(profileSetupModel)
+	if command != nil || result.screen != profileSetupScreenDashboard || result.err != "" {
+		t.Fatalf("saving advanced profile settings did not return to dashboard cleanly: %+v", result)
+	}
+	loadedProfile, _, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedProfile.Name != "renamed" || loadedProfile.InitialSSHUser != "ubuntu" || loadedProfile.AdminUser != "adminuser" {
+		t.Fatalf("advanced profile values were not persisted: %+v", loadedProfile)
+	}
+}
+
 func TestSavedProfileSettingsRejectInvalidDomain(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
 	profile, err := store.Create(Profile{
