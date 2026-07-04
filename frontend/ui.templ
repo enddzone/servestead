@@ -1,0 +1,277 @@
+package frontend
+
+import (
+	"strings"
+)
+
+templ Shell(data ShellData, content templ.Component) {
+	<!doctype html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ data.Title }</title>
+			<link rel="stylesheet" href="/assets/servestead.css"/>
+			<script src="/assets/htmx.min.js" defer></script>
+			<script src="/assets/htmx-ext-sse.js" defer></script>
+			<script src="/assets/servestead.js" defer></script>
+		</head>
+		<body>
+			<main class="page">
+				<header class="topbar">
+					<div>
+						<p class="eyebrow">Servestead web</p>
+						<h1>Setup Workbench</h1>
+					</div>
+					<form method="post" action="/shutdown">
+						<input type="hidden" name="csrf" value={ data.CSRFToken }/>
+						<button class="ghost" type="submit">Shutdown</button>
+					</form>
+				</header>
+				if data.Notice != "" {
+					<div class="notice">{ data.Notice }</div>
+				}
+				if data.Error != "" {
+					<div class="alert">{ data.Error }</div>
+				}
+				<section id="workbench" class="workbench">
+					@content
+				</section>
+			</main>
+		</body>
+	</html>
+}
+
+templ StartPanel(data StartData) {
+	<div class="layout-three" id="workbench">
+		<aside class="rail">
+			<h2>Plan steps</h2>
+			<div class="step active">Start</div>
+			<div class="step">Profile</div>
+			<div class="step">GitOps</div>
+			<div class="step">Review</div>
+			<div class="step">Run</div>
+		</aside>
+		<section class="panel">
+			<h2>What are you setting up?</h2>
+			if data.Notice != "" {
+				<div class="notice">{ data.Notice }</div>
+			}
+			if data.Error != "" {
+				<div class="alert">{ data.Error }</div>
+			}
+			<form hx-post="/setup/intent" hx-target="#workbench" hx-swap="outerHTML" method="post" class="stack">
+				<input type="hidden" name="csrf" value={ data.CSRFToken }/>
+				<label class="choice">
+					<input type="radio" name="intent" value="existing" checked/>
+					<span><strong>Use an existing VPS</strong><small>Collect SSH, domain, and repository inputs before remote work.</small></span>
+				</label>
+				<label class="choice">
+					<input type="radio" name="intent" value="resume"/>
+					<span><strong>Resume a saved profile</strong><small>Run the next platform stage from an existing profile.</small></span>
+				</label>
+				<label class="choice">
+					<input type="radio" name="intent" value="provision"/>
+					<span><strong>Provision a new DigitalOcean VPS</strong><small>Deferred from this web slice; use the existing setup TUI for now.</small></span>
+				</label>
+				if len(data.Profiles) > 0 {
+					<label>
+						<span>Saved profile</span>
+						<select name="profile_id">
+							for _, profile := range data.Profiles {
+								<option value={ profile.ID }>{ profile.Name } ({ profile.IP }) - { profile.Status }</option>
+							}
+						</select>
+					</label>
+				}
+				<button class="primary" type="submit">Continue</button>
+			</form>
+		</section>
+		<aside class="drawer">
+			<h2>Safety</h2>
+			<p>No billable cloud action starts from this phase. Remote setup requires review confirmation.</p>
+		</aside>
+	</div>
+}
+
+templ ProfileValuesPanel(data ProfileFormData) {
+	<div class="layout-three" id="workbench">
+		@steps("Profile")
+		<section class="panel">
+			<h2>Required values</h2>
+			@errorList(data.Errors)
+			<form hx-post="/setup/profile-values" hx-target="#workbench" hx-swap="outerHTML" method="post" class="grid-form">
+				@profileMetaHidden(data)
+				<label><span>Profile name</span><input name="name" value={ data.Name } placeholder="production-vps"/></label>
+				<label><span>Server IP or hostname</span><input name="ip" value={ data.IP } placeholder="203.0.113.10"/></label>
+				<label><span>Private key</span><input name="private_key" value={ data.PrivateKeyPath } placeholder="~/.ssh/servestead_ed25519"/></label>
+				<label><span>Base domain</span><input name="domain" value={ data.BaseDomain } placeholder="example.com"/></label>
+				<label><span>Let's Encrypt email</span><input name="email" value={ data.LetsEncryptEmail } placeholder="admin@example.com"/></label>
+				<label><span>Pangolin admin email</span><input name="pangolin_admin_email" value={ data.PangolinAdminEmail } placeholder="defaults to Let's Encrypt email"/></label>
+				<label><span>Initial SSH user</span><input name="initial_ssh_user" value={ data.InitialSSHUser } placeholder="root"/></label>
+				<label><span>Admin SSH user</span><input name="admin_user" value={ data.AdminUser } placeholder="servestead"/></label>
+				<label><span>Pangolin admin password</span><input type="password" name="pangolin_admin_password" placeholder={ data.PangolinAdminStatus }/></label>
+				<div class="form-actions">
+					<button type="button" hx-get="/setup/start" hx-target="#workbench" hx-swap="outerHTML">Back</button>
+					<button class="primary" type="submit">Continue to GitOps</button>
+				</div>
+			</form>
+		</section>
+		<aside class="drawer">
+			<h2>Validation</h2>
+			<p>Values are checked on the server. Secrets are accepted but never rendered back to the browser.</p>
+		</aside>
+	</div>
+}
+
+templ RepositoryPanel(data RepositoryFormData) {
+	<div class="layout-three" id="workbench">
+		@steps("GitOps")
+		<section class="panel">
+			<h2>GitOps repository</h2>
+			@errorList(data.Errors)
+			<form hx-post="/setup/repository" hx-target="#workbench" hx-swap="outerHTML" method="post" class="grid-form">
+				@profileHidden(data.ProfileFormData)
+				<label>
+					<span>Repository mode</span>
+					<select name="repository_mode">
+						<option value="create" selected?={ data.RepositoryMode == "create" }>Create local repository</option>
+						<option value="existing" selected?={ data.RepositoryMode == "existing" }>Use existing local checkout</option>
+						<option value="github" selected?={ data.RepositoryMode == "github" }>Clone GitHub repository</option>
+					</select>
+				</label>
+				<label><span>Local checkout path</span><input name="config_repo" value={ data.ConfigRepository } placeholder="profile default"/></label>
+				<label><span>GitHub HTTPS URL</span><input name="github_repo" value={ data.GitHubRepositoryURL } placeholder="https://github.com/owner/repo.git"/></label>
+				<label><span>GitHub PAT</span><input type="password" name="github_pat" placeholder="optional; stored in the profile if provided"/></label>
+				<div class="form-actions">
+					<button type="button" hx-post="/setup/intent" hx-target="#workbench" hx-swap="outerHTML" name="intent" value={ data.Intent }>Back</button>
+					<button class="primary" type="submit">Review</button>
+				</div>
+			</form>
+		</section>
+		<aside class="drawer">
+			<h2>Repository rule</h2>
+			<p>Deployment uses committed configuration. Dirty repository state becomes a recovery step.</p>
+		</aside>
+	</div>
+}
+
+templ ReviewPanel(data ReviewData) {
+	<div class="layout-three" id="workbench">
+		@steps("Review")
+		<section class="panel">
+			<h2>Review and confirm</h2>
+			<div class="review">
+				<pre>{ strings.TrimSpace(data.Plan) }</pre>
+			</div>
+			<div class="summary-list">
+				<div><strong>Run</strong><span>{ data.RunLine }</span></div>
+				<div><strong>Repository</strong><span>{ data.RepositoryLine }</span></div>
+			</div>
+			<form hx-post="/setup/run" hx-target="#workbench" hx-swap="outerHTML" method="post">
+				@profileHidden(data.ProfileFormData)
+				<input type="hidden" name="repository_mode" value={ data.RepositoryMode }/>
+				<button class="primary" type="submit">Run after review</button>
+			</form>
+		</section>
+		<aside class="drawer">
+			<h2>Before execution</h2>
+			<p>Preflight and repository preparation run before any SSH command starts.</p>
+		</aside>
+	</div>
+}
+
+templ RunPanel(data RunData) {
+	<div class="run-grid" id="workbench" data-run-stream={ data.StreamURL }>
+		<section class="panel run-status-panel">
+			<div class="run-status-main">
+				<h2>Run status</h2>
+				<div id="run-status" class="status">{ data.Status }</div>
+				<div class="progress"><span style="width: 0%"></span></div>
+			</div>
+			<div class="run-actions">
+				<form hx-post="/setup/cancel" hx-target="#run-status" hx-swap="innerHTML" method="post">
+					<input type="hidden" name="csrf" value={ data.CSRFToken }/>
+					<input type="hidden" name="profile_id" value={ data.ProfileID }/>
+					<input type="hidden" name="run_id" value={ data.RunID }/>
+					<button class="danger" type="submit">Cancel safely</button>
+				</form>
+			</div>
+		</section>
+		<section class="log-panel">
+			<h2>Logs</h2>
+			<div id="run-log" class="log"></div>
+			<div id="recovery-panel"></div>
+		</section>
+	</div>
+}
+
+templ RecoveryPanel(data RecoveryData) {
+	<div class="recovery">
+		<div class="alert"><strong>{ data.Kind }</strong><span>{ data.Message }</span></div>
+		if data.Kind == "missing_credentials" {
+			<form hx-post="/setup/credentials" hx-target="#recovery-panel" hx-swap="innerHTML" method="post" class="grid-form">
+				<input type="hidden" name="csrf" value={ data.CSRFToken }/>
+				<input type="hidden" name="profile_id" value={ data.ProfileID }/>
+				<input type="hidden" name="run_id" value={ data.RunID }/>
+				<label><span>Pangolin admin email</span><input name="pangolin_admin_email"/></label>
+				<label><span>Pangolin admin password</span><input type="password" name="pangolin_admin_password"/></label>
+				<label><span>GitHub PAT</span><input type="password" name="github_pat"/></label>
+				<button class="primary" type="submit">Save credentials</button>
+			</form>
+		}
+		if data.CanRetry {
+			<form hx-post="/setup/retry" hx-target="#workbench" hx-swap="outerHTML" method="post">
+				<input type="hidden" name="csrf" value={ data.CSRFToken }/>
+				<input type="hidden" name="profile_id" value={ data.ProfileID }/>
+				<input type="hidden" name="run_id" value={ data.RunID }/>
+				<button class="primary" type="submit">Retry</button>
+			</form>
+		}
+	</div>
+}
+
+templ steps(active string) {
+	<aside class="rail">
+		<h2>Plan steps</h2>
+		for _, step := range []string{"Start", "Profile", "GitOps", "Review", "Run"} {
+			<div class={ templ.KV("step", true), templ.KV("active", active == step) }>{ step }</div>
+		}
+	</aside>
+}
+
+templ errorList(errors []string) {
+	if len(errors) > 0 {
+		<div class="alert">
+			for _, err := range errors {
+				<div>{ err }</div>
+			}
+		</div>
+	}
+}
+
+templ profileHidden(data ProfileFormData) {
+	<input type="hidden" name="csrf" value={ data.CSRFToken }/>
+	<input type="hidden" name="draft_id" value={ data.DraftID }/>
+	<input type="hidden" name="intent" value={ data.Intent }/>
+	<input type="hidden" name="target" value={ data.Target }/>
+	<input type="hidden" name="profile_id" value={ data.ProfileID }/>
+	<input type="hidden" name="name" value={ data.Name }/>
+	<input type="hidden" name="ip" value={ data.IP }/>
+	<input type="hidden" name="private_key" value={ data.PrivateKeyPath }/>
+	<input type="hidden" name="domain" value={ data.BaseDomain }/>
+	<input type="hidden" name="email" value={ data.LetsEncryptEmail }/>
+	<input type="hidden" name="initial_ssh_user" value={ data.InitialSSHUser }/>
+	<input type="hidden" name="admin_user" value={ data.AdminUser }/>
+	<input type="hidden" name="pangolin_admin_email" value={ data.PangolinAdminEmail }/>
+	<input type="hidden" name="config_repo" value={ data.ConfigRepository }/>
+	<input type="hidden" name="github_repo" value={ data.GitHubRepositoryURL }/>
+}
+
+templ profileMetaHidden(data ProfileFormData) {
+	<input type="hidden" name="csrf" value={ data.CSRFToken }/>
+	<input type="hidden" name="draft_id" value={ data.DraftID }/>
+	<input type="hidden" name="intent" value={ data.Intent }/>
+	<input type="hidden" name="target" value={ data.Target }/>
+	<input type="hidden" name="profile_id" value={ data.ProfileID }/>
+}

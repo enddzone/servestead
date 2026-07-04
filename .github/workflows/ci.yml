@@ -31,6 +31,19 @@ jobs:
       - name: Download modules
         run: go mod download
 
+      - name: Generate templ components
+        run: go tool templ generate
+
+      - name: Check generated templ output
+        run: git diff --exit-code -- frontend
+
+      - name: Check frontend assets
+        run: |
+          test -s frontend/assets/htmx.min.js
+          test -s frontend/assets/htmx-ext-sse.js
+          test -s frontend/assets/servestead.css
+          test -s frontend/assets/servestead.js
+
       - name: Install golangci-lint
         uses: golangci/golangci-lint-action@v9.3.0
         with:

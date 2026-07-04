@@ -11,7 +11,7 @@ import (
 	"regexp"
 	"strings"
 
-	"servestead/resources"
+	"servestead/backend/resources"
 )
 
 const proxyStackDirectory = "/opt/servestead/proxy"

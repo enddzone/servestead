@@ -18,7 +18,7 @@ func TestHelp(t *testing.T) {
 }
 
 func TestSubcommandHelpIsSuccessful(t *testing.T) {
-	for _, command := range []string{"provision", "bootstrap", "harden", "network", "proxy", "pangolin-credentials", "keygen", "setup", "doctor"} {
+	for _, command := range []string{"provision", "bootstrap", "harden", "network", "proxy", "pangolin-credentials", "keygen", "setup", "ui", "doctor"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			if err := run(context.Background(), []string{command, "-help"}, &stdout, &stderr, func(string) string { return "" }); err != nil {

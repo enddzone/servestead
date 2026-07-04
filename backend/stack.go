@@ -17,7 +17,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"servestead/resources"
+	"servestead/backend/resources"
 )
 
 const stackMetadataFilename = "servestead.yaml"

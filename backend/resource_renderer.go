@@ -7,7 +7,7 @@ import (
 	"strings"
 	"text/template"
 
-	"servestead/resources"
+	"servestead/backend/resources"
 )
 
 func mustReadResource(resourcePath string) string {
