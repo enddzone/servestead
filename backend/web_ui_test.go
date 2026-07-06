@@ -82,7 +82,7 @@ func TestWebUIAuthTokenCookieAndCSRF(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := readResponseBody(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Setup Workbench") {
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Command Center") {
 		t.Fatalf("authorized /ui status/body = %d/%q", response.StatusCode, body)
 	}
 
@@ -149,9 +149,15 @@ func TestWebUIProvisioningIsDeferred(t *testing.T) {
 func TestWebUIStartReviewAndShutdownRoutes(t *testing.T) {
 	server, cookie := newAuthenticatedWebTestServer(t)
 
-	response := authenticatedWebRequest(t, server.url+"/setup/start", http.MethodGet, cookie, nil)
+	response := authenticatedWebRequest(t, server.url+"/setup", http.MethodGet, cookie, nil)
 	body := readResponseBody(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "What are you setting up?") {
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Setup Workbench") || !strings.Contains(body, "Choose a setup path") {
+		t.Fatalf("setup shell status/body = %d/%q", response.StatusCode, body)
+	}
+
+	response = authenticatedWebRequest(t, server.url+"/setup/start", http.MethodGet, cookie, nil)
+	body = readResponseBody(t, response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Choose a setup path") {
 		t.Fatalf("start status/body = %d/%q", response.StatusCode, body)
 	}
 
@@ -850,6 +856,408 @@ func TestWebRunManagerRunFailsDuringPreflightWithoutRemoteWork(t *testing.T) {
 	}
 }
 
+func TestWebOpsProfilesDrawerStacksAndGitOps(t *testing.T) {
+	requireGit(t)
+	server, cookie := newAuthenticatedWebTestServer(t)
+	repository := createOpsStackRepository(t, false)
+	profile := createOpsProfile(t, server.server.store, repository)
+
+	response := authenticatedWebRequest(t, server.url+"/ops/profiles", http.MethodGet, cookie, nil)
+	body := readResponseBody(t, response)
+	requireBodyContains(t, body, "ops profiles response", "Profile Diagnostics", "ops-vps", "changes pending", "Setup workbench")
+
+	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/drawer", http.MethodGet, cookie, nil)
+	body = readResponseBody(t, response)
+	requireBodyContains(t, body, "ops drawer response", "Stack Inventory", "site", "metadata missing")
+
+	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/gitops", http.MethodGet, cookie, nil)
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "Untracked: stacks/site/compose.yaml") {
+		t.Fatalf("gitops diff missing untracked stack:\n%s", body)
+	}
+
+	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/gitops/review", http.MethodGet, cookie, nil)
+	body = readResponseBody(t, response)
+	requireBodyContains(t, body, "gitops review response", "GitOps Review", "Deploy checklist", "Repository actions")
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/gitops/commit", cookie, url.Values{"csrf": {server.server.csrf}, "message": {"Add site"}})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "no staged stack changes") {
+		t.Fatalf("commit without stage should fail:\n%s", body)
+	}
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/gitops/stage", cookie, url.Values{"csrf": {server.server.csrf}})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "GitOps stage complete") || !strings.Contains(body, "Staged changes") {
+		t.Fatalf("stage response incomplete:\n%s", body)
+	}
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/gitops/commit", cookie, url.Values{"csrf": {server.server.csrf}, "message": {"Add site stack"}})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "GitOps commit complete") || !strings.Contains(body, "clean") {
+		t.Fatalf("commit response incomplete:\n%s", body)
+	}
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/gitops/push", cookie, url.Values{"csrf": {server.server.csrf}})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "configuration repository has no origin remote") {
+		t.Fatalf("push without origin should fail:\n%s", body)
+	}
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/gitops/stage", cookie, url.Values{})
+	_ = readResponseBody(t, response)
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("ops POST without CSRF status = %d, want forbidden", response.StatusCode)
+	}
+}
+
+func TestWebOpsRunStageStartsFakeRunnerAndRejectsDuplicate(t *testing.T) {
+	requireGit(t)
+	server, cookie := newAuthenticatedWebTestServer(t)
+	repository := createOpsStackRepository(t, true)
+	profile := createOpsProfile(t, server.server.store, repository)
+	if err := server.server.store.SaveSecrets(profile.ID, ProfileSecrets{PangolinAdminPassword: "Secret1!x", GitHubToken: "github_pat_ops"}); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan webRunRequest, 1)
+	release := make(chan struct{})
+	server.server.manager.runFunc = func(ctx context.Context, request webRunRequest, runID string) {
+		started <- request
+		<-release
+		server.server.manager.finishActive(request.Profile.ID)
+		server.server.manager.broker.Emit(webEvent{Type: "done", RunID: runID, Status: runStatusComplete})
+	}
+
+	response := postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/runs/stage", cookie, url.Values{"csrf": {server.server.csrf}, "stage": {"stack:site"}})
+	body := readResponseBody(t, response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `data-run-stream="/events/runs/`) {
+		t.Fatalf("run stage response status/body = %d/%q", response.StatusCode, body)
+	}
+	select {
+	case request := <-started:
+		if request.Stage != "stack:site" || request.Profile.ID != profile.ID {
+			t.Fatalf("started request = %+v", request)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fake stage run did not start")
+	}
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/runs/stage", cookie, url.Values{"csrf": {server.server.csrf}, "stage": {"stacks"}})
+	_ = readResponseBody(t, response)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate run status = %d, want conflict", response.StatusCode)
+	}
+	close(release)
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/runs/stage", cookie, url.Values{"csrf": {server.server.csrf}, "stage": {"bad stage"}})
+	_ = readResponseBody(t, response)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid stage status = %d, want bad request", response.StatusCode)
+	}
+}
+
+func TestWebOpsStackEditorSavesAndRenamesStacks(t *testing.T) {
+	requireGit(t)
+	server, cookie := newAuthenticatedWebTestServer(t)
+	repository := createOpsStackRepository(t, true)
+	profile := createOpsProfile(t, server.server.store, repository)
+
+	response := authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/stacks/new", http.MethodGet, cookie, nil)
+	body := readResponseBody(t, response)
+	if !strings.Contains(body, "Add Stack") || !strings.Contains(body, "compose.yaml") || !strings.Contains(body, "Public resources") {
+		t.Fatalf("new stack editor response incomplete:\n%s", body)
+	}
+	if strings.Contains(body, "servestead.yaml") || strings.Contains(body, `name="metadata"`) {
+		t.Fatalf("stack editor exposed raw metadata:\n%s", body)
+	}
+
+	form := url.Values{
+		"csrf":    {server.server.csrf},
+		"name":    {"blog"},
+		"compose": {opsStackTestCompose()},
+	}
+	addOpsStackResourceForm(form, "blog")
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/stacks/save", cookie, form)
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "Stack blog saved") || !strings.Contains(body, "blog") {
+		t.Fatalf("stack save response incomplete:\n%s", body)
+	}
+	stacks, err := loadEditableStacks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !editableStackExists(stacks, "blog") {
+		t.Fatalf("saved stack not found: %+v", stacks)
+	}
+
+	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/stacks/blog/edit", http.MethodGet, cookie, nil)
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "Edit Stack") || !strings.Contains(body, "blog") || !strings.Contains(body, `name="resource_subdomain"`) {
+		t.Fatalf("edit stack response incomplete:\n%s", body)
+	}
+
+	renamed := cloneValues(form)
+	renamed.Set("original_name", "blog")
+	renamed.Set("name", "blog-next")
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/stacks/save", cookie, renamed)
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "Stack blog-next saved") {
+		t.Fatalf("rename stack response incomplete:\n%s", body)
+	}
+	stacks, err = loadEditableStacks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if editableStackExists(stacks, "blog") || !editableStackExists(stacks, "blog-next") {
+		t.Fatalf("rename stack state unexpected: %+v", stacks)
+	}
+}
+
+func TestWebOpsStackEditorValidatesAndRemovesStacks(t *testing.T) {
+	requireGit(t)
+	server, cookie := newAuthenticatedWebTestServer(t)
+	repository := createOpsStackRepository(t, true)
+	profile := createOpsProfile(t, server.server.store, repository)
+	if _, err := server.server.saveWebStack(profile.ID, "", "blog-next", opsStackTestCompose(), opsStackTestResources("blog-next")); err != nil {
+		t.Fatal(err)
+	}
+
+	invalid := url.Values{
+		"csrf":          {server.server.csrf},
+		"original_name": {"blog-next"},
+		"name":          {"blog-next"},
+		"compose":       {opsStackTestCompose()},
+	}
+	addOpsStackResourceForm(invalid, "blog-next")
+	invalid["resource_port"] = []string{"not-a-port"}
+	response := postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/stacks/save", cookie, invalid)
+	body := readResponseBody(t, response)
+	if !strings.Contains(body, "port must be a number") {
+		t.Fatalf("invalid resource response missing validation:\n%s", body)
+	}
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/stacks/blog-next/remove", cookie, url.Values{"csrf": {server.server.csrf}, "confirm": {"wrong"}})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "type blog-next to confirm removal") {
+		t.Fatalf("remove confirmation response incomplete:\n%s", body)
+	}
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/stacks/blog-next/remove", cookie, url.Values{"csrf": {server.server.csrf}, "confirm": {"blog-next"}})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "Stack blog-next removed") {
+		t.Fatalf("remove stack response incomplete:\n%s", body)
+	}
+	stacks, err := loadEditableStacks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if editableStackExists(stacks, "blog-next") {
+		t.Fatalf("removed stack still present: %+v", stacks)
+	}
+}
+
+func TestWebOpsRunHistorySearchesAndMasksLogs(t *testing.T) {
+	server, cookie := newAuthenticatedWebTestServer(t)
+	store := server.server.store
+	profile := createOpsProfile(t, store, "")
+	if err := store.SaveSecrets(profile.ID, ProfileSecrets{GitHubToken: "github_pat_secret"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, state, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := "run-history"
+	now := time.Now().UTC()
+	state.Runs[runID] = SetupRun{
+		ID: runID, Status: runStatusFailed, CreatedAt: now, UpdatedAt: now,
+		Stages: map[string]SetupStageStatus{"stacks": {Status: stageStatusFailed, LastError: "deployment failed"}},
+	}
+	state.ActiveRunID = runID
+	if err := store.Save(loaded, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendRunEvent(profile.ID, runID, TaskEvent{Type: TaskLogLine, RunID: runID, Stage: "stacks", Line: "deployment used github_pat_secret", Time: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	response := authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/runs?q=deployment", http.MethodGet, cookie, nil)
+	body := readResponseBody(t, response)
+	if !strings.Contains(body, runID) || strings.Contains(body, "github_pat_secret") {
+		t.Fatalf("run history search response unexpected:\n%s", body)
+	}
+
+	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/runs/"+runID, http.MethodGet, cookie, nil)
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "deployment used ***") || strings.Contains(body, "github_pat_secret") {
+		t.Fatalf("run detail did not mask secret:\n%s", body)
+	}
+
+	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/runs?q=missing", http.MethodGet, cookie, nil)
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "No matching runs") {
+		t.Fatalf("empty run search missing state:\n%s", body)
+	}
+}
+
+func TestWebOpsAccessMasksRevealAndUpdatesSecrets(t *testing.T) {
+	server, cookie := newAuthenticatedWebTestServer(t)
+	store := server.server.store
+	profile := createOpsProfile(t, store, "")
+	if err := store.SaveSecrets(profile.ID, ProfileSecrets{GitHubToken: "github_pat_secret", PangolinAdminPassword: "Secret1!x"}); err != nil {
+		t.Fatal(err)
+	}
+
+	response := authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/access", http.MethodGet, cookie, nil)
+	body := readResponseBody(t, response)
+	if !strings.Contains(body, "configured") || strings.Contains(body, "github_pat_secret") || strings.Contains(body, "Secret1!x") {
+		t.Fatalf("access panel leaked or missed status:\n%s", body)
+	}
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/access/reveal", cookie, url.Values{"csrf": {server.server.csrf}, "secret": {"github_pat"}})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "github_pat_secret") {
+		t.Fatalf("explicit reveal did not include GitHub token:\n%s", body)
+	}
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/access/github-token", cookie, url.Values{"csrf": {server.server.csrf}, "github_pat": {"github_pat_next"}})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "GitHub PAT updated") || strings.Contains(body, "github_pat_next") {
+		t.Fatalf("GitHub PAT update response unexpected:\n%s", body)
+	}
+	secrets, err := store.LoadSecrets(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secrets.GitHubToken != "github_pat_next" {
+		t.Fatalf("GitHub token not updated: %+v", secrets)
+	}
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/access/github-token", cookie, url.Values{"csrf": {server.server.csrf}, "remove": {"true"}})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "not configured") {
+		t.Fatalf("GitHub PAT removal response unexpected:\n%s", body)
+	}
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/access/pangolin", cookie, url.Values{"csrf": {server.server.csrf}, "pangolin_admin_email": {"bad email"}})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "valid email address") {
+		t.Fatalf("invalid Pangolin update response missing validation:\n%s", body)
+	}
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/access/pangolin", cookie, url.Values{
+		"csrf":                    {server.server.csrf},
+		"pangolin_admin_email":    {"new@example.com"},
+		"pangolin_admin_password": {"NextSecret1!"},
+	})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "Pangolin access updated") || strings.Contains(body, "NextSecret1!") {
+		t.Fatalf("Pangolin update response unexpected:\n%s", body)
+	}
+	loaded, _, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.PangolinAdminEmail != "new@example.com" {
+		t.Fatalf("Pangolin email not updated: %+v", loaded)
+	}
+}
+
+func TestWebOpsCloudActionsAndProvision(t *testing.T) {
+	testServer, cookie := newAuthenticatedWebTestServer(t)
+	provider := &fakeWebCloudProvider{created: server{
+		ID: "456", Name: "new-cloud", IPv4: "203.0.113.55", Region: "nyc3", Size: "s-1vcpu-1gb", Image: "ubuntu-24-04-x64", CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}}
+	original := newWebCloudProvider
+	newWebCloudProvider = func(token string) cloudProvider {
+		provider.token = token
+		return provider
+	}
+	t.Cleanup(func() { newWebCloudProvider = original })
+
+	profile := createOpsProfile(t, testServer.server.store, "")
+	loaded, state, err := testServer.server.store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.Cloud = &ProfileCloud{Provider: digitalOceanProviderName, ResourceID: "123", Name: "ops-cloud", Region: "nyc3", Size: "s-1vcpu-1gb", Image: "ubuntu-24-04-x64"}
+	if err := testServer.server.store.Save(loaded, state); err != nil {
+		t.Fatal(err)
+	}
+
+	response := postWebForm(t, testServer.url+"/ops/profiles/"+profile.ID+"/cloud/restart", cookie, url.Values{"csrf": {testServer.server.csrf}, "confirm": {"restart"}})
+	body := readResponseBody(t, response)
+	if !strings.Contains(body, "DigitalOcean token is required") {
+		t.Fatalf("restart without token response unexpected:\n%s", body)
+	}
+
+	response = postWebForm(t, testServer.url+"/ops/profiles/"+profile.ID+"/cloud/restart", cookie, url.Values{"csrf": {testServer.server.csrf}, "token": {"do-token"}, "confirm": {"wrong"}})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "type &#34;restart&#34;") {
+		t.Fatalf("restart confirmation response unexpected:\n%s", body)
+	}
+
+	response = postWebForm(t, testServer.url+"/ops/profiles/"+profile.ID+"/cloud/restart", cookie, url.Values{"csrf": {testServer.server.csrf}, "token": {"do-token"}, "confirm": {"restart"}})
+	body = readResponseBody(t, response)
+	if provider.rebooted != "123" || !strings.Contains(body, "Restart requested") {
+		t.Fatalf("restart did not call provider/body=%q provider=%+v", body, provider)
+	}
+
+	response = postWebForm(t, testServer.url+"/ops/profiles/"+profile.ID+"/cloud/destroy", cookie, url.Values{"csrf": {testServer.server.csrf}, "token": {"do-token"}, "confirm": {"destroy ops-cloud"}})
+	body = readResponseBody(t, response)
+	if provider.destroyed != "123" || !strings.Contains(body, "marked locally") {
+		t.Fatalf("destroy did not call provider/body=%q provider=%+v", body, provider)
+	}
+	loaded, _, err = testServer.server.store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Cloud == nil || loaded.Cloud.DestroyedAt == nil {
+		t.Fatalf("profile cloud was not marked destroyed: %+v", loaded.Cloud)
+	}
+
+	response = postWebForm(t, testServer.url+"/ops/cloud/provision", cookie, url.Values{
+		"csrf":    {testServer.server.csrf},
+		"token":   {"do-token"},
+		"name":    {"new-cloud"},
+		"ssh_key": {"key-id"},
+	})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "DigitalOcean profile created") || provider.provision.Name != "new-cloud" || provider.provision.SSHKey != "key-id" {
+		t.Fatalf("provision response/provider unexpected:\n%s\n%+v", body, provider)
+	}
+	summaries, err := testServer.server.store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 2 {
+		t.Fatalf("profile count after provision = %d, want 2", len(summaries))
+	}
+}
+
+func TestFrontendOpsAssetsIncludeNavigationPolish(t *testing.T) {
+	css, err := frontend.Assets.ReadFile("assets/servestead.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js, err := frontend.Assets.ReadFile("assets/servestead.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cssText := string(css)
+	for _, expected := range []string{".ops-stack", ".data-table", ".diff", ".command-palette", ".secret-value"} {
+		if !strings.Contains(cssText, expected) {
+			t.Fatalf("ops CSS asset missing %q", expected)
+		}
+	}
+	jsText := string(js)
+	for _, expected := range []string{"function restoreFocus", "data-copy", "command-palette", "input[name='q']"} {
+		if !strings.Contains(jsText, expected) {
+			t.Fatalf("ops JS asset missing %q", expected)
+		}
+	}
+}
+
 func TestFrontendRunLogAssetsKeepFixedScrollableColoredTerminal(t *testing.T) {
 	css, err := frontend.Assets.ReadFile("assets/servestead.css")
 	if err != nil {
@@ -915,6 +1323,137 @@ func newAuthenticatedWebTestServer(t *testing.T) (authenticatedWebTestServer, *h
 	return authenticatedWebTestServer{server: server, url: httpServer.URL, close: httpServer.Close}, &http.Cookie{Name: uiSessionCookie, Value: server.session}
 }
 
+func createOpsStackRepository(t *testing.T, committed bool) string {
+	t.Helper()
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init")
+	runGitCommand(t, repository, "config", "user.name", "Test")
+	runGitCommand(t, repository, "config", "user.email", stackTestGitEmail)
+	if committed {
+		options := stackAddOptions{
+			Name: "site",
+			Resources: []stackPublicResource{{
+				ID: "web", Service: "web", Port: 80, Subdomain: "site", Name: "Site",
+				Protocol: "http", SSO: true,
+				Healthcheck: stackResourceHealthcheck{Enabled: true, Path: "/"},
+			}},
+		}
+		if err := writeEditableStack(repository, "", options, []byte(testApplicationCompose)); err != nil {
+			t.Fatal(err)
+		}
+		runGitCommand(t, repository, "add", "stacks")
+		runGitCommand(t, repository, "commit", "-m", "Add site stack")
+		return repository
+	}
+	stackDirectory := filepath.Join(repository, "stacks", "site")
+	if err := os.MkdirAll(stackDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackComposeFilename), []byte(testApplicationCompose), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func createOpsProfile(t *testing.T, store ProfileStore, repository string) Profile {
+	t.Helper()
+	profile, err := store.Create(Profile{
+		Name:                 "ops-vps",
+		IP:                   "203.0.113.20",
+		InitialSSHUser:       "root",
+		AdminUser:            "servestead",
+		PrivateKeyPath:       "/tmp/servestead_ed25519",
+		BaseDomain:           "ops.example.com",
+		LetsEncryptEmail:     "ops@example.com",
+		PangolinAdminEmail:   "ops@example.com",
+		ConfigRepositoryPath: repository,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return profile
+}
+
+func editableStackExists(stacks []editableStack, name string) bool {
+	for _, stack := range stacks {
+		if stack.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func opsStackTestCompose() string {
+	return `services:
+  web:
+    image: nginx:alpine
+    expose:
+      - "80"
+`
+}
+
+func addOpsStackResourceForm(values url.Values, subdomain string) {
+	values.Add("resource_id", "web")
+	values.Add("resource_service", "web")
+	values.Add("resource_subdomain", subdomain)
+	values.Add("resource_name", "Web")
+	values.Add("resource_port", "80")
+	values.Add("resource_protocol", "http")
+	values.Add("resource_sso", "yes")
+	values.Add("resource_health_path", "/")
+}
+
+func opsStackTestResources(subdomain string) []stackPublicResource {
+	return []stackPublicResource{{
+		ID:        "web",
+		Service:   "web",
+		Name:      "Web",
+		Subdomain: subdomain,
+		Port:      80,
+		Protocol:  "http",
+		SSO:       true,
+		Healthcheck: stackResourceHealthcheck{
+			Enabled: true,
+			Path:    "/",
+		},
+	}}
+}
+
+type fakeWebCloudProvider struct {
+	token     string
+	provision provisionConfig
+	created   server
+	rebooted  string
+	destroyed string
+	err       error
+}
+
+func (provider *fakeWebCloudProvider) Catalog(context.Context) (cloudCatalog, error) {
+	return cloudCatalog{}, provider.err
+}
+
+func (provider *fakeWebCloudProvider) Create(_ context.Context, config provisionConfig) (server, error) {
+	provider.provision = config
+	if provider.err != nil {
+		return server{}, provider.err
+	}
+	return provider.created, nil
+}
+
+func (provider *fakeWebCloudProvider) CreateSSHKey(context.Context, string, string) (cloudSSHKey, error) {
+	return cloudSSHKey{}, provider.err
+}
+
+func (provider *fakeWebCloudProvider) Reboot(_ context.Context, id string) error {
+	provider.rebooted = id
+	return provider.err
+}
+
+func (provider *fakeWebCloudProvider) Destroy(_ context.Context, id string) error {
+	provider.destroyed = id
+	return provider.err
+}
+
 func postWebForm(t *testing.T, target string, cookie *http.Cookie, form url.Values) *http.Response {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodPost, target, strings.NewReader(form.Encode()))
@@ -938,6 +1477,15 @@ func readResponseBody(t *testing.T, response *http.Response) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func requireBodyContains(t *testing.T, body string, label string, expected ...string) {
+	t.Helper()
+	for _, value := range expected {
+		if !strings.Contains(body, value) {
+			t.Fatalf("%s missing %q:\n%s", label, value, body)
+		}
+	}
 }
 
 type errString string
