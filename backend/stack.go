@@ -203,43 +203,50 @@ func writeEditableStack(repositoryPath, originalName string, options stackAddOpt
 		return err
 	}
 	stacksDirectory := filepath.Join(expandUserPath(repositoryPath), "stacks")
-	destination := filepath.Join(stacksDirectory, options.Name)
-	if err := prepareEditableStackDestination(stacksDirectory, destination, originalName, options.Name); err != nil {
+	if _, err := prepareEditableStackDestination(stacksDirectory, originalName, options.Name); err != nil {
 		return err
 	}
-	return writeEditableStackFiles(destination, metadata, compose)
+	return writeEditableStackFiles(stacksDirectory, options.Name, metadata, compose)
 }
 
-func prepareEditableStackDestination(stacksDirectory, destination, originalName, name string) error {
+func prepareEditableStackDestination(stacksDirectory, originalName, name string) (string, error) {
+	if !stackSlugPattern.MatchString(name) {
+		return "", errors.New("stack name must be a lowercase DNS label")
+	}
+	destination := filepath.Join(stacksDirectory, name)
 	if originalName == "" {
 		if _, err := os.Stat(destination); err == nil {
 			if !stackDirectoryContainsOnlySecretFile(destination) {
-				return fmt.Errorf("stack %q already exists", name)
+				return "", fmt.Errorf("stack %q already exists", name)
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
+			return "", err
 		}
-		return nil
+		return destination, nil
 	}
 	if !stackSlugPattern.MatchString(originalName) {
-		return errors.New("original stack name must be a lowercase DNS label")
+		return "", errors.New("original stack name must be a lowercase DNS label")
 	}
 	if originalName == name {
-		return nil
+		return destination, nil
 	}
 	if _, err := os.Stat(destination); err == nil {
-		return fmt.Errorf("stack %q already exists", name)
+		return "", fmt.Errorf("stack %q already exists", name)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+		return "", err
 	}
 	source := filepath.Join(stacksDirectory, originalName)
 	if err := os.Rename(source, destination); err != nil {
-		return fmt.Errorf("rename stack: %w", err)
+		return "", fmt.Errorf("rename stack: %w", err)
 	}
-	return nil
+	return destination, nil
 }
 
-func writeEditableStackFiles(destination string, metadata stackMetadata, compose []byte) error {
+func writeEditableStackFiles(stacksDirectory, name string, metadata stackMetadata, compose []byte) error {
+	if !stackSlugPattern.MatchString(name) {
+		return errors.New("stack name must be a lowercase DNS label")
+	}
+	destination := filepath.Join(stacksDirectory, name)
 	if err := os.MkdirAll(destination, 0700); err != nil {
 		return err
 	}

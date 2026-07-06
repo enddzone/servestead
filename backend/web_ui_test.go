@@ -1429,15 +1429,15 @@ func writeOpsStackSecrets(t *testing.T, repository string, stackName string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stackDirectory := filepath.Join(repository, "stacks", stackName)
-	if err := writeEditableStackFiles(stackDirectory, stackMetadata{
+	stacksDirectory := filepath.Join(repository, "stacks")
+	if err := writeEditableStackFiles(stacksDirectory, stackName, stackMetadata{
 		Version:         1,
 		PublicResources: opsStackTestResources(stackName),
 		Secrets:         ageStackSecretMetadata(stackName, SecretSet{"API_KEY": "secret"}, recipient),
 	}, []byte(opsStackTestCompose())); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(stackDirectory, stackSecretFilename), []byte("encrypted\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(stacksDirectory, stackName, stackSecretFilename), []byte("encrypted\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }

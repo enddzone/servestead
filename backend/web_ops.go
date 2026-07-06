@@ -352,11 +352,10 @@ func (server *webServer) saveWebStack(profileID string, originalName string, nam
 		return "", err
 	}
 	stacksDirectory := filepath.Join(expandUserPath(repositoryPath), "stacks")
-	destination := filepath.Join(stacksDirectory, name)
-	if err := prepareEditableStackDestination(stacksDirectory, destination, originalName, name); err != nil {
+	if _, err := prepareEditableStackDestination(stacksDirectory, originalName, name); err != nil {
 		return "", err
 	}
-	if err := writeEditableStackFiles(destination, metadata, compose); err != nil {
+	if err := writeEditableStackFiles(stacksDirectory, name, metadata, compose); err != nil {
 		return "", err
 	}
 	return name, nil

@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -30,6 +31,8 @@ const (
 	stageStatusComplete = "complete"
 	stageStatusFailed   = "failed"
 )
+
+var storePathComponentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 type Profile struct {
 	ID                   string        `json:"id"`
@@ -355,12 +358,20 @@ func (store *fileProfileStore) Create(profile Profile) (Profile, error) {
 }
 
 func (store *fileProfileStore) Load(id string) (Profile, ProfileState, error) {
+	profilePath, err := store.profilePath(id)
+	if err != nil {
+		return Profile{}, ProfileState{}, err
+	}
 	var profile Profile
-	if err := readJSONFile(store.profilePath(id), &profile); err != nil {
+	if err := readJSONFile(profilePath, &profile); err != nil {
+		return Profile{}, ProfileState{}, err
+	}
+	statePath, err := store.statePath(id)
+	if err != nil {
 		return Profile{}, ProfileState{}, err
 	}
 	var state ProfileState
-	if err := readJSONFile(store.statePath(id), &state); err != nil {
+	if err := readJSONFile(statePath, &state); err != nil {
 		return Profile{}, ProfileState{}, err
 	}
 	if state.Runs == nil {
@@ -381,35 +392,48 @@ func (store *fileProfileStore) Save(profile Profile, state ProfileState) error {
 		profile.CreatedAt = now
 	}
 	profile.UpdatedAt = now
-	directory := store.profileDirectory(profile.ID)
+	directory, err := store.profileDirectory(profile.ID)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return err
 	}
 	if err := os.Chmod(directory, 0700); err != nil {
 		return err
 	}
-	if err := atomicWriteJSON(store.profilePath(profile.ID), profile); err != nil {
+	profilePath, err := store.profilePath(profile.ID)
+	if err != nil {
 		return err
 	}
-	if err := atomicWriteJSON(store.statePath(profile.ID), state); err != nil {
+	if err := atomicWriteJSON(profilePath, profile); err != nil {
+		return err
+	}
+	statePath, err := store.statePath(profile.ID)
+	if err != nil {
+		return err
+	}
+	if err := atomicWriteJSON(statePath, state); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (store *fileProfileStore) Delete(id string) error {
-	if id == "" {
-		return errors.New("profile ID is required")
+	directory, err := store.profileDirectory(id)
+	if err != nil {
+		return err
 	}
-	if filepath.Base(id) != id || id == "." || id == ".." {
-		return errors.New("profile ID must not contain path separators")
-	}
-	return os.RemoveAll(store.profileDirectory(id))
+	return os.RemoveAll(directory)
 }
 
 func (store *fileProfileStore) LoadSecrets(id string) (ProfileSecrets, error) {
+	secretsPath, err := store.secretsPath(id)
+	if err != nil {
+		return ProfileSecrets{}, err
+	}
 	var secrets ProfileSecrets
-	if err := readJSONFile(store.secretsPath(id), &secrets); err != nil {
+	if err := readJSONFile(secretsPath, &secrets); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ProfileSecrets{}, nil
 		}
@@ -419,14 +443,21 @@ func (store *fileProfileStore) LoadSecrets(id string) (ProfileSecrets, error) {
 }
 
 func (store *fileProfileStore) SaveSecrets(id string, secrets ProfileSecrets) error {
-	directory := store.profileDirectory(id)
+	directory, err := store.profileDirectory(id)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return err
 	}
 	if err := os.Chmod(directory, 0700); err != nil {
 		return err
 	}
-	return atomicWriteJSON(store.secretsPath(id), secrets)
+	secretsPath, err := store.secretsPath(id)
+	if err != nil {
+		return err
+	}
+	return atomicWriteJSON(secretsPath, secrets)
 }
 
 func (store *fileProfileStore) AppendRunEvent(profileID string, runID string, event TaskEvent) error {
@@ -450,20 +481,15 @@ func (store *fileProfileStore) AppendRunEvent(profileID string, runID string, ev
 }
 
 func (store *fileProfileStore) runLogPath(profileID string, runID string) (string, error) {
-	if profileID == "" {
-		return "", errors.New("profile ID is required")
-	}
-	if strings.ContainsAny(profileID, `/\`) || profileID == "." || profileID == ".." {
-		return "", errors.New("profile ID must not contain path separators")
-	}
 	runID = strings.TrimSpace(runID)
-	if runID == "" {
-		return "", errors.New("run id is required")
-	}
-	if strings.ContainsAny(runID, `/\`) || strings.Contains(runID, "..") {
+	if !storePathComponentPattern.MatchString(runID) || strings.Contains(runID, "..") {
 		return "", fmt.Errorf("invalid run id %q", runID)
 	}
-	directory := filepath.Join(store.profileDirectory(profileID), "logs")
+	directory, err := store.profileDirectory(profileID)
+	if err != nil {
+		return "", err
+	}
+	directory = filepath.Join(directory, "logs")
 	path := filepath.Join(directory, runID+".jsonl")
 	relative, err := filepath.Rel(directory, path)
 	if err != nil {
@@ -479,20 +505,35 @@ func (store *fileProfileStore) profilesDirectory() string {
 	return filepath.Join(store.root, "profiles")
 }
 
-func (store *fileProfileStore) profileDirectory(id string) string {
-	return filepath.Join(store.profilesDirectory(), id)
+func (store *fileProfileStore) profileDirectory(id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", errors.New("profile ID is required")
+	}
+	if !storePathComponentPattern.MatchString(id) || strings.Contains(id, "..") {
+		return "", errors.New("profile ID must not contain path separators")
+	}
+	return filepath.Join(store.profilesDirectory(), id), nil
 }
 
-func (store *fileProfileStore) profilePath(id string) string {
-	return filepath.Join(store.profileDirectory(id), "profile.json")
+func (store *fileProfileStore) profilePath(id string) (string, error) {
+	return store.profileFilePath(id, "profile.json")
 }
 
-func (store *fileProfileStore) statePath(id string) string {
-	return filepath.Join(store.profileDirectory(id), "state.json")
+func (store *fileProfileStore) statePath(id string) (string, error) {
+	return store.profileFilePath(id, "state.json")
 }
 
-func (store *fileProfileStore) secretsPath(id string) string {
-	return filepath.Join(store.profileDirectory(id), "secrets.json")
+func (store *fileProfileStore) secretsPath(id string) (string, error) {
+	return store.profileFilePath(id, "secrets.json")
+}
+
+func (store *fileProfileStore) profileFilePath(id string, filename string) (string, error) {
+	directory, err := store.profileDirectory(id)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(directory, filename), nil
 }
 
 func newProfileID(ip string, now time.Time) string {

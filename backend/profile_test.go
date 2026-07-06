@@ -53,10 +53,26 @@ func TestProfileStoreCreatesPrivateProfileFiles(t *testing.T) {
 	if loaded.IP != profileTestHost || state.Runs == nil {
 		t.Fatalf("unexpected loaded profile/state: %+v %+v", loaded, state)
 	}
-	assertFileMode(t, store.profileDirectory(profile.ID), 0700)
-	assertFileMode(t, store.profilePath(profile.ID), 0600)
-	assertFileMode(t, store.statePath(profile.ID), 0600)
-	assertFileMode(t, store.secretsPath(profile.ID), 0600)
+	profileDirectory, err := store.profileDirectory(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profilePath, err := store.profilePath(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath, err := store.statePath(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretsPath, err := store.secretsPath(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFileMode(t, profileDirectory, 0700)
+	assertFileMode(t, profilePath, 0600)
+	assertFileMode(t, statePath, 0600)
+	assertFileMode(t, secretsPath, 0600)
 }
 
 func TestProfileStoreResolveByIPSortsNewestFirst(t *testing.T) {
@@ -146,7 +162,11 @@ func TestProfileStoreAppendsJSONLEvents(t *testing.T) {
 	if err := store.AppendRunEvent(profile.ID, "run-1", event); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(store.profileDirectory(profile.ID), "logs", "run-1.jsonl"))
+	profileDirectory, err := store.profileDirectory(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(profileDirectory, "logs", "run-1.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}

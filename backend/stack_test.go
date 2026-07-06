@@ -154,7 +154,7 @@ func TestPrepareEditableStackDestinationHandlesExistingDirectories(t *testing.T)
 	if err := os.WriteFile(filepath.Join(existing, stackComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareEditableStackDestination(stacksDirectory, existing, "", "site"); err == nil || !strings.Contains(err.Error(), "already exists") {
+	if _, err := prepareEditableStackDestination(stacksDirectory, "", "site"); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("existing stack directory was accepted: %v", err)
 	}
 	if stackDirectoryContainsOnlySecretFile(filepath.Join(stacksDirectory, "missing")) {
@@ -167,7 +167,7 @@ func TestPrepareEditableStackDestinationHandlesExistingDirectories(t *testing.T)
 	if err := os.WriteFile(filepath.Join(secretOnly, stackSecretFilename), []byte("encrypted\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareEditableStackDestination(stacksDirectory, secretOnly, "", "secret-only"); err != nil {
+	if _, err := prepareEditableStackDestination(stacksDirectory, "", "secret-only"); err != nil {
 		t.Fatalf("secret-only stack directory should be reusable: %v", err)
 	}
 }
@@ -435,7 +435,11 @@ func assertStackAddDidNotLeakSecrets(t *testing.T, store ProfileStore, profileID
 		t.Fatalf("stack add exposed an environment value:\n%s", stdout)
 	}
 	if fileStore, ok := store.(*fileProfileStore); ok {
-		if data, err := os.ReadFile(fileStore.secretsPath(profileID)); err == nil &&
+		secretsPath, err := fileStore.secretsPath(profileID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if data, err := os.ReadFile(secretsPath); err == nil &&
 			(strings.Contains(string(data), "API_KEY") || strings.Contains(string(data), `"secret"`)) {
 			t.Fatalf("profile secrets leaked stack value:\n%s", data)
 		}
