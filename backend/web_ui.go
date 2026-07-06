@@ -161,6 +161,7 @@ func (server *webServer) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/assets/", http.FileServer(http.FS(frontend.Assets)))
 	mux.HandleFunc("/ui", server.withAuth(server.handleUI))
+	mux.HandleFunc("/setup", server.withAuth(server.handleSetup))
 	mux.HandleFunc("/setup/start", server.withAuth(server.handleStart))
 	mux.HandleFunc("/setup/intent", server.withAuth(server.handleIntent))
 	mux.HandleFunc("/setup/profile-values", server.withAuth(server.handleProfileValues))
@@ -170,6 +171,9 @@ func (server *webServer) routes() http.Handler {
 	mux.HandleFunc("/setup/cancel", server.withAuth(server.handleCancel))
 	mux.HandleFunc("/setup/retry", server.withAuth(server.handleRetry))
 	mux.HandleFunc("/setup/credentials", server.withAuth(server.handleCredentials))
+	mux.HandleFunc("/ops/profiles", server.withAuth(server.handleOpsProfiles))
+	mux.HandleFunc("/ops/profiles/", server.withAuth(server.handleOpsProfile))
+	mux.HandleFunc("/ops/cloud/provision", server.withAuth(server.handleOpsCloudProvision))
 	mux.HandleFunc("/events/runs/", server.withAuth(server.handleRunEvents))
 	mux.HandleFunc("/shutdown", server.withAuth(server.handleShutdown))
 	return mux
@@ -189,6 +193,14 @@ func (server *webServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (server *webServer) handleUI(response http.ResponseWriter, request *http.Request) {
+	if !requireMethod(response, request, http.MethodGet) {
+		return
+	}
+	data := server.homeData(request.Context(), request.URL.Query().Get("profile"), "", "")
+	server.renderAppShell(response, request, "Servestead Command Center", "Command Center", "home", data.SelectedProfileID, frontend.HomePanel(data))
+}
+
+func (server *webServer) handleSetup(response http.ResponseWriter, request *http.Request) {
 	if !requireMethod(response, request, http.MethodGet) {
 		return
 	}
@@ -260,7 +272,22 @@ func (server *webServer) validCSRF(request *http.Request) bool {
 }
 
 func (server *webServer) renderShell(response http.ResponseWriter, request *http.Request, content templ.Component) {
-	server.render(response, request, frontend.Shell(frontend.ShellData{Title: "Servestead Setup Workbench", CSRFToken: server.csrf}, content))
+	server.renderAppShell(response, request, "Servestead Setup Workbench", "Setup Workbench", "setup", server.defaultProfileID(request.URL.Query().Get("profile")), content)
+}
+
+func (server *webServer) renderAppShell(response http.ResponseWriter, request *http.Request, title string, heading string, active string, activeProfileID string, content templ.Component) {
+	server.render(response, request, frontend.Shell(frontend.ShellData{
+		Title:         title,
+		Heading:       heading,
+		ActiveSection: active,
+		ActiveProfile: activeProfileID,
+		CSRFToken:     server.csrf,
+		Profiles:      server.profileOptions(),
+	}, content))
+}
+
+func (server *webServer) renderOpsShell(response http.ResponseWriter, request *http.Request, content templ.Component) {
+	server.renderAppShell(response, request, "Servestead Profile Diagnostics", "Profile Diagnostics", "profiles", server.defaultProfileID(request.URL.Query().Get("profile")), content)
 }
 
 func (server *webServer) render(response http.ResponseWriter, request *http.Request, component templ.Component) {
@@ -288,6 +315,222 @@ func (server *webServer) recoveryHTML(runID, profileID, kind, message string) st
 
 func (server *webServer) startData(notice, errorText string) frontend.StartData {
 	return frontend.StartData{CSRFToken: server.csrf, Profiles: server.profileOptions(), Notice: notice, Error: errorText}
+}
+
+func (server *webServer) homeData(ctx context.Context, selected string, notice string, errorText string) frontend.HomeData {
+	data := frontend.HomeData{
+		CSRFToken: server.csrf,
+		Greeting:  homeGreeting(time.Now()),
+		NodeName:  "Local Node",
+		Profiles:  server.profileOptions(),
+		Notice:    notice,
+		Error:     errorText,
+	}
+	selected = server.defaultProfileID(selected)
+	data.SelectedProfileID = selected
+	data.Commands = []frontend.CommandItem{
+		{Label: "Setup", Detail: "Complete setup, configure stacks, and harden security.", URL: "/setup", Tone: "pink"},
+		{Label: "Profiles & Diagnostics", Detail: "Review profiles, check health, runs, access, and logs.", URL: "/ops/profiles", Tone: "blue"},
+		{Label: "GitOps Review", Detail: "Review repository state, sync status, and drift.", URL: "#", Tone: "mauve", Disabled: selected == ""},
+		{Label: "Access & Cloud", Detail: "Manage access controls, secrets, and cloud settings.", URL: "#", Tone: "peach", Disabled: selected == ""},
+	}
+	if selected != "" {
+		data.Commands[2].URL = "/ops/profiles/" + selected + "/gitops/review"
+		data.Commands[3].URL = "/ops/profiles?profile=" + selected
+	}
+	if selected == "" {
+		return data
+	}
+	profile, state, err := server.store.Load(selected)
+	if err != nil {
+		data.Error = firstNonEmpty(data.Error, err.Error())
+		return data
+	}
+	gitState := server.opsGitSummary(ctx, profile.ConfigRepositoryPath)
+	activeRunStatus := server.opsActiveRunStatus(profile.ID, state)
+	setupStatus := opsSetupStatus(state)
+	cloudState := opsCloudState(profile)
+	data.HasProfile = true
+	data.SelectedProfile = firstNonEmpty(profile.Name, profile.IP, profile.ID)
+	data.SelectedAddress = firstNonEmpty(profile.IP, "not configured")
+	data.SelectedDomain = firstNonEmpty(profile.BaseDomain, "not configured")
+	data.SelectedRepository = firstNonEmpty(profile.ConfigRepositoryPath, "not configured")
+	data.Region = profileRegion(profile)
+	data.Uptime = profileUptime(profile)
+	data.ActiveRunStatus = activeRunStatus
+	data.SetupStatus = setupStatus
+	data.GitState = gitState
+	data.CloudState = cloudState
+	data.HealthStatus, data.HealthDetail = homeHealth(activeRunStatus, setupStatus)
+	data.SetupProgressLabel, data.SetupProgress = homeSetupProgress(setupStatus, gitState, state)
+	data.NextAction = opsNextAction(profile, activeRunStatus, setupStatus, gitState, cloudState)
+	data.UpdatedAt = formatWebTime(profile.UpdatedAt)
+	data.Issues = server.homeIssues(profile, state, gitState, setupStatus)
+	data.Activities = append(data.Activities, frontend.HomeActivity{
+		Tone:   "mauve",
+		Title:  "Profile updated",
+		Detail: data.SelectedProfile,
+		Time:   data.UpdatedAt,
+		URL:    "/ops/profiles?profile=" + profile.ID,
+	})
+	if run, ok := latestSetupRun(state); ok {
+		data.Activities = append(data.Activities, frontend.HomeActivity{
+			Tone:   statusTone(run.Status),
+			Title:  "Latest run " + run.Status,
+			Detail: opsRunStageSummary(run),
+			Time:   formatWebTime(run.UpdatedAt),
+			URL:    "/ops/profiles?profile=" + profile.ID,
+		})
+	}
+	return data
+}
+
+func homeGreeting(now time.Time) string {
+	hour := now.Local().Hour()
+	switch {
+	case hour < 12:
+		return "Good morning"
+	case hour < 17:
+		return "Good afternoon"
+	default:
+		return "Good evening"
+	}
+}
+
+func profileRegion(profile Profile) string {
+	if profile.Cloud != nil && profile.Cloud.Region != "" {
+		return profile.Cloud.Region
+	}
+	return "local"
+}
+
+func profileUptime(profile Profile) string {
+	if profile.Cloud == nil || profile.Cloud.CreatedAt.IsZero() {
+		return "not tracked"
+	}
+	duration := time.Since(profile.Cloud.CreatedAt)
+	if duration < 0 {
+		return "just created"
+	}
+	days := int(duration.Hours()) / 24
+	hours := int(duration.Hours()) % 24
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh", days, hours)
+	}
+	return fmt.Sprintf("%dh", hours)
+}
+
+func homeHealth(activeRunStatus string, setupStatus string) (string, string) {
+	switch {
+	case activeRunStatus == runStatusRunning:
+		return "Running", "Setup or stack work is currently active."
+	case setupStatus == runStatusFailed || setupStatus == runStatusCancelled:
+		return "Needs attention", "Review recovery or recent run details."
+	case setupStatus == runStatusComplete || strings.Contains(setupStatus, "complete"):
+		return "Healthy", "No incidents detected"
+	default:
+		return "Ready", "Setup is ready to continue."
+	}
+}
+
+func homeSetupProgress(setupStatus string, gitState string, state ProfileState) (string, int) {
+	switch {
+	case setupStatus == runStatusComplete || strings.Contains(setupStatus, "complete"):
+		return "Step 5 of 5 · Complete", 100
+	case setupStatus == runStatusFailed || setupStatus == runStatusCancelled:
+		return "Step 4 of 5 · Recovery needed", max(20, completedHomeProgress(state))
+	case gitState == "changes pending" || gitState == "needs push":
+		return "Step 3 of 5 · GitOps sync", 62
+	default:
+		return "Step 3 of 5 · GitOps sync", max(40, completedHomeProgress(state))
+	}
+}
+
+func completedHomeProgress(state ProfileState) int {
+	completed := completedSetupStages(state)
+	stageNames := []string{"bootstrap", "harden", "network", "proxy", "observability"}
+	count := 0
+	for _, stage := range stageNames {
+		if completed[stage] {
+			count++
+		}
+	}
+	return count * 20
+}
+
+func (server *webServer) homeIssues(profile Profile, state ProfileState, gitState string, setupStatus string) []frontend.HomeIssue {
+	issues := []frontend.HomeIssue{}
+	if gitState == "changes pending" || gitState == "needs push" {
+		issues = append(issues, frontend.HomeIssue{
+			Tone:        "peach",
+			Title:       "Stack drift detected",
+			Detail:      "Repository state needs review before stack sync.",
+			ActionLabel: "Review drift",
+			URL:         "/ops/profiles/" + profile.ID + "/gitops/review",
+		})
+	}
+	secrets, err := server.store.LoadSecrets(profile.ID)
+	if err == nil && (secrets.PangolinAdminPassword == "" || secrets.GitHubToken == "") {
+		issues = append(issues, frontend.HomeIssue{
+			Tone:        "mauve",
+			Title:       "Secrets pending review",
+			Detail:      "One or more optional credentials are not configured.",
+			ActionLabel: "Review secrets",
+			URL:         "/ops/profiles?profile=" + profile.ID + "#ops-detail",
+		})
+	}
+	if run, ok := latestSetupRun(state); ok && (run.Status == runStatusFailed || run.Status == runStatusCancelled) {
+		issues = append(issues, frontend.HomeIssue{
+			Tone:        "red",
+			Title:       "Last run needs review",
+			Detail:      opsRunStageSummary(run),
+			ActionLabel: "Open runs",
+			URL:         "/ops/profiles?profile=" + profile.ID + "#ops-detail",
+		})
+	}
+	if setupStatus == "not run" && len(issues) == 0 {
+		issues = append(issues, frontend.HomeIssue{
+			Tone:        "blue",
+			Title:       "Setup is ready",
+			Detail:      "Continue the guided setup when you are ready.",
+			ActionLabel: "Resume setup",
+			URL:         "/setup",
+		})
+	}
+	if len(issues) > 3 {
+		return issues[:3]
+	}
+	return issues
+}
+
+func (server *webServer) defaultProfileID(preferred string) string {
+	if strings.TrimSpace(preferred) != "" {
+		return strings.TrimSpace(preferred)
+	}
+	summaries, err := server.store.List()
+	if err != nil {
+		return ""
+	}
+	var selected ProfileSummary
+	for _, summary := range summaries {
+		if selected.ID == "" || summary.UpdatedAt.After(selected.UpdatedAt) {
+			selected = summary
+		}
+	}
+	return selected.ID
+}
+
+func statusTone(status string) string {
+	switch status {
+	case runStatusComplete:
+		return "green"
+	case runStatusFailed, runStatusCancelled:
+		return "red"
+	case runStatusRunning:
+		return "blue"
+	default:
+		return "peach"
+	}
 }
 
 func (server *webServer) profileOptions() []frontend.ProfileOption {

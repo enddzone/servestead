@@ -1,5 +1,6 @@
 (() => {
   let source;
+  let restoreFocusSelector;
   const ansiColors = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
 
   function connectRunStream() {
@@ -144,6 +145,232 @@
     return index;
   }
 
-  document.addEventListener("DOMContentLoaded", connectRunStream);
-  document.body.addEventListener("htmx:afterSwap", connectRunStream);
+  function captureFocus() {
+    const active = document.activeElement;
+    if (!active || !active.matches("input, select, textarea, button, a[href]")) {
+      restoreFocusSelector = undefined;
+      return;
+    }
+    if (active.id) {
+      restoreFocusSelector = `#${CSS.escape(active.id)}`;
+    } else if (active.name) {
+      restoreFocusSelector = `${active.tagName.toLowerCase()}[name="${CSS.escape(active.name)}"]`;
+    } else {
+      restoreFocusSelector = undefined;
+    }
+  }
+
+  function restoreFocus() {
+    if (!restoreFocusSelector) return;
+    const next = document.querySelector(restoreFocusSelector);
+    if (next) next.focus({ preventScroll: true });
+    restoreFocusSelector = undefined;
+  }
+
+  function resetWorkbenchScroll(target) {
+    if (!target || target.id !== "workbench") return;
+    const scroller = target.closest(".workbench");
+    if (!scroller) return;
+    scroller.scrollTo({ top: 0, left: 0 });
+  }
+
+  function copyValue(value) {
+    if (!value) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).catch(() => fallbackCopy(value));
+      return;
+    }
+    fallbackCopy(value);
+  }
+
+  function fallbackCopy(value) {
+    const input = document.createElement("textarea");
+    input.value = value;
+    input.setAttribute("readonly", "readonly");
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand("copy");
+    input.remove();
+  }
+
+  function isTypingTarget(target) {
+    return target && target.closest && target.closest("input, textarea, select, [contenteditable='true']");
+  }
+
+  function ensureCommandPalette() {
+    if (document.getElementById("command-palette")) return;
+    const palette = document.createElement("div");
+    palette.id = "command-palette";
+    palette.className = "command-palette";
+    palette.setAttribute("role", "dialog");
+    palette.setAttribute("aria-label", "Command palette");
+    palette.innerHTML = `
+      <a href="/ui">Home</a>
+      <a href="/setup">Setup Workbench</a>
+      <a href="/ops/profiles">Profile Diagnostics</a>
+    `;
+    document.body.appendChild(palette);
+  }
+
+  function toggleCommandPalette(force) {
+    ensureCommandPalette();
+    const palette = document.getElementById("command-palette");
+    const open = force === undefined ? !palette.classList.contains("open") : force;
+    palette.classList.toggle("open", open);
+    if (open) {
+      const first = palette.querySelector("a");
+      if (first) first.focus();
+    }
+  }
+
+  function setCommandResults(input, open) {
+    const results = document.querySelector("[data-command-results]");
+    if (!results) return;
+    results.classList.toggle("open", Boolean(open));
+    if (input) {
+      const bounds = input.getBoundingClientRect();
+      if (bounds.width > 0) {
+        results.style.right = "auto";
+        results.style.left = `${Math.max(12, bounds.left)}px`;
+        results.style.top = `${bounds.bottom + 8}px`;
+        results.style.width = `${Math.min(680, Math.max(320, bounds.width))}px`;
+      }
+    }
+  }
+
+  function filterCommandItems(input) {
+    const results = document.querySelector("[data-command-results]");
+    if (!results) return;
+    const query = String(input.value || "").trim().toLowerCase();
+    for (const item of results.querySelectorAll("[data-command-item]")) {
+      const haystack = item.textContent.toLowerCase();
+      item.hidden = query !== "" && !haystack.includes(query);
+    }
+    setCommandResults(input, document.activeElement === input && (query !== "" || results.querySelector("[data-command-item]:not([hidden])")));
+  }
+
+  function openFirstCommand(input) {
+    const results = document.querySelector("[data-command-results]");
+    if (!results) return false;
+    const first = results.querySelector("[data-command-item]:not([hidden])");
+    if (!first) return false;
+    window.location.assign(first.href);
+    return true;
+  }
+
+  function focusCommandInput() {
+    const input = document.querySelector("[data-command-input]");
+    if (!input) return false;
+    input.focus();
+    input.select();
+    filterCommandItems(input);
+    setCommandResults(input, true);
+    return true;
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    connectRunStream();
+    ensureCommandPalette();
+  });
+  document.body.addEventListener("htmx:beforeSwap", captureFocus);
+  document.body.addEventListener("htmx:afterSwap", (event) => {
+    connectRunStream();
+    resetWorkbenchScroll(event.detail && event.detail.target);
+    restoreFocus();
+  });
+  document.addEventListener("click", (event) => {
+    const trigger = event.target.closest("[data-copy]");
+    if (trigger) {
+      event.preventDefault();
+      copyValue(trigger.getAttribute("data-copy"));
+      return;
+    }
+    const addResource = event.target.closest("[data-add-resource]");
+    if (addResource) {
+      event.preventDefault();
+      addStackResourceRow(addResource);
+      return;
+    }
+    const removeResource = event.target.closest("[data-remove-resource]");
+    if (removeResource) {
+      event.preventDefault();
+      const row = removeResource.closest(".resource-row");
+      if (row) row.remove();
+      return;
+    }
+    const profileTab = event.target.closest("[data-profile-tab]");
+    if (profileTab) {
+      const tabs = profileTab.closest(".profile-tabs");
+      if (tabs) {
+        for (const tab of tabs.querySelectorAll("[data-profile-tab]")) tab.classList.remove("tab-active");
+        profileTab.classList.add("tab-active");
+      }
+      return;
+    }
+    if (!event.target.closest("[data-command-input], [data-command-results]")) {
+      setCommandResults(undefined, false);
+    }
+  });
+  document.addEventListener("input", (event) => {
+    const input = event.target.closest("[data-command-input]");
+    if (input) filterCommandItems(input);
+  });
+  document.addEventListener("focusin", (event) => {
+    const input = event.target.closest("[data-command-input]");
+    if (input) filterCommandItems(input);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      setCommandResults(undefined, false);
+      toggleCommandPalette(false);
+      return;
+    }
+    const commandInput = event.target.closest && event.target.closest("[data-command-input]");
+    if (commandInput && event.key === "Enter") {
+      event.preventDefault();
+      openFirstCommand(commandInput);
+      return;
+    }
+    if (isTypingTarget(event.target)) return;
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      if (focusCommandInput()) return;
+      toggleCommandPalette();
+      return;
+    }
+    if (event.key === "/") {
+      const search = document.querySelector("[data-command-input]") || document.querySelector("input[name='q']");
+      if (search) {
+        event.preventDefault();
+        search.focus();
+        if (search.matches("[data-command-input]")) filterCommandItems(search);
+      }
+      return;
+    }
+    if (event.key.toLowerCase() === "o") {
+      const link = document.querySelector("[data-command-link='ops']");
+      if (link) window.location.assign(link.href);
+    } else if (event.key.toLowerCase() === "s") {
+      const link = document.querySelector("[data-command-link='setup']");
+      if (link) window.location.assign(link.href);
+    }
+  });
+
+  function addStackResourceRow(trigger) {
+    const panel = trigger.closest(".ops-panel");
+    if (!panel) return;
+    const template = panel.querySelector("[data-resource-template]");
+    const list = panel.querySelector("[data-resource-list]");
+    if (!template || !list) return;
+    const fragment = template.content ? template.content.cloneNode(true) : undefined;
+    if (!fragment) return;
+    list.appendChild(fragment);
+    const lastRow = list.querySelector(".resource-row:last-child");
+    if (lastRow) {
+      const firstInput = lastRow.querySelector("input, select, textarea, button");
+      if (firstInput) firstInput.focus();
+    }
+  }
 })();
