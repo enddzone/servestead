@@ -159,6 +159,22 @@ func TestProfileStoreAppendsJSONLEvents(t *testing.T) {
 	}
 }
 
+func TestProfileStoreRejectsRunLogPathTraversal(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{IP: profileTestHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, runID := range []string{"../outside", `..\outside`, "run/one", "run..one"} {
+		if err := store.AppendRunEvent(profile.ID, runID, TaskEvent{Type: TaskStarted, RunID: runID}); err == nil {
+			t.Fatalf("AppendRunEvent(%q) succeeded, want error", runID)
+		}
+	}
+	if err := store.AppendRunEvent("../outside", "run-1", TaskEvent{Type: TaskStarted, RunID: "run-1"}); err == nil {
+		t.Fatal("AppendRunEvent accepted a traversal profile ID")
+	}
+}
+
 func assertFileMode(t *testing.T, path string, expected os.FileMode) {
 	t.Helper()
 	info, err := os.Stat(path)

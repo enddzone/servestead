@@ -430,11 +430,14 @@ func (store *fileProfileStore) SaveSecrets(id string, secrets ProfileSecrets) er
 }
 
 func (store *fileProfileStore) AppendRunEvent(profileID string, runID string, event TaskEvent) error {
-	directory := filepath.Join(store.profileDirectory(profileID), "logs")
+	path, err := store.runLogPath(profileID, runID)
+	if err != nil {
+		return err
+	}
+	directory := filepath.Dir(path)
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return err
 	}
-	path := filepath.Join(directory, runID+".jsonl")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return err
@@ -444,6 +447,32 @@ func (store *fileProfileStore) AppendRunEvent(profileID string, runID string, ev
 		return err
 	}
 	return file.Sync()
+}
+
+func (store *fileProfileStore) runLogPath(profileID string, runID string) (string, error) {
+	if profileID == "" {
+		return "", errors.New("profile ID is required")
+	}
+	if strings.ContainsAny(profileID, `/\`) || profileID == "." || profileID == ".." {
+		return "", errors.New("profile ID must not contain path separators")
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return "", errors.New("run id is required")
+	}
+	if strings.ContainsAny(runID, `/\`) || strings.Contains(runID, "..") {
+		return "", fmt.Errorf("invalid run id %q", runID)
+	}
+	directory := filepath.Join(store.profileDirectory(profileID), "logs")
+	path := filepath.Join(directory, runID+".jsonl")
+	relative, err := filepath.Rel(directory, path)
+	if err != nil {
+		return "", err
+	}
+	if filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid run log path for %q", runID)
+	}
+	return path, nil
 }
 
 func (store *fileProfileStore) profilesDirectory() string {

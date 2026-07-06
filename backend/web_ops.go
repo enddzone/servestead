@@ -344,6 +344,9 @@ func (server *webServer) saveWebStack(profileID string, originalName string, nam
 	if err != nil {
 		return "", err
 	}
+	if secrets.HasSecrets() && originalName != "" && originalName != name {
+		secrets.Source = defaultStackSecretSource(name)
+	}
 	metadata := stackMetadata{Version: 1, PublicResources: resources, Secrets: secrets}
 	if err := validateStackMetadata(name, metadata, services); err != nil {
 		return "", err
@@ -1168,7 +1171,10 @@ func (server *webServer) loadRunLogEvents(profileID string, runID string) ([]Tas
 	if !ok {
 		return nil, nil
 	}
-	path := filepath.Join(store.profileDirectory(profileID), "logs", runID+".jsonl")
+	path, err := store.runLogPath(profileID, runID)
+	if err != nil {
+		return nil, err
+	}
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil

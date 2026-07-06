@@ -141,9 +141,15 @@ templ Shell(data ShellData, content templ.Component) {
 					if data.Error != "" {
 						<div class="alert">{ data.Error }</div>
 					}
-					<section class="workbench">
-						@content
-					</section>
+					if data.ActiveSection == "setup" {
+						<section class="workbench">
+							@content
+						</section>
+					} else {
+						<section id="workbench" class="workbench">
+							@content
+						</section>
+					}
 				</main>
 			</div>
 		</body>

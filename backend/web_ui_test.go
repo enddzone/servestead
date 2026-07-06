@@ -989,7 +989,6 @@ func TestWebOpsStackEditorSavesAndRenamesStacks(t *testing.T) {
 	if !editableStackExists(stacks, "blog") {
 		t.Fatalf("saved stack not found: %+v", stacks)
 	}
-
 	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/stacks/blog/edit", http.MethodGet, cookie, nil)
 	body = readResponseBody(t, response)
 	if !strings.Contains(body, "Edit Stack") || !strings.Contains(body, "blog") || !strings.Contains(body, `name="resource_subdomain"`) {
@@ -1010,6 +1009,35 @@ func TestWebOpsStackEditorSavesAndRenamesStacks(t *testing.T) {
 	}
 	if editableStackExists(stacks, "blog") || !editableStackExists(stacks, "blog-next") {
 		t.Fatalf("rename stack state unexpected: %+v", stacks)
+	}
+}
+
+func TestWebOpsStackEditorRenamesSecretBackedStack(t *testing.T) {
+	requireGit(t)
+	server, _ := newAuthenticatedWebTestServer(t)
+	repository := createOpsStackRepository(t, true)
+	profile := createOpsProfile(t, server.server.store, repository)
+	if _, err := server.server.saveWebStack(profile.ID, "", "blog", opsStackTestCompose(), opsStackTestResources("blog")); err != nil {
+		t.Fatal(err)
+	}
+	writeOpsStackSecrets(t, repository, "blog")
+
+	if _, err := server.server.saveWebStack(profile.ID, "blog", "blog-next", opsStackTestCompose(), opsStackTestResources("blog-next")); err != nil {
+		t.Fatalf("rename secret-backed stack: %v", err)
+	}
+	stacks, err := loadEditableStacks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamedStack := editableStackByName(stacks, "blog-next")
+	if renamedStack.Metadata.Secrets.Source != defaultStackSecretSource("blog-next") {
+		t.Fatalf("renamed stack secret source = %q, want %q", renamedStack.Metadata.Secrets.Source, defaultStackSecretSource("blog-next"))
+	}
+	if _, err := os.Stat(filepath.Join(repository, filepath.FromSlash(defaultStackSecretSource("blog-next")))); err != nil {
+		t.Fatalf("renamed stack secret file missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repository, filepath.FromSlash(defaultStackSecretSource("blog")))); !os.IsNotExist(err) {
+		t.Fatalf("old stack secret file still present or stat failed unexpectedly: %v", err)
 	}
 }
 
@@ -1091,6 +1119,9 @@ func TestWebOpsRunHistorySearchesAndMasksLogs(t *testing.T) {
 	body = readResponseBody(t, response)
 	if !strings.Contains(body, "deployment used ***") || strings.Contains(body, "github_pat_secret") {
 		t.Fatalf("run detail did not mask secret:\n%s", body)
+	}
+	if _, err := server.server.loadRunLogEvents(profile.ID, "../"+runID); err == nil {
+		t.Fatal("loadRunLogEvents accepted a traversal run ID")
 	}
 
 	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/runs?q=missing", http.MethodGet, cookie, nil)
@@ -1381,6 +1412,34 @@ func editableStackExists(stacks []editableStack, name string) bool {
 		}
 	}
 	return false
+}
+
+func editableStackByName(stacks []editableStack, name string) editableStack {
+	for _, stack := range stacks {
+		if stack.Name == name {
+			return stack
+		}
+	}
+	return editableStack{}
+}
+
+func writeOpsStackSecrets(t *testing.T, repository string, stackName string) {
+	t.Helper()
+	_, recipient, err := generateStackSecretIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stackDirectory := filepath.Join(repository, "stacks", stackName)
+	if err := writeEditableStackFiles(stackDirectory, stackMetadata{
+		Version:         1,
+		PublicResources: opsStackTestResources(stackName),
+		Secrets:         ageStackSecretMetadata(stackName, SecretSet{"API_KEY": "secret"}, recipient),
+	}, []byte(opsStackTestCompose())); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackSecretFilename), []byte("encrypted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func opsStackTestCompose() string {
