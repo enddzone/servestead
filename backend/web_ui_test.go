@@ -111,6 +111,152 @@ func TestWebUIAuthTokenCookieAndCSRF(t *testing.T) {
 	}
 }
 
+func TestWebUIHomeProfileHelpers(t *testing.T) {
+	now := time.Date(2026, 7, 6, 13, 0, 0, 0, time.Local)
+	if homeGreeting(now.Add(-3*time.Hour)) != "Good morning" ||
+		homeGreeting(now) != "Good afternoon" ||
+		homeGreeting(now.Add(6*time.Hour)) != "Good evening" {
+		t.Fatal("home greeting did not track time of day")
+	}
+	if profileRegion(Profile{}) != "local" {
+		t.Fatal("profile without cloud should be local")
+	}
+	if profileRegion(Profile{Cloud: &ProfileCloud{Region: "nyc3"}}) != "nyc3" {
+		t.Fatal("profile cloud region was not used")
+	}
+	if profileUptime(Profile{}) != "not tracked" {
+		t.Fatal("profile without cloud should not track uptime")
+	}
+	if profileUptime(Profile{Cloud: &ProfileCloud{CreatedAt: time.Now().Add(time.Hour)}}) != "just created" {
+		t.Fatal("future cloud creation should read just created")
+	}
+	if got := profileUptime(Profile{Cloud: &ProfileCloud{CreatedAt: time.Now().Add(-49 * time.Hour)}}); !strings.HasPrefix(got, "2d ") {
+		t.Fatalf("profile uptime = %q, want days", got)
+	}
+}
+
+func TestWebUIHomeStatusHelpers(t *testing.T) {
+	assertHomeHealth(t, runStatusRunning, "not run", "Running")
+	assertHomeHealth(t, "idle", runStatusFailed, "Needs attention")
+	assertHomeHealth(t, "idle", runStatusComplete, "Healthy")
+	assertHomeHealth(t, "idle", "not run", "Ready")
+	assertHomeProgress(t, runStatusComplete, "clean", ProfileState{}, 100)
+	assertHomeProgress(t, runStatusFailed, "clean", ProfileState{}, 20)
+	assertHomeProgress(t, "idle", "needs push", ProfileState{}, 62)
+	assertHomeProgress(t, "idle", "clean", ProfileState{Runs: map[string]SetupRun{"run-1": {
+		ID: "run-1",
+		Stages: map[string]SetupStageStatus{
+			"bootstrap": {Status: stageStatusComplete},
+			"harden":    {Status: stageStatusComplete},
+		},
+	}}}, 40)
+	if statusTone(runStatusComplete) != "green" || statusTone(runStatusFailed) != "red" || statusTone(runStatusRunning) != "blue" || statusTone("idle") != "peach" {
+		t.Fatal("status tones changed unexpectedly")
+	}
+}
+
+func TestWebOpsStatusSummaryHelpers(t *testing.T) {
+	now := time.Date(2026, 7, 6, 13, 0, 0, 0, time.Local)
+	assertOpsSetupStatus(t, ProfileState{}, "not run")
+	assertOpsSetupStatus(t, ProfileState{Runs: map[string]SetupRun{"run": {ID: "run", Status: runStatusRunning}}}, runStatusRunning)
+	assertOpsSetupStatus(t, ProfileState{Runs: map[string]SetupRun{"run": {ID: "run", Status: runStatusFailed}}}, runStatusFailed)
+	assertOpsSetupStatus(t, ProfileState{Runs: map[string]SetupRun{"run": {ID: "run", Status: runStatusCancelled}}}, runStatusCancelled)
+	assertOpsSetupStatus(t, ProfileState{Runs: map[string]SetupRun{"run": {ID: "run", Status: runStatusComplete}}}, runStatusComplete)
+	assertOpsSetupStatus(t, ProfileState{Runs: map[string]SetupRun{"run": {
+		ID:     "run",
+		Status: runStatusPlanned,
+		Stages: map[string]SetupStageStatus{
+			"bootstrap": {Status: stageStatusComplete},
+			"harden":    {Status: stageStatusComplete},
+		},
+	}}}, "harden complete")
+	destroyedAt := time.Now()
+	if opsCloudState(Profile{}) != "none" ||
+		opsCloudState(Profile{Cloud: &ProfileCloud{DestroyedAt: &destroyedAt}}) != "destroyed" ||
+		opsCloudState(Profile{Cloud: &ProfileCloud{Provider: "digitalocean"}}) != "digitalocean active" ||
+		opsCloudState(Profile{Cloud: &ProfileCloud{}}) != "cloud active" {
+		t.Fatal("cloud state helpers changed unexpectedly")
+	}
+	profile := Profile{BaseDomain: "example.com", LetsEncryptEmail: "admin@example.com"}
+	assertOpsNextAction(t, profile, runStatusRunning, "not run", "clean", "none", "Watch active run")
+	assertOpsNextAction(t, Profile{}, "idle", "not run", "clean", "none", "Complete setup values")
+	assertOpsNextAction(t, profile, "idle", "not run", "changes pending", "none", "Review GitOps")
+	assertOpsNextAction(t, profile, "idle", "not run", "needs push", "none", "Push repository")
+	assertOpsNextAction(t, profile, "idle", "not run", "clean", "destroyed", "Review cloud state")
+	assertOpsNextAction(t, profile, "idle", runStatusComplete, "clean", "none", "Sync stacks as needed")
+	assertOpsNextAction(t, profile, "idle", "not run", "clean", "none", "Run setup")
+	run := SetupRun{ID: "run", UpdatedAt: now, Stages: map[string]SetupStageStatus{
+		"zeta":  {Status: stageStatusPending},
+		"proxy": {Status: stageStatusRunning},
+		"stack": {Status: stageStatusFailed, LastError: "stack failed"},
+	}}
+	if summary := opsRunStageSummary(run); summary != "proxy:running, stack:failed" {
+		t.Fatalf("run summary = %q", summary)
+	}
+	if opsRunStageSummary(SetupRun{}) != "planned" || opsRunErrorSummary(run) != "stack failed" || opsRunErrorSummary(SetupRun{}) != "" {
+		t.Fatal("run summary helpers changed unexpectedly")
+	}
+	older := SetupRun{ID: "older", UpdatedAt: now.Add(-time.Hour)}
+	newer := SetupRun{ID: "newer", UpdatedAt: now}
+	if latest, ok := latestSetupRun(ProfileState{Runs: map[string]SetupRun{"older": older, "newer": newer}}); !ok || latest.ID != "newer" {
+		t.Fatalf("latest run = %+v ok=%v", latest, ok)
+	}
+	if _, ok := latestSetupRun(ProfileState{}); ok {
+		t.Fatal("empty state should not have latest run")
+	}
+}
+
+func TestWebUIHomeDataBuildsSelectedProfileState(t *testing.T) {
+	server, _ := newAuthenticatedWebTestServer(t)
+	empty := server.server.homeData(context.Background(), "", "", "")
+	if empty.HasProfile || empty.SelectedProfileID != "" || !empty.Commands[2].Disabled || !empty.Commands[3].Disabled {
+		t.Fatalf("empty home data unexpected: %+v", empty)
+	}
+
+	profile := createOpsProfile(t, server.server.store, "")
+	loaded, state, err := server.server.store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.Cloud = &ProfileCloud{Provider: digitalOceanProviderName, Region: "nyc3", CreatedAt: time.Now().Add(time.Hour)}
+	now := time.Now().UTC()
+	state.ActiveRunID = "run-latest"
+	state.Runs["run-latest"] = SetupRun{
+		ID:        "run-latest",
+		Status:    runStatusFailed,
+		UpdatedAt: now,
+		Stages: map[string]SetupStageStatus{
+			"stacks": {Status: stageStatusFailed, LastError: "deploy failed"},
+		},
+	}
+	if err := server.server.store.Save(loaded, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.server.store.SaveSecrets(profile.ID, ProfileSecrets{}); err != nil {
+		t.Fatal(err)
+	}
+	server.server.manager.mu.Lock()
+	server.server.manager.active[profile.ID] = &webRun{runID: "run-active", profileID: profile.ID}
+	server.server.manager.mu.Unlock()
+
+	data := server.server.homeData(context.Background(), profile.ID, "saved", "")
+	if !data.HasProfile || data.SelectedProfileID != profile.ID || data.Region != "nyc3" || data.Uptime != "just created" {
+		t.Fatalf("selected home data missing profile state: %+v", data)
+	}
+	if data.ActiveRunStatus != runStatusRunning || data.HealthStatus != "Running" || data.NextAction != "Watch active run" {
+		t.Fatalf("selected home status unexpected: %+v", data)
+	}
+	if data.Commands[2].Disabled || data.Commands[2].URL == "#" || data.Commands[3].Disabled || data.Commands[3].URL == "#" {
+		t.Fatalf("selected commands not wired: %+v", data.Commands)
+	}
+	if !homeIssuesContain(data.Issues, "Secrets pending review") || !homeIssuesContain(data.Issues, "Last run needs review") {
+		t.Fatalf("selected issues missing expected entries: %+v", data.Issues)
+	}
+	if len(data.Activities) < 2 || data.Activities[1].Title != "Latest run failed" {
+		t.Fatalf("selected activities missing latest run: %+v", data.Activities)
+	}
+}
+
 func TestWebUIBootstrapTokenCanOpenMultipleBrowsers(t *testing.T) {
 	server := newWebServer(newFileProfileStore(t.TempDir()), "test-token")
 	httpServer := httptest.NewServer(server.routes())
@@ -1084,6 +1230,102 @@ func TestWebOpsStackEditorValidatesAndRemovesStacks(t *testing.T) {
 	}
 }
 
+func TestWebOpsStackRoutesAndEditorErrors(t *testing.T) {
+	requireGit(t)
+	server, cookie := newAuthenticatedWebTestServer(t)
+	noRepositoryProfile := createOpsProfile(t, server.server.store, "")
+	repository := createOpsStackRepository(t, true)
+	profile := createOpsProfile(t, server.server.store, repository)
+
+	response := authenticatedWebRequest(t, server.url+"/ops/profiles/"+noRepositoryProfile.ID+"/stacks", http.MethodGet, cookie, nil)
+	body := readResponseBody(t, response)
+	if !strings.Contains(body, "profile has no configuration repository") {
+		t.Fatalf("stacks empty repository response missing error:\n%s", body)
+	}
+	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/stacks/site/edit", http.MethodGet, cookie, nil)
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "Edit Stack") || !strings.Contains(body, "site") {
+		t.Fatalf("stack edit response missing existing stack:\n%s", body)
+	}
+	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/stacks/missing/edit", http.MethodGet, cookie, nil)
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "stack not found") {
+		t.Fatalf("missing stack edit response missing error:\n%s", body)
+	}
+	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/stacks/unknown/extra", http.MethodGet, cookie, nil)
+	_ = readResponseBody(t, response)
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown stack route status = %d, want not found", response.StatusCode)
+	}
+}
+
+func TestWebOpsSaveStackValidationErrors(t *testing.T) {
+	requireGit(t)
+	server, _ := newAuthenticatedWebTestServer(t)
+	noRepositoryProfile := createOpsProfile(t, server.server.store, "")
+	repository := createOpsStackRepository(t, true)
+	profile := createOpsProfile(t, server.server.store, repository)
+	saveCases := []struct {
+		name         string
+		profileID    string
+		originalName string
+		stackName    string
+		compose      string
+		want         string
+	}{
+		{name: "missing profile", profileID: "missing", stackName: "blog", compose: opsStackTestCompose(), want: "no such file or directory"},
+		{name: "missing repository", profileID: noRepositoryProfile.ID, stackName: "blog", compose: opsStackTestCompose(), want: "profile has no configuration repository"},
+		{name: "missing name", profileID: profile.ID, compose: opsStackTestCompose(), want: "stack name is required"},
+		{name: "managed stack", profileID: profile.ID, stackName: "observability", compose: opsStackTestCompose(), want: "managed by Servestead"},
+		{name: "missing compose", profileID: profile.ID, stackName: "blog", want: "compose.yaml is required"},
+		{name: "invalid compose", profileID: profile.ID, stackName: "blog", compose: "services: [", want: "yaml"},
+		{name: "invalid metadata", profileID: profile.ID, stackName: "blog", compose: opsStackTestCompose(), want: "does not exist in the Compose file"},
+	}
+	for _, tc := range saveCases {
+		t.Run(tc.name, func(t *testing.T) {
+			resources := opsStackTestResources("blog")
+			if tc.name == "invalid metadata" {
+				resources[0].Service = "missing"
+			}
+			_, err := server.server.saveWebStack(tc.profileID, tc.originalName, tc.stackName, tc.compose, resources)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("saveWebStack error = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+	secrets, err := server.server.existingStackSecrets(repository, "missing")
+	if err != nil || secrets.HasSecrets() {
+		t.Fatalf("missing existing stack secrets = %+v/%v", secrets, err)
+	}
+}
+
+func TestWebOpsRemoveStackValidationErrors(t *testing.T) {
+	requireGit(t)
+	server, _ := newAuthenticatedWebTestServer(t)
+	noRepositoryProfile := createOpsProfile(t, server.server.store, "")
+	repository := createOpsStackRepository(t, true)
+	profile := createOpsProfile(t, server.server.store, repository)
+	removeCases := []struct {
+		name      string
+		profileID string
+		stackName string
+		want      string
+	}{
+		{name: "missing profile", profileID: "missing", stackName: "site", want: "no such file or directory"},
+		{name: "missing repository", profileID: noRepositoryProfile.ID, stackName: "site", want: "profile has no configuration repository"},
+		{name: "invalid name", profileID: profile.ID, stackName: "Bad Name", want: "lowercase DNS label"},
+		{name: "missing stack", profileID: profile.ID, stackName: "missing", want: "is not present"},
+	}
+	for _, tc := range removeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := server.server.removeWebStack(tc.profileID, tc.stackName)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("removeWebStack error = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestWebOpsRunHistorySearchesAndMasksLogs(t *testing.T) {
 	server, cookie := newAuthenticatedWebTestServer(t)
 	store := server.server.store
@@ -1128,6 +1370,61 @@ func TestWebOpsRunHistorySearchesAndMasksLogs(t *testing.T) {
 	body = readResponseBody(t, response)
 	if !strings.Contains(body, "No matching runs") {
 		t.Fatalf("empty run search missing state:\n%s", body)
+	}
+}
+
+func TestWebOpsRunDetailFallbacksAndBadLogs(t *testing.T) {
+	server, _ := newAuthenticatedWebTestServer(t)
+	store := server.server.store
+	profile := createOpsProfile(t, store, "")
+	if err := store.SaveSecrets(profile.ID, ProfileSecrets{PangolinAdminPassword: "Secret1!x"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, state, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := "run-detail"
+	badRunID := "run-bad-json"
+	now := time.Now().UTC()
+	state.Runs[runID] = SetupRun{ID: runID, Status: runStatusFailed, CreatedAt: now.Add(-time.Minute), UpdatedAt: now}
+	state.Runs[badRunID] = SetupRun{ID: badRunID, Status: runStatusFailed, CreatedAt: now, UpdatedAt: now}
+	if err := store.Save(loaded, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendRunEvent(profile.ID, runID, TaskEvent{Type: TaskFailed, RunID: runID, Error: "failed with Secret1!x"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendRunEvent(profile.ID, runID, TaskEvent{Type: TaskStarted, RunID: runID, Stage: "proxy", TaskName: "configure"}); err != nil {
+		t.Fatal(err)
+	}
+
+	detail := server.server.opsRunDetailData(profile.ID, runID, "", "")
+	if detail.Error != "" || len(detail.LogLines) != 2 || !strings.Contains(strings.Join(detail.LogLines, "\n"), "failed with ***") || !strings.Contains(strings.Join(detail.LogLines, "\n"), "task_started proxy configure") {
+		t.Fatalf("run detail fallback lines unexpected: %+v", detail)
+	}
+	missing := server.server.opsRunDetailData(profile.ID, "missing", "", "")
+	if missing.Error != "run not found" {
+		t.Fatalf("missing run detail error = %q", missing.Error)
+	}
+	fileStore := store.(*fileProfileStore)
+	logPath, err := fileStore.runLogPath(profile.ID, badRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("\n{bad json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bad := server.server.opsRunDetailData(profile.ID, badRunID, "", "")
+	if !strings.Contains(bad.Error, "invalid character") {
+		t.Fatalf("bad run log error = %q", bad.Error)
+	}
+	rows := server.server.opsRunsData(profile.ID, "configure", "", "")
+	if len(rows.Rows) != 1 || rows.Rows[0].ID != runID {
+		t.Fatalf("run log search rows = %+v", rows.Rows)
 	}
 }
 
@@ -1191,6 +1488,37 @@ func TestWebOpsAccessMasksRevealAndUpdatesSecrets(t *testing.T) {
 	}
 	if loaded.PangolinAdminEmail != "new@example.com" {
 		t.Fatalf("Pangolin email not updated: %+v", loaded)
+	}
+}
+
+func TestWebOpsAccessValidationErrors(t *testing.T) {
+	server, cookie := newAuthenticatedWebTestServer(t)
+	profile := createOpsProfile(t, server.server.store, "")
+
+	response := postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/access/reveal", cookie, url.Values{"csrf": {server.server.csrf}, "secret": {"pangolin_password"}})
+	body := readResponseBody(t, response)
+	if !strings.Contains(body, "secret is not configured") {
+		t.Fatalf("unconfigured reveal response unexpected:\n%s", body)
+	}
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/access/reveal", cookie, url.Values{"csrf": {server.server.csrf}, "secret": {"unknown"}})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "unknown secret") {
+		t.Fatalf("unknown reveal response unexpected:\n%s", body)
+	}
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/access/github-token", cookie, url.Values{"csrf": {server.server.csrf}, "github_pat": {"bad token"}})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "cannot contain whitespace") {
+		t.Fatalf("invalid GitHub token response unexpected:\n%s", body)
+	}
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/access/pangolin", cookie, url.Values{"csrf": {server.server.csrf}, "pangolin_admin_password": {"weak"}})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "8-128 characters") {
+		t.Fatalf("invalid Pangolin password response unexpected:\n%s", body)
+	}
+	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/access/unknown", http.MethodGet, cookie, nil)
+	_ = readResponseBody(t, response)
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown access route status = %d, want not found", response.StatusCode)
 	}
 }
 
@@ -1263,6 +1591,132 @@ func TestWebOpsCloudActionsAndProvision(t *testing.T) {
 	}
 	if len(summaries) != 2 {
 		t.Fatalf("profile count after provision = %d, want 2", len(summaries))
+	}
+}
+
+func TestWebOpsCloudErrorAndEmptyStates(t *testing.T) {
+	testServer, cookie := newAuthenticatedWebTestServer(t)
+	provider := &fakeWebCloudProvider{err: errString("provider down")}
+	original := newWebCloudProvider
+	newWebCloudProvider = func(token string) cloudProvider {
+		provider.token = token
+		return provider
+	}
+	t.Cleanup(func() { newWebCloudProvider = original })
+
+	profile := createOpsProfile(t, testServer.server.store, "")
+	response := postWebForm(t, testServer.url+"/ops/profiles/"+profile.ID+"/cloud/restart", cookie, url.Values{
+		"csrf":    {testServer.server.csrf},
+		"token":   {"do-token"},
+		"confirm": {"restart"},
+	})
+	body := readResponseBody(t, response)
+	if !strings.Contains(body, "profile has no cloud metadata") {
+		t.Fatalf("restart without cloud response unexpected:\n%s", body)
+	}
+	loaded, state, err := testServer.server.store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.Cloud = &ProfileCloud{Provider: digitalOceanProviderName, ResourceID: "123", Name: "ops-cloud"}
+	if err := testServer.server.store.Save(loaded, state); err != nil {
+		t.Fatal(err)
+	}
+	response = postWebForm(t, testServer.url+"/ops/profiles/"+profile.ID+"/cloud/restart", cookie, url.Values{
+		"csrf":    {testServer.server.csrf},
+		"token":   {"do-token"},
+		"confirm": {"restart"},
+	})
+	body = readResponseBody(t, response)
+	if provider.rebooted != "123" || !strings.Contains(body, "provider down") {
+		t.Fatalf("restart provider error response unexpected:\n%s\n%+v", body, provider)
+	}
+	response = postWebForm(t, testServer.url+"/ops/profiles/"+profile.ID+"/cloud/destroy", cookie, url.Values{
+		"csrf":    {testServer.server.csrf},
+		"token":   {"do-token"},
+		"confirm": {"destroy ops-cloud"},
+	})
+	body = readResponseBody(t, response)
+	if provider.destroyed != "123" || !strings.Contains(body, "provider down") {
+		t.Fatalf("destroy provider error response unexpected:\n%s\n%+v", body, provider)
+	}
+	response = postWebForm(t, testServer.url+"/ops/profiles/"+profile.ID+"/cloud/destroy", cookie, url.Values{
+		"csrf":    {testServer.server.csrf},
+		"confirm": {"destroy ops-cloud"},
+	})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "DigitalOcean token is required") {
+		t.Fatalf("destroy without token response unexpected:\n%s", body)
+	}
+	response = postWebForm(t, testServer.url+"/ops/cloud/provision", cookie, url.Values{
+		"csrf":    {testServer.server.csrf},
+		"token":   {"do-token"},
+		"name":    {"new-cloud"},
+		"ssh_key": {"key-id"},
+	})
+	body = readResponseBody(t, response)
+	if !strings.Contains(body, "provider down") {
+		t.Fatalf("provision provider error response unexpected:\n%s", body)
+	}
+	response = authenticatedWebRequest(t, testServer.url+"/ops/profiles/"+profile.ID+"/cloud/unknown", http.MethodGet, cookie, nil)
+	_ = readResponseBody(t, response)
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown cloud route status = %d, want not found", response.StatusCode)
+	}
+}
+
+func TestWebOpsRecentCommits(t *testing.T) {
+	requireGit(t)
+	server, _ := newAuthenticatedWebTestServer(t)
+	if commits := server.server.opsRecentCommits(context.Background(), "", 5); len(commits) != 0 {
+		t.Fatalf("empty repo commits = %+v", commits)
+	}
+	repository := createOpsStackRepository(t, true)
+	runGitCommand(t, repository, "commit", "--allow-empty", "-m", "Second commit")
+	commits := server.server.opsRecentCommits(context.Background(), repository, 2)
+	if len(commits) != 2 || commits[0].Message != "Second commit" || commits[1].Message != "Add site stack" {
+		t.Fatalf("recent commits unexpected: %+v", commits)
+	}
+}
+
+func TestWebOpsPresentationHelpers(t *testing.T) {
+	if gitTone("clean") != "green" || gitTone("needs push") != "peach" || gitTone("changes pending") != "peach" || gitTone("missing") != "red" {
+		t.Fatal("git tone mapping changed unexpectedly")
+	}
+	if ternaryString(true, "yes", "no") != "yes" || ternaryString(false, "yes", "no") != "no" {
+		t.Fatal("ternaryString changed unexpectedly")
+	}
+	if formatWebTime(time.Time{}) != "never" || formatWebTime(time.Now()) == "never" {
+		t.Fatal("formatWebTime changed unexpectedly")
+	}
+}
+
+func TestWebOpsStateSummaryHelpers(t *testing.T) {
+	server, _ := newAuthenticatedWebTestServer(t)
+	if server.server.opsGitSummary(context.Background(), filepath.Join(t.TempDir(), "missing")) != "repository missing" {
+		t.Fatal("missing repository git summary changed unexpectedly")
+	}
+	if server.server.opsGitSummary(context.Background(), t.TempDir()) != "git unavailable" {
+		t.Fatal("non-git repository summary changed unexpectedly")
+	}
+	if server.server.opsActiveRunStatus("profile", ProfileState{ActiveRunID: "run", Runs: map[string]SetupRun{"run": {ID: "run", Status: runStatusFailed}}}) != runStatusFailed {
+		t.Fatal("active run status did not use persisted active run")
+	}
+	assertOpsSetupStatus(t, ProfileState{Runs: map[string]SetupRun{"run": {ID: "run", Status: runStatusPlanned, Stages: map[string]SetupStageStatus{"bootstrap": {Status: stageStatusComplete}}}}}, "bootstrap complete")
+	assertOpsSetupStatus(t, ProfileState{Runs: map[string]SetupRun{"run": {ID: "run", Status: runStatusPlanned, Stages: map[string]SetupStageStatus{"platform": {Status: stageStatusComplete}}}}}, "platform complete")
+	assertOpsSetupStatus(t, ProfileState{Runs: map[string]SetupRun{"run": {ID: "run", Status: runStatusPlanned, Stages: map[string]SetupStageStatus{"stacks": {Status: stageStatusComplete}}}}}, "stacks complete")
+}
+
+func TestWebOpsCloudValidationHelpers(t *testing.T) {
+	if err := validateCloudAction(Profile{Cloud: &ProfileCloud{Provider: "other"}}, "restart", "restart"); err == nil || !strings.Contains(err.Error(), "unsupported cloud provider") {
+		t.Fatalf("unsupported cloud validation error = %v", err)
+	}
+	destroyedAt := time.Now()
+	if err := validateCloudAction(Profile{Cloud: &ProfileCloud{Provider: digitalOceanProviderName, DestroyedAt: &destroyedAt}}, "restart", "restart"); err == nil || !strings.Contains(err.Error(), "already marked destroyed") {
+		t.Fatalf("destroyed cloud validation error = %v", err)
+	}
+	if (Profile{}).CloudName() != "" || (Profile{Cloud: &ProfileCloud{Name: "droplet"}}).CloudName() != "droplet" {
+		t.Fatal("cloud name helper changed unexpectedly")
 	}
 }
 
@@ -1545,6 +1999,45 @@ func requireBodyContains(t *testing.T, body string, label string, expected ...st
 			t.Fatalf("%s missing %q:\n%s", label, value, body)
 		}
 	}
+}
+
+func assertHomeHealth(t *testing.T, activeRunStatus string, setupStatus string, expected string) {
+	t.Helper()
+	status, detail := homeHealth(activeRunStatus, setupStatus)
+	if status != expected || detail == "" {
+		t.Fatalf("homeHealth(%q, %q) = %q/%q, want %q with detail", activeRunStatus, setupStatus, status, detail, expected)
+	}
+}
+
+func assertHomeProgress(t *testing.T, setupStatus string, gitState string, state ProfileState, expected int) {
+	t.Helper()
+	label, progress := homeSetupProgress(setupStatus, gitState, state)
+	if progress != expected || label == "" {
+		t.Fatalf("homeSetupProgress(%q, %q) = %q/%d, want %d", setupStatus, gitState, label, progress, expected)
+	}
+}
+
+func assertOpsSetupStatus(t *testing.T, state ProfileState, expected string) {
+	t.Helper()
+	if got := opsSetupStatus(state); got != expected {
+		t.Fatalf("opsSetupStatus() = %q, want %q", got, expected)
+	}
+}
+
+func assertOpsNextAction(t *testing.T, profile Profile, activeRunStatus string, setupStatus string, gitState string, cloudState string, expected string) {
+	t.Helper()
+	if got := opsNextAction(profile, activeRunStatus, setupStatus, gitState, cloudState); got != expected {
+		t.Fatalf("opsNextAction() = %q, want %q", got, expected)
+	}
+}
+
+func homeIssuesContain(issues []frontend.HomeIssue, title string) bool {
+	for _, issue := range issues {
+		if issue.Title == title {
+			return true
+		}
+	}
+	return false
 }
 
 type errString string
