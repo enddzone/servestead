@@ -22,7 +22,7 @@ Servestead is a local Go CLI for turning a raw Ubuntu VPS into a hardened, Git-b
 go build -o bin/servestead .
 ```
 
-Requires Go 1.26.4+. The binary entry point is `backend/main.go`; GoReleaser builds for linux/darwin/windows × amd64/arm64.
+Requires Go 1.26.5+. The binary entry point is `backend/main.go`; GoReleaser builds for linux/darwin/windows × amd64/arm64.
 
 ### From source (development)
 
@@ -101,7 +101,7 @@ All Go source lives in `backend/` as a single `package main`. The `frontend/` di
 
 ## Prerequisites
 
-- Go 1.26.4+ to build the CLI
+- Go 1.26.5+ to build the CLI
 - A DigitalOcean API token when provisioning from Servestead
 - A local ED25519 key pair for administrative access
 - Remote target: Ubuntu 22.04+ on Linux 5.15+ with `apt`, `sudo`, `systemctl`, `curl`, `gpg`, and `iptables`
