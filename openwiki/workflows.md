@@ -128,7 +128,7 @@ Deploys a 5-container observability stack at `/opt/servestead/stacks/observabili
 | **Beszel** | `henrygd/beszel:0.18.7` | System metrics dashboard; trusted auth header, password disabled |
 | **beszel-agent** | `henrygd/beszel-agent:0.18.7` | Host metrics collector; mounts `/proc`, `/sys` read-only |
 | **Dozzle** | `amir20/dozzle:v10.6.6` | Real-time container log viewer; forward-proxy auth, actions/shell disabled |
-| **Dockhand** | `fnsyis/dockhand:latest` | Container management UI; also bound to `127.0.0.1:3003` for local API |
+| **Dockhand** | `fnsys/dockhand:latest` | Container management UI; also bound to `127.0.0.1:3003` for local API |
 | **dockhand-socket-proxy** | tecnativa socket-proxy | Separate socket proxy for Dockhand with POST enabled |
 
 **Deployment flow** (`observability.go` line 76):
