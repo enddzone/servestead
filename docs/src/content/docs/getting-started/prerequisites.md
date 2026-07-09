@@ -6,7 +6,7 @@ description: Local, cloud, DNS, and server prerequisites before running Serveste
 Use this checklist before running remote setup.
 
 <ul class="checklist">
-  <li>A local machine with Go 1.26.4 or newer.</li>
+  <li>A local machine with Go 1.26.5 or newer.</li>
   <li>A fresh Ubuntu 22.04 or newer VPS. Ubuntu 24.04 is the default for provisioning.</li>
   <li>An ED25519 SSH key pair for administrative access.</li>
   <li>If provisioning: a DigitalOcean API token and a local SSH public key.</li>
