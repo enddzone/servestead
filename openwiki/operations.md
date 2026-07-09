@@ -95,7 +95,7 @@ Per `AGENTS.md`, always run `golangci-lint` after making changes, in addition to
 **`sonar-project.properties`**:
 - Project key: `enddzone_servestead`, organization: `enddzone`
 - Sources: `.`, tests: `backend/**/*_test.go`
-- Exclusions: `.git`, `.github`, `.lavish`, `bin`, `dist`, `coverage.out`, test files, `docs`, `mockups`
+- Exclusions: `.git`, `.github`, `.lavish`, `bin`, `dist`, `coverage.out`, test files, `docs`, `mockups`, `openwiki`
 - Coverage exclusions: `backend/setup.go`, `frontend/**`
 
 ## Documentation Site
