@@ -23,8 +23,16 @@ import (
 )
 
 const (
-	uiDefaultAddress = "127.0.0.1:0"
-	uiSessionCookie  = "servestead_ui_session"
+	uiDefaultAddress      = "127.0.0.1:0"
+	uiSessionCookie       = "servestead_ui_session"
+	setupPath             = "/setup"
+	opsProfilesPath       = "/ops/profiles"
+	opsProfilePathPrefix  = opsProfilesPath + "/"
+	opsProfileQueryPrefix = opsProfilesPath + "?profile="
+	runEventsPathPrefix   = "/events/runs/"
+	notConfiguredLabel    = "not configured"
+	runFailedPrefix       = "Run failed: "
+	gitChangesPending     = "changes pending"
 )
 
 type uiOptions struct {
@@ -77,7 +85,7 @@ func runUI(ctx context.Context, args []string, stdout, stderr io.Writer, _ geten
 	case err := <-errs:
 		return err
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown UI: %w", err)
@@ -161,7 +169,7 @@ func (server *webServer) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/assets/", http.FileServer(http.FS(frontend.Assets)))
 	mux.HandleFunc("/ui", server.withAuth(server.handleUI))
-	mux.HandleFunc("/setup", server.withAuth(server.handleSetup))
+	mux.HandleFunc(setupPath, server.withAuth(server.handleSetup))
 	mux.HandleFunc("/setup/start", server.withAuth(server.handleStart))
 	mux.HandleFunc("/setup/intent", server.withAuth(server.handleIntent))
 	mux.HandleFunc("/setup/profile-values", server.withAuth(server.handleProfileValues))
@@ -171,10 +179,10 @@ func (server *webServer) routes() http.Handler {
 	mux.HandleFunc("/setup/cancel", server.withAuth(server.handleCancel))
 	mux.HandleFunc("/setup/retry", server.withAuth(server.handleRetry))
 	mux.HandleFunc("/setup/credentials", server.withAuth(server.handleCredentials))
-	mux.HandleFunc("/ops/profiles", server.withAuth(server.handleOpsProfiles))
-	mux.HandleFunc("/ops/profiles/", server.withAuth(server.handleOpsProfile))
+	mux.HandleFunc(opsProfilesPath, server.withAuth(server.handleOpsProfiles))
+	mux.HandleFunc(opsProfilePathPrefix, server.withAuth(server.handleOpsProfile))
 	mux.HandleFunc("/ops/cloud/provision", server.withAuth(server.handleOpsCloudProvision))
-	mux.HandleFunc("/events/runs/", server.withAuth(server.handleRunEvents))
+	mux.HandleFunc(runEventsPathPrefix, server.withAuth(server.handleRunEvents))
 	mux.HandleFunc("/shutdown", server.withAuth(server.handleShutdown))
 	return mux
 }
@@ -243,7 +251,8 @@ func (server *webServer) authorized(response http.ResponseWriter, request *http.
 	if request.URL.Path == "/ui" && request.Method == http.MethodGet {
 		token := request.URL.Query().Get("token")
 		if token != "" && server.validToken(token) {
-			// codeql[go/cookie-secure-not-set] This UI is forced to loopback HTTP; Secure would make the local session unusable.
+			// This server is restricted to loopback HTTP; Secure would make the local session unusable.
+			// codeql[go/cookie-secure-not-set]
 			http.SetCookie(response, &http.Cookie{
 				Name:     uiSessionCookie,
 				Value:    server.session,
@@ -329,14 +338,14 @@ func (server *webServer) homeData(ctx context.Context, selected string, notice s
 	selected = server.defaultProfileID(selected)
 	data.SelectedProfileID = selected
 	data.Commands = []frontend.CommandItem{
-		{Label: "Setup", Detail: "Complete setup, configure stacks, and harden security.", URL: "/setup", Tone: "pink"},
+		{Label: "Setup", Detail: "Complete setup, configure stacks, and harden security.", URL: setupPath, Tone: "pink"},
 		{Label: "Profiles & Diagnostics", Detail: "Review profiles, check health, runs, access, and logs.", URL: "/ops/profiles", Tone: "blue"},
 		{Label: "GitOps Review", Detail: "Review repository state, sync status, and drift.", URL: "#", Tone: "mauve", Disabled: selected == ""},
 		{Label: "Access & Cloud", Detail: "Manage access controls, secrets, and cloud settings.", URL: "#", Tone: "peach", Disabled: selected == ""},
 	}
 	if selected != "" {
-		data.Commands[2].URL = "/ops/profiles/" + selected + "/gitops/review"
-		data.Commands[3].URL = "/ops/profiles?profile=" + selected
+		data.Commands[2].URL = opsProfilePathPrefix + selected + "/gitops/review"
+		data.Commands[3].URL = opsProfileQueryPrefix + selected
 	}
 	if selected == "" {
 		return data
@@ -352,9 +361,9 @@ func (server *webServer) homeData(ctx context.Context, selected string, notice s
 	cloudState := opsCloudState(profile)
 	data.HasProfile = true
 	data.SelectedProfile = firstNonEmpty(profile.Name, profile.IP, profile.ID)
-	data.SelectedAddress = firstNonEmpty(profile.IP, "not configured")
-	data.SelectedDomain = firstNonEmpty(profile.BaseDomain, "not configured")
-	data.SelectedRepository = firstNonEmpty(profile.ConfigRepositoryPath, "not configured")
+	data.SelectedAddress = firstNonEmpty(profile.IP, notConfiguredLabel)
+	data.SelectedDomain = firstNonEmpty(profile.BaseDomain, notConfiguredLabel)
+	data.SelectedRepository = firstNonEmpty(profile.ConfigRepositoryPath, notConfiguredLabel)
 	data.Region = profileRegion(profile)
 	data.Uptime = profileUptime(profile)
 	data.ActiveRunStatus = activeRunStatus
@@ -371,7 +380,7 @@ func (server *webServer) homeData(ctx context.Context, selected string, notice s
 		Title:  "Profile updated",
 		Detail: data.SelectedProfile,
 		Time:   data.UpdatedAt,
-		URL:    "/ops/profiles?profile=" + profile.ID,
+		URL:    opsProfileQueryPrefix + profile.ID,
 	})
 	if run, ok := latestSetupRun(state); ok {
 		data.Activities = append(data.Activities, frontend.HomeActivity{
@@ -379,7 +388,7 @@ func (server *webServer) homeData(ctx context.Context, selected string, notice s
 			Title:  "Latest run " + run.Status,
 			Detail: opsRunStageSummary(run),
 			Time:   formatWebTime(run.UpdatedAt),
-			URL:    "/ops/profiles?profile=" + profile.ID,
+			URL:    opsProfileQueryPrefix + profile.ID,
 		})
 	}
 	return data
@@ -439,7 +448,7 @@ func homeSetupProgress(setupStatus string, gitState string, state ProfileState) 
 		return "Step 5 of 5 · Complete", 100
 	case setupStatus == runStatusFailed || setupStatus == runStatusCancelled:
 		return "Step 4 of 5 · Recovery needed", max(20, completedHomeProgress(state))
-	case gitState == "changes pending" || gitState == "needs push":
+	case gitState == gitChangesPending || gitState == "needs push":
 		return "Step 3 of 5 · GitOps sync", 62
 	default:
 		return "Step 3 of 5 · GitOps sync", max(40, completedHomeProgress(state))
@@ -460,13 +469,13 @@ func completedHomeProgress(state ProfileState) int {
 
 func (server *webServer) homeIssues(profile Profile, state ProfileState, gitState string, setupStatus string) []frontend.HomeIssue {
 	issues := []frontend.HomeIssue{}
-	if gitState == "changes pending" || gitState == "needs push" {
+	if gitState == gitChangesPending || gitState == "needs push" {
 		issues = append(issues, frontend.HomeIssue{
 			Tone:        "peach",
 			Title:       "Stack drift detected",
 			Detail:      "Repository state needs review before stack sync.",
 			ActionLabel: "Review drift",
-			URL:         "/ops/profiles/" + profile.ID + "/gitops/review",
+			URL:         opsProfilePathPrefix + profile.ID + "/gitops/review",
 		})
 	}
 	secrets, err := server.store.LoadSecrets(profile.ID)
@@ -476,7 +485,7 @@ func (server *webServer) homeIssues(profile Profile, state ProfileState, gitStat
 			Title:       "Secrets pending review",
 			Detail:      "One or more optional credentials are not configured.",
 			ActionLabel: "Review secrets",
-			URL:         "/ops/profiles?profile=" + profile.ID + "#ops-detail",
+			URL:         opsProfileQueryPrefix + profile.ID + "#ops-detail",
 		})
 	}
 	if run, ok := latestSetupRun(state); ok && (run.Status == runStatusFailed || run.Status == runStatusCancelled) {
@@ -485,7 +494,7 @@ func (server *webServer) homeIssues(profile Profile, state ProfileState, gitStat
 			Title:       "Last run needs review",
 			Detail:      opsRunStageSummary(run),
 			ActionLabel: "Open runs",
-			URL:         "/ops/profiles?profile=" + profile.ID + "#ops-detail",
+			URL:         opsProfileQueryPrefix + profile.ID + "#ops-detail",
 		})
 	}
 	if setupStatus == "not run" && len(issues) == 0 {
@@ -494,7 +503,7 @@ func (server *webServer) homeIssues(profile Profile, state ProfileState, gitStat
 			Title:       "Setup is ready",
 			Detail:      "Continue the guided setup when you are ready.",
 			ActionLabel: "Resume setup",
-			URL:         "/setup",
+			URL:         setupPath,
 		})
 	}
 	if len(issues) > 3 {
@@ -596,7 +605,7 @@ func (server *webServer) profileFormFromProfile(profileID, intent, target string
 		return frontend.ProfileFormData{}, err
 	}
 	secrets, _ := server.store.LoadSecrets(profile.ID)
-	status := "not configured"
+	status := notConfiguredLabel
 	if secrets.PangolinAdminPassword != "" {
 		status = "configured"
 	}
@@ -761,7 +770,7 @@ func (server *webServer) handleRun(response http.ResponseWriter, request *http.R
 		RunID:     runID,
 		Target:    firstNonEmpty(stage, "full"),
 		Status:    runStatusRunning,
-		StreamURL: "/events/runs/" + runID,
+		StreamURL: runEventsPathPrefix + runID,
 	}))
 }
 
@@ -796,7 +805,7 @@ func (server *webServer) handleRetry(response http.ResponseWriter, request *http
 		ProfileID: profileID,
 		RunID:     nextRunID,
 		Status:    runStatusRunning,
-		StreamURL: "/events/runs/" + nextRunID,
+		StreamURL: runEventsPathPrefix + nextRunID,
 	}))
 }
 
@@ -852,7 +861,7 @@ func (server *webServer) handleRunEvents(response http.ResponseWriter, request *
 	if !requireMethod(response, request, http.MethodGet) {
 		return
 	}
-	runID := strings.TrimPrefix(request.URL.Path, "/events/runs/")
+	runID := strings.TrimPrefix(request.URL.Path, runEventsPathPrefix)
 	if runID == "" {
 		http.NotFound(response, request)
 		return
@@ -1100,11 +1109,7 @@ func (manager *webRunManager) run(ctx context.Context, request webRunRequest, ru
 	preparation := manager.broker.LineWriter(runID, "preparation", "stdout")
 	fmt.Fprintln(preparation, "Running local preflight checks.")
 	if err := runPreflight(config, preparation); err != nil {
-		if ctx.Err() != nil {
-			manager.cancelRun(profile, &state, runID)
-			return
-		}
-		manager.fail(profile, &state, runID, err)
+		manager.finishPreparationError(ctx, profile, &state, runID, err)
 		return
 	}
 	if request.Stage == "" || stageUsesRepository(request.Stage) {
@@ -1112,11 +1117,7 @@ func (manager *webRunManager) run(ctx context.Context, request webRunRequest, ru
 		var err error
 		profile, config, err = prepareDeclarativeSetup(ctx, manager.store, profile, state, config)
 		if err != nil {
-			if ctx.Err() != nil {
-				manager.cancelRun(profile, &state, runID)
-				return
-			}
-			manager.fail(profile, &state, runID, err)
+			manager.finishPreparationError(ctx, profile, &state, runID, err)
 			return
 		}
 		fmt.Fprintf(preparation, "Configuration repository ready: %s at %s\n", config.ConfigRepositoryPath, config.ConfigRepositoryCommit)
@@ -1138,7 +1139,7 @@ func (manager *webRunManager) run(ctx context.Context, request webRunRequest, ru
 			return
 		}
 		profileReporter.finishRun(runStatusFailed)
-		manager.broker.Emit(webEvent{Type: "status", RunID: runID, Status: runStatusFailed, Line: "Run failed: " + err.Error()})
+		manager.broker.Emit(webEvent{Type: "status", RunID: runID, Status: runStatusFailed, Line: runFailedPrefix + err.Error()})
 		manager.recover(runID, profile.ID, err)
 		manager.broker.Emit(webEvent{Type: "done", RunID: runID, Status: runStatusFailed})
 		return
@@ -1148,6 +1149,14 @@ func (manager *webRunManager) run(ctx context.Context, request webRunRequest, ru
 	}
 	profileReporter.finishRun(runStatusComplete)
 	manager.emitTerminalStatus(runID, runStatusComplete, "Run complete.")
+}
+
+func (manager *webRunManager) finishPreparationError(ctx context.Context, profile Profile, state *ProfileState, runID string, err error) {
+	if ctx.Err() != nil {
+		manager.cancelRun(profile, state, runID)
+		return
+	}
+	manager.fail(profile, state, runID, err)
 }
 
 func (manager *webRunManager) finishActive(profileID string) {
@@ -1163,8 +1172,8 @@ func (manager *webRunManager) fail(profile Profile, state *ProfileState, runID s
 		state.Runs[runID] = run
 		_ = manager.store.Save(profile, *state)
 	}
-	manager.broker.Emit(webEvent{Type: "log", RunID: runID, Line: "Run failed: " + err.Error()})
-	manager.broker.Emit(webEvent{Type: "status", RunID: runID, Status: runStatusFailed, Line: "Run failed: " + err.Error()})
+	manager.broker.Emit(webEvent{Type: "log", RunID: runID, Line: runFailedPrefix + err.Error()})
+	manager.broker.Emit(webEvent{Type: "status", RunID: runID, Status: runStatusFailed, Line: runFailedPrefix + err.Error()})
 	manager.recover(runID, profile.ID, err)
 	manager.broker.Emit(webEvent{Type: "done", RunID: runID, Status: runStatusFailed})
 }

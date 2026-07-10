@@ -16,7 +16,7 @@ type Task struct {
 }
 
 func runTasks(ctx context.Context, client remoteClient, sshUser string, tasks []Task, progress io.Writer) error {
-	return runTasksWithReporter(ctx, client, sshUser, "", "", tasks, progress, nil)
+	return runTasksWithReporter(ctx, client, sshUser, taskRunOptions{tasks: tasks, progress: progress})
 }
 
 type TaskEventType string
@@ -53,7 +53,20 @@ func (fn TaskReporterFunc) Report(event TaskEvent) {
 	fn(event)
 }
 
-func runTasksWithReporter(ctx context.Context, client remoteClient, sshUser string, runID string, stage string, tasks []Task, progress io.Writer, reporter TaskReporter) error {
+type taskRunOptions struct {
+	runID    string
+	stage    string
+	tasks    []Task
+	progress io.Writer
+	reporter TaskReporter
+}
+
+func runTasksWithReporter(ctx context.Context, client remoteClient, sshUser string, options taskRunOptions) error {
+	runID := options.runID
+	stage := options.stage
+	tasks := options.tasks
+	progress := options.progress
+	reporter := options.reporter
 	reportTaskEvent(reporter, TaskEvent{Type: TaskRunStarted, RunID: runID, Stage: stage, TaskTotal: len(tasks), Time: time.Now()})
 	for index, task := range tasks {
 		reportTaskEvent(reporter, TaskEvent{Type: TaskStarted, RunID: runID, Stage: stage, TaskIndex: index + 1, TaskTotal: len(tasks), TaskName: task.Name, Time: time.Now()})

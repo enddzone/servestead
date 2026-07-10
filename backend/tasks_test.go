@@ -59,10 +59,10 @@ func TestRunTasksWithReporterEmitsStructuredEvents(t *testing.T) {
 	})
 	var progress bytes.Buffer
 
-	err := runTasksWithReporter(context.Background(), client, "root", "run-1", "bootstrap", []Task{
+	err := runTasksWithReporter(context.Background(), client, "root", taskRunOptions{runID: "run-1", stage: "bootstrap", tasks: []Task{
 		{Name: "First", Apply: "true"},
 		{Name: "Second", Apply: "true"},
-	}, &progress, reporter)
+	}, progress: &progress, reporter: reporter})
 	if err != nil {
 		t.Fatal(err)
 	}

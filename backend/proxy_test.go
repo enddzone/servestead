@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -189,6 +191,45 @@ func TestPangolinBootstrapUsesCSRFProtectedIdempotentAPI(t *testing.T) {
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("bootstrap script missing %q:\n%s", expected, script)
+		}
+	}
+}
+
+func TestPangolinBootstrapPayloadsMarshalUntrustedValues(t *testing.T) {
+	config := proxyConfig{
+		AdminEmail:    `admin\"'@example.com`,
+		AdminPassword: "line one\nline two'\"",
+		SetupToken:    proxyTestSetupToken,
+		NewtID:        `newt\"'id`,
+		NewtSecret:    "secret\n'\"",
+	}
+	assertJSONFields(t, pangolinAdminJSON(config), map[string]string{
+		"email": config.AdminEmail, "password": config.AdminPassword, "setupToken": config.SetupToken,
+	})
+	assertJSONFields(t, pangolinLoginJSON(config.AdminEmail, config.AdminPassword), map[string]string{
+		"email": config.AdminEmail, "password": config.AdminPassword,
+	})
+	assertJSONFields(t, pangolinSiteJSON(config), map[string]string{
+		"newtId": config.NewtID, "secret": config.NewtSecret,
+	})
+
+	script := pangolinBootstrapCommand(config)
+	command := exec.Command(testShellPath, "-n")
+	command.Stdin = strings.NewReader(script)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("bootstrap command is not valid shell: %v\n%s\n%s", err, output, script)
+	}
+}
+
+func assertJSONFields(t *testing.T, payload string, expected map[string]string) {
+	t.Helper()
+	decoded := map[string]any{}
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("invalid JSON payload %q: %v", payload, err)
+	}
+	for key, value := range expected {
+		if decoded[key] != value {
+			t.Fatalf("JSON field %q = %#v, want %q", key, decoded[key], value)
 		}
 	}
 }

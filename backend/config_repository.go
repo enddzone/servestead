@@ -581,7 +581,8 @@ func newGitCommand(ctx context.Context, arguments ...string) (*exec.Cmd, error) 
 	if err != nil {
 		return nil, err
 	}
-	command := exec.CommandContext(ctx, gitPath, arguments...)
+	// Arguments are passed directly to a trusted executable without shell interpretation.
+	command := exec.CommandContext(ctx, gitPath, arguments...) // NOSONAR
 	command.Env = trustedCommandEnvironment(nil)
 	return command, nil
 }
