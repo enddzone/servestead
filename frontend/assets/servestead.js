@@ -172,6 +172,8 @@
     const scroller = target.closest(".workbench");
     if (!scroller) return;
     scroller.scrollTo({ top: 0, left: 0 });
+    window.scrollTo({ top: 0, left: 0 });
+    window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
   }
 
   function copyValue(value) {
@@ -270,6 +272,37 @@
     return true;
   }
 
+  function setDiagnosticsOpen(open) {
+    const drawer = document.getElementById("ops-diagnostics");
+    const screen = drawer ? drawer.closest(".profile-screen") : document.querySelector(".profile-screen");
+    if (!drawer) return;
+    drawer.hidden = !open;
+    drawer.classList.toggle("is-open", open);
+    drawer.setAttribute("aria-hidden", open ? "false" : "true");
+    if (screen) screen.classList.toggle("diagnostics-open", open);
+    for (const trigger of document.querySelectorAll("[data-profile-diagnostics-open]")) {
+      trigger.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+  }
+
+  function closeDiagnosticsDrawer() {
+    setDiagnosticsOpen(false);
+  }
+
+  function showDiagnosticsPanel(trigger) {
+    const drawer = trigger.closest(".diagnostics-drawer");
+    if (!drawer) return;
+    const panel = trigger.getAttribute("data-diagnostics-panel");
+    if (!panel) return;
+    for (const tab of drawer.querySelectorAll("[data-diagnostics-panel]")) {
+      tab.classList.toggle("tab-active", tab === trigger);
+      tab.setAttribute("aria-selected", tab === trigger ? "true" : "false");
+    }
+    for (const section of drawer.querySelectorAll("[data-diagnostics-section]")) {
+      section.hidden = section.getAttribute("data-diagnostics-section") !== panel;
+    }
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     connectRunStream();
     ensureCommandPalette();
@@ -279,6 +312,13 @@
     connectRunStream();
     resetWorkbenchScroll(event.detail && event.detail.target);
     restoreFocus();
+    const target = event.detail && event.detail.target;
+    if (target && target.id === "ops-selected") {
+      closeDiagnosticsDrawer();
+      return;
+    }
+    const drawer = document.getElementById("ops-diagnostics");
+    if (drawer && drawer.classList.contains("is-open")) setDiagnosticsOpen(true);
   });
   document.addEventListener("click", (event) => {
     const trigger = event.target.closest("[data-copy]");
@@ -300,8 +340,25 @@
       if (row) row.remove();
       return;
     }
+    const openDiagnostics = event.target.closest("[data-profile-diagnostics-open]");
+    if (openDiagnostics) {
+      setDiagnosticsOpen(true);
+      return;
+    }
+    const closeDiagnostics = event.target.closest("[data-profile-diagnostics-close]");
+    if (closeDiagnostics) {
+      event.preventDefault();
+      closeDiagnosticsDrawer();
+      return;
+    }
+    const dismissDiagnostics = event.target.closest("[data-diagnostics-dismiss]");
+    if (dismissDiagnostics) closeDiagnosticsDrawer();
     const profileTab = event.target.closest("[data-profile-tab]");
     if (profileTab) {
+      if (profileTab.matches("[data-diagnostics-panel]")) {
+        showDiagnosticsPanel(profileTab);
+        return;
+      }
       const tabs = profileTab.closest(".profile-tabs");
       if (tabs) {
         for (const tab of tabs.querySelectorAll("[data-profile-tab]")) tab.classList.remove("tab-active");
@@ -325,6 +382,7 @@
     if (event.key === "Escape") {
       setCommandResults(undefined, false);
       toggleCommandPalette(false);
+      closeDiagnosticsDrawer();
       return;
     }
     const commandInput = event.target.closest && event.target.closest("[data-command-input]");

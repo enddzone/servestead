@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -106,7 +107,7 @@ func TestWebUIAuthTokenCookieAndCSRF(t *testing.T) {
 		t.Fatal(err)
 	}
 	body = readResponseBody(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Required values") {
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Required values") || !strings.Contains(body, "Connection and credential overrides") || !strings.Contains(body, "Validation guidance") {
 		t.Fatalf("valid CSRF status/body = %d/%q", response.StatusCode, body)
 	}
 }
@@ -297,7 +298,9 @@ func TestWebUIStartReviewAndShutdownRoutes(t *testing.T) {
 
 	response := authenticatedWebRequest(t, server.url+"/setup", http.MethodGet, cookie, nil)
 	body := readResponseBody(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Setup Workbench") || !strings.Contains(body, "Choose a setup path") {
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Setup Workbench") || !strings.Contains(body, "Choose a setup path") ||
+		!strings.Contains(body, "Connect existing VPS") || !strings.Contains(body, "Provision a new DigitalOcean VPS") ||
+		!strings.Contains(body, "Other cloud providers are not available yet") {
 		t.Fatalf("setup shell status/body = %d/%q", response.StatusCode, body)
 	}
 
@@ -1008,53 +1011,160 @@ func TestWebOpsProfilesDrawerStacksAndGitOps(t *testing.T) {
 	repository := createOpsStackRepository(t, false)
 	profile := createOpsProfile(t, server.server.store, repository)
 
-	response := authenticatedWebRequest(t, server.url+"/ops/profiles", http.MethodGet, cookie, nil)
+	now := time.Now().UTC()
+	seedOpsRecentRuns(t, server.server.store, profile.ID, now)
+	seedOtherOpsRun(t, server.server.store, now)
+
+	response := authenticatedWebRequest(t, server.url+"/ops/profiles?profile="+profile.ID, http.MethodGet, cookie, nil)
 	body := readResponseBody(t, response)
-	requireBodyContains(t, body, "ops profiles response", "Profile Diagnostics", "ops-vps", "changes pending", "Setup workbench")
+	requireBodyContains(t, body, "ops profiles response", "Profile Diagnostics", "ops-vps", "changes pending", "Add profile", "Recent runs", "recent-newest", "stacks:complete", "href=\"/ops/profiles/"+profile.ID+"/gitops/review\"", "href=\"/ops/profiles?profile="+profile.ID+"\"")
+	requireBodyExcludes(t, body, "ops profiles response", "recent-3", "recent-oldest", "other-profile-run", "Stack Inventory")
 
 	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/drawer", http.MethodGet, cookie, nil)
 	body = readResponseBody(t, response)
-	requireBodyContains(t, body, "ops drawer response", "Stack Inventory", "site", "metadata missing")
+	requireBodyContains(t, body, "ops drawer response", "Profile", "Manage", "Profile metadata", "Recent runs", "recent-newest")
+	requireBodyExcludes(t, body, "ops drawer response", "recent-3", "recent-oldest", "other-profile-run", "Stack Inventory")
+
+	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/diagnostics", http.MethodGet, cookie, nil)
+	body = readResponseBody(t, response)
+	requireBodyContains(t, body, "ops diagnostics response", "Diagnostics", "Runs", "GitOps", "Cloud", "recent-newest", "recent-3")
+	requireBodyExcludes(t, body, "ops diagnostics response", "recent-oldest", "other-profile-run", "Stack Inventory")
+
+	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/stacks", http.MethodGet, cookie, nil)
+	body = readResponseBody(t, response)
+	requireBodyContains(t, body, "ops stacks response", "Stack Inventory", "site", "metadata missing")
 
 	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/gitops", http.MethodGet, cookie, nil)
 	body = readResponseBody(t, response)
-	if !strings.Contains(body, "Untracked: stacks/site/compose.yaml") {
-		t.Fatalf("gitops diff missing untracked stack:\n%s", body)
-	}
+	requireBodyContains(t, body, "gitops diff response", "Untracked: stacks/site/compose.yaml")
 
 	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/gitops/review", http.MethodGet, cookie, nil)
 	body = readResponseBody(t, response)
-	requireBodyContains(t, body, "gitops review response", "GitOps Review", "Deploy checklist", "Repository actions")
+	requireBodyContains(t, body, "gitops review response", "GitOps Review", "Working tree", "Recent commits", "Recent runs", "Repository actions", "Review working tree changes")
+	requireBodyExcludes(t, body, "gitops review response", "Deploy checklist", "peek-tabs")
 
 	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/gitops/commit", cookie, url.Values{"csrf": {server.server.csrf}, "message": {"Add site"}})
 	body = readResponseBody(t, response)
-	if !strings.Contains(body, "no staged stack changes") {
-		t.Fatalf("commit without stage should fail:\n%s", body)
-	}
+	requireBodyContains(t, body, "commit without stage response", "no staged stack changes")
 
-	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/gitops/stage", cookie, url.Values{"csrf": {server.server.csrf}})
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/gitops/stage", cookie, url.Values{"csrf": {server.server.csrf}, "view": {"review"}})
 	body = readResponseBody(t, response)
-	if !strings.Contains(body, "GitOps stage complete") || !strings.Contains(body, "Staged changes") {
-		t.Fatalf("stage response incomplete:\n%s", body)
-	}
+	requireBodyContains(t, body, "stage response", "GitOps stage complete", "Staged changes", "Recent runs")
 
 	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/gitops/commit", cookie, url.Values{"csrf": {server.server.csrf}, "message": {"Add site stack"}})
 	body = readResponseBody(t, response)
-	if !strings.Contains(body, "GitOps commit complete") || !strings.Contains(body, "clean") {
-		t.Fatalf("commit response incomplete:\n%s", body)
-	}
+	requireBodyContains(t, body, "commit response", "GitOps commit complete", "clean")
 
 	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/gitops/push", cookie, url.Values{"csrf": {server.server.csrf}})
 	body = readResponseBody(t, response)
-	if !strings.Contains(body, "configuration repository has no origin remote") {
-		t.Fatalf("push without origin should fail:\n%s", body)
-	}
+	requireBodyContains(t, body, "push without origin response", "configuration repository has no origin remote")
 
 	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/gitops/stage", cookie, url.Values{})
 	_ = readResponseBody(t, response)
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("ops POST without CSRF status = %d, want forbidden", response.StatusCode)
 	}
+}
+
+func TestWebOpsProfileDeleteIsConfirmedAndLocal(t *testing.T) {
+	requireGit(t)
+	server, cookie := newAuthenticatedWebTestServer(t)
+	repository := createOpsStackRepository(t, true)
+	profile := createOpsProfile(t, server.server.store, repository)
+	if err := server.server.store.SaveSecrets(profile.ID, ProfileSecrets{StackSecretIdentity: "AGE-SECRET-KEY-TEST"}); err != nil {
+		t.Fatal(err)
+	}
+
+	response := authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/drawer", http.MethodGet, cookie, nil)
+	body := readResponseBody(t, response)
+	requireBodyContains(t, body, "profile delete settings", "Profile settings", "Delete local profile", "delete ops-vps", "credentials and encryption keys")
+
+	response = authenticatedWebRequest(t, server.url+"/ops/profiles/"+profile.ID+"/delete", http.MethodGet, cookie, nil)
+	_ = readResponseBody(t, response)
+	if response.StatusCode != http.StatusMethodNotAllowed || response.Header.Get("Allow") != http.MethodPost {
+		t.Fatalf("profile delete GET status/allow = %d/%q, want 405/POST", response.StatusCode, response.Header.Get("Allow"))
+	}
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/delete", cookie, url.Values{"confirm": {"delete ops-vps"}})
+	_ = readResponseBody(t, response)
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("profile delete without CSRF status = %d, want forbidden", response.StatusCode)
+	}
+
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/delete", cookie, url.Values{
+		"csrf":    {server.server.csrf},
+		"confirm": {"delete wrong-profile"},
+	})
+	body = readResponseBody(t, response)
+	requireBodyContains(t, body, "profile delete confirmation error", "confirm local profile deletion")
+	if _, _, err := server.server.store.Load(profile.ID); err != nil {
+		t.Fatalf("wrong confirmation deleted profile: %v", err)
+	}
+
+	loaded, state, err := server.server.store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.ActiveRunID = "active-run"
+	state.Runs["active-run"] = SetupRun{ID: "active-run", Status: runStatusRunning}
+	if err := server.server.store.Save(loaded, state); err != nil {
+		t.Fatal(err)
+	}
+	_, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	server.server.manager.mu.Lock()
+	server.server.manager.active[profile.ID] = &webRun{runID: "active-run", profileID: profile.ID, cancel: cancelRun}
+	server.server.manager.mu.Unlock()
+	response = postWebForm(t, server.url+"/ops/profiles/"+profile.ID+"/delete", cookie, url.Values{
+		"csrf":    {server.server.csrf},
+		"confirm": {"delete ops-vps"},
+	})
+	body = readResponseBody(t, response)
+	requireBodyContains(t, body, "active-run delete guard", "active run before deleting")
+	if _, _, err := server.server.store.Load(profile.ID); err != nil {
+		t.Fatalf("active-run guard deleted profile: %v", err)
+	}
+
+	server.server.manager.mu.Lock()
+	delete(server.server.manager.active, profile.ID)
+	server.server.manager.mu.Unlock()
+}
+
+func TestWebOpsProfileDeleteRedirectsAndPreservesRepository(t *testing.T) {
+	requireGit(t)
+	server, cookie := newAuthenticatedWebTestServer(t)
+	repository := createOpsStackRepository(t, true)
+	profile := createOpsProfile(t, server.server.store, repository)
+
+	request, err := http.NewRequest(http.MethodPost, server.url+"/ops/profiles/"+profile.ID+"/delete", strings.NewReader(url.Values{
+		"csrf":    {server.server.csrf},
+		"confirm": {"delete ops-vps"},
+	}.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(cookie)
+	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = readResponseBody(t, response)
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/ops/profiles" {
+		t.Fatalf("profile delete redirect = %d/%q, want 303 /ops/profiles", response.StatusCode, response.Header.Get("Location"))
+	}
+	if _, _, err := server.server.store.Load(profile.ID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted profile load error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(repository); err != nil {
+		t.Fatalf("profile deletion removed repository: %v", err)
+	}
+
+	response = authenticatedWebRequest(t, server.url+"/ops/profiles", http.MethodGet, cookie, nil)
+	body := readResponseBody(t, response)
+	requireBodyContains(t, body, "profiles after delete", "No saved profiles")
+	requireBodyExcludes(t, body, "profiles after delete", "ops-vps")
 }
 
 func TestWebOpsRunStageStartsFakeRunnerAndRejectsDuplicate(t *testing.T) {
@@ -1680,8 +1790,11 @@ func TestWebOpsRecentCommits(t *testing.T) {
 }
 
 func TestWebOpsPresentationHelpers(t *testing.T) {
-	if gitTone("clean") != "green" || gitTone("needs push") != "peach" || gitTone("changes pending") != "peach" || gitTone("missing") != "red" {
-		t.Fatal("git tone mapping changed unexpectedly")
+	if opsGitWorkingTreeState("clean") != "clean" || opsGitWorkingTreeState(" M stacks/app/compose.yaml") != "changes pending" || opsGitWorkingTreeState("") != "unavailable" {
+		t.Fatal("GitOps working tree summary changed unexpectedly")
+	}
+	if !strings.Contains(opsGitNextAction("changes pending", false, ""), "stage") || !strings.Contains(opsGitNextAction("clean", true, ""), "Push") || !strings.Contains(opsGitNextAction("clean", false, ""), "ready") || !strings.Contains(opsGitNextAction("unavailable", false, "failed"), "Resolve") {
+		t.Fatal("GitOps next action mapping changed unexpectedly")
 	}
 	if ternaryString(true, "yes", "no") != "yes" || ternaryString(false, "yes", "no") != "no" {
 		t.Fatal("ternaryString changed unexpectedly")
@@ -1859,6 +1972,52 @@ func createOpsProfile(t *testing.T, store ProfileStore, repository string) Profi
 	return profile
 }
 
+func seedOpsRecentRuns(t *testing.T, store ProfileStore, profileID string, now time.Time) {
+	t.Helper()
+	profile, state, err := store.Load(profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Runs == nil {
+		state.Runs = map[string]SetupRun{}
+	}
+	runIDs := []string{"recent-oldest", "recent-2", "recent-3", "recent-4", "recent-5", "recent-newest"}
+	for index, runID := range runIDs {
+		updated := now.Add(time.Duration(index) * time.Minute)
+		state.Runs[runID] = completedOpsRun(runID, updated)
+	}
+	state.ActiveRunID = "recent-newest"
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedOtherOpsRun(t *testing.T, store ProfileStore, now time.Time) {
+	t.Helper()
+	profile, err := store.Create(Profile{Name: "other-vps", IP: "203.0.113.21"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, state, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Runs == nil {
+		state.Runs = map[string]SetupRun{}
+	}
+	state.Runs["other-profile-run"] = completedOpsRun("other-profile-run", now)
+	if err := store.Save(loaded, state); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func completedOpsRun(runID string, timestamp time.Time) SetupRun {
+	return SetupRun{
+		ID: runID, Status: runStatusComplete, CreatedAt: timestamp, UpdatedAt: timestamp,
+		Stages: map[string]SetupStageStatus{"stacks": {Status: stageStatusComplete}},
+	}
+}
+
 func editableStackExists(stacks []editableStack, name string) bool {
 	for _, stack := range stacks {
 		if stack.Name == name {
@@ -1997,6 +2156,15 @@ func requireBodyContains(t *testing.T, body string, label string, expected ...st
 	for _, value := range expected {
 		if !strings.Contains(body, value) {
 			t.Fatalf("%s missing %q:\n%s", label, value, body)
+		}
+	}
+}
+
+func requireBodyExcludes(t *testing.T, body string, label string, unexpected ...string) {
+	t.Helper()
+	for _, value := range unexpected {
+		if strings.Contains(body, value) {
+			t.Fatalf("%s unexpectedly included %q:\n%s", label, value, body)
 		}
 	}
 }
