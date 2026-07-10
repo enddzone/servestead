@@ -38,8 +38,16 @@ func (server *webServer) handleOpsProfile(response http.ResponseWriter, request 
 		return
 	}
 	profileID := parts[0]
+	if len(parts) == 2 && parts[1] == "delete" {
+		server.handleOpsProfileDelete(response, request, profileID)
+		return
+	}
 	if request.Method == http.MethodGet && len(parts) == 2 && parts[1] == "drawer" {
 		server.render(response, request, frontend.OpsProfileDrawer(server.opsProfileDrawerData(request.Context(), profileID, "", "")))
+		return
+	}
+	if request.Method == http.MethodGet && len(parts) == 2 && parts[1] == "diagnostics" {
+		server.render(response, request, frontend.OpsDiagnosticsDrawer(server.opsDiagnosticsDrawerData(request.Context(), profileID, "", "")))
 		return
 	}
 	switch parts[1] {
@@ -56,6 +64,36 @@ func (server *webServer) handleOpsProfile(response http.ResponseWriter, request 
 	default:
 		http.NotFound(response, request)
 	}
+}
+
+func (server *webServer) handleOpsProfileDelete(response http.ResponseWriter, request *http.Request, profileID string) {
+	if !requireMethod(response, request, http.MethodPost) {
+		return
+	}
+	profile, _, err := server.store.Load(profileID)
+	if err != nil {
+		server.renderOpsShell(response, request, frontend.OpsProfilesPanel(server.opsProfilesData(request.Context(), "", "", err.Error())))
+		return
+	}
+	expected := "delete " + firstNonEmpty(profile.Name, profile.IP, profile.ID)
+	if strings.TrimSpace(request.FormValue("confirm")) != expected {
+		message := fmt.Sprintf("Type %q to confirm local profile deletion.", expected)
+		server.renderOpsShell(response, request, frontend.OpsProfilesPanel(server.opsProfilesData(request.Context(), profile.ID, "", message)))
+		return
+	}
+	server.manager.mu.Lock()
+	activeRun := server.manager.active[profile.ID] != nil
+	server.manager.mu.Unlock()
+	if activeRun {
+		message := "Cancel or wait for the active run before deleting this profile."
+		server.renderOpsShell(response, request, frontend.OpsProfilesPanel(server.opsProfilesData(request.Context(), profile.ID, "", message)))
+		return
+	}
+	if err := server.store.Delete(profile.ID); err != nil {
+		server.renderOpsShell(response, request, frontend.OpsProfilesPanel(server.opsProfilesData(request.Context(), profile.ID, "", err.Error())))
+		return
+	}
+	http.Redirect(response, request, "/ops/profiles", http.StatusSeeOther)
 }
 
 func (server *webServer) handleOpsStackRoute(response http.ResponseWriter, request *http.Request, profileID string, parts []string) {
@@ -191,10 +229,30 @@ func (server *webServer) opsProfileDrawerData(ctx context.Context, profileID str
 		GitState:         gitState,
 		CloudState:       cloudState,
 		NextAction:       opsNextAction(profile, activeRunStatus, setupStatus, gitState, cloudState),
-		Stacks:           server.opsStacksData(ctx, profile.ID, "", ""),
+		UpdatedAt:        formatWebTime(profile.UpdatedAt),
+		RecentRuns:       server.opsRecentRunRows(profile.ID, 5),
 		Notice:           notice,
 		Error:            errorText,
 	}
+}
+
+func (server *webServer) opsDiagnosticsDrawerData(ctx context.Context, profileID string, notice string, errorText string) frontend.OpsDiagnosticsDrawerData {
+	profile, _, err := server.store.Load(profileID)
+	data := frontend.OpsDiagnosticsDrawerData{
+		CSRFToken: server.csrf,
+		ProfileID: profileID,
+		Runs:      server.opsRecentRunRows(profileID, 5),
+		GitOps:    server.opsGitOpsData(ctx, profileID, "", ""),
+		Cloud:     server.opsCloudData(profileID, "", ""),
+		Notice:    notice,
+		Error:     errorText,
+	}
+	if err != nil {
+		data.Error = firstNonEmpty(data.Error, err.Error())
+		return data
+	}
+	data.Name = firstNonEmpty(profile.Name, profile.IP, profile.ID)
+	return data
 }
 
 func (server *webServer) opsStacksData(ctx context.Context, profileID string, notice string, errorText string) frontend.OpsStacksData {
@@ -513,7 +571,14 @@ func defaultWebStackResource() frontend.OpsStackResourceData {
 
 func (server *webServer) opsGitOpsData(ctx context.Context, profileID string, notice string, errorText string) frontend.OpsGitOpsData {
 	profile, _, err := server.store.Load(profileID)
-	data := frontend.OpsGitOpsData{CSRFToken: server.csrf, ProfileID: profileID, Notice: notice, Error: errorText}
+	data := frontend.OpsGitOpsData{
+		CSRFToken:  server.csrf,
+		ProfileID:  profileID,
+		State:      "unavailable",
+		NextAction: "Resolve repository access before continuing.",
+		Notice:     notice,
+		Error:      errorText,
+	}
 	if err != nil {
 		data.Error = err.Error()
 		return data
@@ -522,6 +587,8 @@ func (server *webServer) opsGitOpsData(ctx context.Context, profileID string, no
 	if profile.ConfigRepositoryPath == "" {
 		data.Error = firstNonEmpty(data.Error, "profile has no configuration repository")
 		data.Diff = "No stack changes."
+		data.State = "not configured"
+		data.NextAction = "Configure a repository in Setup before managing stack changes."
 		return data
 	}
 	gitCtx, cancel := context.WithTimeout(ctx, opsGitTimeout)
@@ -549,6 +616,8 @@ func (server *webServer) opsGitOpsData(ctx context.Context, profileID string, no
 	} else {
 		data.Diff = diff
 	}
+	data.State = opsGitWorkingTreeState(data.Status)
+	data.NextAction = opsGitNextAction(data.State, data.NeedsPush, data.Error)
 	return data
 }
 
@@ -560,8 +629,10 @@ func (server *webServer) opsGitOpsReviewData(ctx context.Context, profileID stri
 		ProfileID:      profileID,
 		RepositoryPath: base.RepositoryPath,
 		Status:         firstNonEmpty(base.Status, "unavailable"),
+		State:          base.State,
 		Head:           firstNonEmpty(base.Head, "unavailable"),
 		NeedsPush:      base.NeedsPush,
+		NextAction:     base.NextAction,
 		Diff:           base.Diff,
 		Notice:         base.Notice,
 		Error:          base.Error,
@@ -572,18 +643,8 @@ func (server *webServer) opsGitOpsReviewData(ctx context.Context, profileID stri
 	}
 	data.ProfileName = firstNonEmpty(profile.Name, profile.IP, profile.ID)
 	data.BaseDomain = profile.BaseDomain
-	data.Checklist = []frontend.OpsChecklistItem{
-		{Label: "Repository", Detail: firstNonEmpty(profile.ConfigRepositoryPath, "No repository configured"), Status: data.Status, Tone: gitTone(data.Status)},
-		{Label: "Remote sync", Detail: "Push committed stack changes before remote deployment.", Status: ternaryString(data.NeedsPush, "needs push", "ready"), Tone: ternaryString(data.NeedsPush, "peach", "green")},
-		{Label: "Cloud safety", Detail: "Cloud actions stay separate from stack sync.", Status: opsCloudState(profile), Tone: "blue"},
-	}
 	data.Commits = server.opsRecentCommits(ctx, profile.ConfigRepositoryPath, 5)
-	runs := server.opsRunsData(profileID, "", "", "")
-	if len(runs.Rows) > 5 {
-		data.Runs = runs.Rows[:5]
-	} else {
-		data.Runs = runs.Rows
-	}
+	data.Runs = server.opsRecentRunRows(profileID, 5)
 	return data
 }
 
@@ -615,15 +676,27 @@ func (server *webServer) opsRecentCommits(ctx context.Context, repositoryPath st
 	return rows
 }
 
-func gitTone(status string) string {
-	switch {
-	case status == "clean":
-		return "green"
-	case strings.Contains(status, "unavailable"), strings.Contains(status, "missing"):
-		return "red"
-	default:
-		return "peach"
+func opsGitWorkingTreeState(status string) string {
+	if status == "clean" {
+		return "clean"
 	}
+	if strings.TrimSpace(status) == "" {
+		return "unavailable"
+	}
+	return "changes pending"
+}
+
+func opsGitNextAction(state string, needsPush bool, errorText string) string {
+	if errorText != "" {
+		return "Resolve repository access before continuing."
+	}
+	if state == "changes pending" {
+		return "Review and stage the working tree changes."
+	}
+	if needsPush {
+		return "Push the current commit before running the remote stack sync."
+	}
+	return "The repository is clean and ready for a stack run."
 }
 
 func ternaryString(condition bool, yes string, no string) string {
@@ -637,9 +710,16 @@ func (server *webServer) handleOpsGitOpsAction(response http.ResponseWriter, req
 	if !requireMethod(response, request, http.MethodPost) {
 		return
 	}
+	renderAction := func(notice string, errorText string) {
+		if request.FormValue("view") == "review" {
+			server.render(response, request, frontend.OpsGitOpsReviewPanel(server.opsGitOpsReviewData(request.Context(), profileID, notice, errorText)))
+			return
+		}
+		server.render(response, request, frontend.OpsGitOpsPanel(server.opsGitOpsData(request.Context(), profileID, notice, errorText)))
+	}
 	profile, _, err := server.store.Load(profileID)
 	if err != nil {
-		server.render(response, request, frontend.OpsGitOpsPanel(server.opsGitOpsData(request.Context(), profileID, "", err.Error())))
+		renderAction("", err.Error())
 		return
 	}
 	gitCtx, cancel := context.WithTimeout(request.Context(), opsGitTimeout)
@@ -656,10 +736,10 @@ func (server *webServer) handleOpsGitOpsAction(response http.ResponseWriter, req
 		return
 	}
 	if err != nil {
-		server.render(response, request, frontend.OpsGitOpsPanel(server.opsGitOpsData(request.Context(), profileID, "", err.Error())))
+		renderAction("", err.Error())
 		return
 	}
-	server.render(response, request, frontend.OpsGitOpsPanel(server.opsGitOpsData(request.Context(), profileID, "GitOps "+action+" complete.", "")))
+	renderAction("GitOps "+action+" complete.", "")
 }
 
 func (server *webServer) handleOpsRunStage(response http.ResponseWriter, request *http.Request, profileID string) {
@@ -720,6 +800,14 @@ func (server *webServer) opsRunsData(profileID string, query string, notice stri
 		data.Rows = append(data.Rows, row)
 	}
 	return data
+}
+
+func (server *webServer) opsRecentRunRows(profileID string, limit int) []frontend.OpsRunRow {
+	runs := server.opsRunsData(profileID, "", "", "")
+	if limit > 0 && len(runs.Rows) > limit {
+		return runs.Rows[:limit]
+	}
+	return runs.Rows
 }
 
 func (server *webServer) opsRunDetailData(profileID string, runID string, notice string, errorText string) frontend.OpsRunDetailData {

@@ -238,24 +238,6 @@ func issueIcon(tone string) string {
 	}
 }
 
-func activityBadge(title string) string {
-	lower := strings.ToLower(title)
-	switch {
-	case strings.Contains(lower, "complete"):
-		return "Completed"
-	case strings.Contains(lower, "sync"):
-		return "Synced"
-	case strings.Contains(lower, "access"):
-		return "Accessed"
-	case strings.Contains(lower, "restart"):
-		return "Restarted"
-	case strings.Contains(lower, "updated"):
-		return "Updated"
-	default:
-		return "Logged"
-	}
-}
-
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if value != "" {
@@ -274,7 +256,7 @@ templ StartPanel(data StartData) {
 				<div>
 					<p class="eyebrow">Setup Workbench</p>
 					<h2>Choose a setup path</h2>
-					<p>Connect an existing VPS to get started. Choose how you'd like to set up your environment.</p>
+					<p>Connect a server you own or provision a new DigitalOcean VPS.</p>
 				</div>
 			</div>
 			if data.Notice != "" {
@@ -290,12 +272,7 @@ templ StartPanel(data StartData) {
 					<div class="setup-path-icon tone-mauve">@Icon("profiles")</div>
 					<div class="setup-path-copy">
 						<h3>Connect existing VPS <span>Recommended</span></h3>
-						<p>Use an existing VPS you already own or manage. We'll connect securely using SSH.</p>
-						<ul>
-							<li>Bring your own server</li>
-							<li>Full control and flexibility</li>
-							<li>Works with supported Ubuntu releases</li>
-						</ul>
+						<p>Connect securely over SSH to a supported Ubuntu server.</p>
 					</div>
 					<button class="primary setup-path-action" type="submit"><span>Continue</span>@Icon("arrow")</button>
 				</form>
@@ -305,36 +282,18 @@ templ StartPanel(data StartData) {
 					<div class="setup-path-icon tone-green">@Icon("cloud")</div>
 					<div class="setup-path-copy">
 						<h3>Provision a new DigitalOcean VPS</h3>
-						<p>Spin up a new VPS profile and return to review before any setup run starts.</p>
-						<ul>
-							<li>Guarded provider flow</li>
-							<li>Optimized defaults</li>
-							<li>Setup still requires confirmation</li>
-						</ul>
+						<p>Create a guarded VPS profile, then review it before setup starts.</p>
 					</div>
 					<button class="setup-path-action" type="submit"><span>Select</span>@Icon("arrow")</button>
 				</form>
-				<div class="setup-path-card disabled-choice" aria-disabled="true">
-					<div class="setup-path-icon tone-blue">@Icon("cloud")</div>
-					<div class="setup-path-copy">
-						<h3>Import from another cloud</h3>
-						<p>Import a VPS from AWS, GCP, Linode, or another supported provider.</p>
-						<ul>
-							<li>Multi-cloud support</li>
-							<li>Import existing resources</li>
-							<li>No lock-in</li>
-						</ul>
-					</div>
-					<button class="setup-path-action" type="button" disabled><span>Deferred</span>@Icon("arrow")</button>
-				</div>
 			</div>
+			<p class="setup-unavailable-note">Other cloud providers are not available yet.</p>
 			if len(data.Profiles) > 0 {
 				<form hx-post="/setup/intent" hx-target="#workbench" hx-swap="outerHTML" method="post" class="setup-resume-strip">
 					<input type="hidden" name="csrf" value={ data.CSRFToken }/>
 					<input type="hidden" name="intent" value="resume"/>
 					<div>
 						<strong>Resume a saved profile</strong>
-						<span>Pick up from the next platform stage and reuse previously saved values.</span>
 					</div>
 					if len(data.Profiles) > 0 {
 						<label>
@@ -358,27 +317,13 @@ templ HomePanel(data HomeData) {
 	<div class="home-screen">
 		<section class="home-greeting">
 			<div>
-				<h2>{ data.Greeting }, <span>{ firstNonEmpty(data.NodeName, "Local Node") }</span> ✦</h2>
+				<h2>{ data.Greeting }, <span>{ firstNonEmpty(data.NodeName, "Local Node") }</span></h2>
 				if data.HasProfile {
-					<p>Your private VPS is running smoothly.</p>
+					<p>Overview for your active environment.</p>
 				} else {
 					<p>Create your first local Servestead profile to start managing a private VPS.</p>
 				}
 			</div>
-			if len(data.Profiles) > 0 {
-				<form method="get" action="/ui" class="home-profile-switcher">
-					<span class="status-dot"></span>
-					<label>
-						<span class="sr-only">Active environment</span>
-						<select name="profile" onchange="this.form.submit()">
-							for _, profile := range data.Profiles {
-								<option value={ profile.ID } selected?={ profile.ID == data.SelectedProfileID }>{ profile.Name }</option>
-							}
-						</select>
-						<small>Active environment</small>
-					</label>
-				</form>
-			}
 		</section>
 		if data.Error != "" {
 			<div class="alert">{ data.Error }</div>
@@ -391,119 +336,110 @@ templ HomePanel(data HomeData) {
 				<a class="primary button-link" href="/setup">Start setup</a>
 			</section>
 		} else {
-			<div class="home-top-grid">
-				<section class="dashboard-card resume-card">
-					<div class="home-card-icon tone-pink">@Icon("rocket")</div>
-					<div>
-						<h3>Continue where you left off</h3>
-						<p>Your setup is in progress. Resume the five-step setup to finish provisioning and harden your stack.</p>
+			if data.SetupProgress < 100 {
+				<section class="home-resume-bar">
+					<div class="home-resume-copy">
+						<strong>Setup</strong>
+						<span>{ data.NextAction }</span>
 					</div>
 					<div class="setup-progress">
 						<span>{ data.SetupProgressLabel }</span>
 						<div><i style={ "width: " + progressPercent(data.SetupProgress) }></i></div>
 					</div>
-					<a class="primary button-link wide-button" href="/setup"><span>Resume setup</span>@Icon("chevron")</a>
-					<a class="button-link secondary-link" href="/setup">View setup progress</a>
+					<a class="primary button-link" href="/setup"><span>Resume</span>@Icon("chevron")</a>
 				</section>
-				<section class="dashboard-card active-environment">
+			}
+			<section class="dashboard-card active-environment home-environment-card">
+				<div class="card-head">
+					<div>
+						<p>Active environment</p>
+						<form method="get" action="/ui" class="home-profile-switcher home-profile-switcher-inline">
+							<span class="status-dot"></span>
+							<label>
+								<span class="sr-only">Active environment</span>
+								<select name="profile" onchange="this.form.submit()">
+									for _, profile := range data.Profiles {
+										<option value={ profile.ID } selected?={ profile.ID == data.SelectedProfileID }>{ profile.Name }</option>
+									}
+								</select>
+							</label>
+						</form>
+						<div class="home-environment-meta"><span>{ data.SelectedAddress }</span><span>{ data.Region }</span></div>
+					</div>
+					<a class="button-link" href={ "/ops/profiles?profile=" + data.SelectedProfileID }>View profile</a>
+				</div>
+				<div class="env-metrics">
+					<div><strong>Setup</strong><span>{ data.SetupStatus }</span></div>
+					<div><strong>Health</strong><span class="tone-green">{ data.HealthStatus }</span></div>
+					<div><strong>GitOps</strong><span>{ data.GitState }</span></div>
+					<div><strong>Cloud</strong><span>{ data.CloudState }</span></div>
+				</div>
+				<div class="home-next-action">
+					<span>Next</span>
+					<strong>{ data.NextAction }</strong>
+					<a href={ "/ops/profiles?profile=" + data.SelectedProfileID }>Open</a>
+				</div>
+			</section>
+			<nav class="home-quick-actions" aria-label="Environment actions">
+				for _, command := range data.Commands {
+					if !command.Disabled {
+						<a class={ "tone-" + command.Tone } href={ command.URL } data-command-item>
+							@Icon(commandIcon(command.Label))
+							<span>{ command.Label }</span>
+						</a>
+					}
+				}
+			</nav>
+			<div class="home-lower-grid">
+				<section class="dashboard-card attention-card">
 					<div class="card-head">
-						<div>
-							<p>Active environment</p>
-							<h3><span class="status-dot"></span>{ data.SelectedProfile } <small>Active</small></h3>
+						<h3>@Icon("warning") Needs attention</h3>
+						<span class="count-pill">{ strconv.Itoa(len(data.Issues)) }</span>
+					</div>
+					if len(data.Issues) == 0 {
+						<div class="empty-state"><h3>No issues detected</h3><p>No current profile, stack, access, or cloud items need review.</p></div>
+					} else {
+						<div class="issue-list">
+							for _, issue := range data.Issues {
+								<div class={ "issue-row tone-" + issue.Tone }>
+									<div class={ "home-card-icon tone-" + issue.Tone }>@Icon(issueIcon(issue.Tone))</div>
+									<div><strong>{ issue.Title }</strong><span>{ issue.Detail }</span></div>
+									if issue.URL != "" {
+										<a class="button-link" href={ issue.URL }>{ issue.ActionLabel }</a>
+									}
+								</div>
+							}
 						</div>
-						<a class="button-link" href={ "/ops/profiles?profile=" + data.SelectedProfileID }><span>View details</span>@Icon("chevron")</a>
+					}
+					<a class="button-link secondary-link" href="/ops/profiles"><span>View all issues</span>@Icon("chevron")</a>
+				</section>
+				<section class="dashboard-card activity-card">
+					<div class="card-head">
+						<h3>Recent activity</h3>
+						<a href="/ops/profiles">View all</a>
 					</div>
-					<div class="env-metrics">
-						<div><strong>IP Address</strong><span>{ data.SelectedAddress }</span></div>
-						<div><strong>Region</strong><span>{ data.Region }</span></div>
-						<div><strong>Uptime</strong><span>{ data.Uptime }</span></div>
-						<div><strong>Cloud</strong><span>{ data.CloudState }</span></div>
-						<div><strong>GitOps state</strong><span>{ data.GitState }</span></div>
-						<div><strong>Health</strong><span class="tone-green">{ data.HealthStatus }</span></div>
-					</div>
-					<div class="health-strip">
-						<div class="home-card-icon tone-green">@Icon("diagnostics")</div>
-						<div><strong>All systems operational</strong><span>{ data.HealthDetail }</span></div>
-						<a href={ "/ops/profiles?profile=" + data.SelectedProfileID }><span>View diagnostics</span>@Icon("chevron")</a>
-					</div>
+					if len(data.Activities) == 0 {
+						<div class="empty-state"><h3>No recent activity</h3><p>Runs and profile updates will appear here after setup starts.</p></div>
+					} else {
+						<div class="activity-list">
+							for _, item := range data.Activities {
+								if item.URL != "" {
+									<a class={ "activity-row tone-" + item.Tone } href={ item.URL }>
+										<div><strong>{ item.Title }</strong><span>{ item.Detail }</span></div>
+										<time>{ item.Time }</time>
+									</a>
+								} else {
+									<div class={ "activity-row tone-" + item.Tone }>
+										<div><strong>{ item.Title }</strong><span>{ item.Detail }</span></div>
+										<time>{ item.Time }</time>
+									</div>
+								}
+							}
+						</div>
+					}
 				</section>
 			</div>
 		}
-		<section class="action-grid">
-			for _, command := range data.Commands {
-				if command.Disabled {
-					<div class={ "action-tile disabled tone-" + command.Tone }>
-						<div class={ "home-card-icon tone-" + command.Tone }>@Icon(commandIcon(command.Label))</div>
-						<div><strong>{ command.Label }</strong><span>{ command.Detail }</span></div>
-						<span class="tile-arrow">@Icon("arrow")</span>
-					</div>
-				} else {
-					<a class={ "action-tile tone-" + command.Tone } href={ command.URL } data-command-item>
-						<div class={ "home-card-icon tone-" + command.Tone }>@Icon(commandIcon(command.Label))</div>
-						<div><strong>{ command.Label }</strong><span>{ command.Detail }</span></div>
-						<span class="tile-arrow">@Icon("arrow")</span>
-					</a>
-				}
-			}
-		</section>
-		<div class="home-lower-grid">
-			<section class="dashboard-card attention-card">
-				<div class="card-head">
-					<h3>@Icon("warning") Needs attention</h3>
-					<span class="count-pill">{ strconv.Itoa(len(data.Issues)) }</span>
-				</div>
-				if len(data.Issues) == 0 {
-					<div class="empty-state"><h3>No issues detected</h3><p>No current profile, stack, access, or cloud items need review.</p></div>
-				} else {
-					<div class="issue-list">
-						for _, issue := range data.Issues {
-							<div class={ "issue-row tone-" + issue.Tone }>
-								<div class={ "home-card-icon tone-" + issue.Tone }>@Icon(issueIcon(issue.Tone))</div>
-								<div><strong>{ issue.Title }</strong><span>{ issue.Detail }</span></div>
-								if issue.URL != "" {
-									<a class="button-link" href={ issue.URL }>{ issue.ActionLabel }</a>
-								}
-							</div>
-						}
-						</div>
-					}
-				<a class="button-link secondary-link" href="/ops/profiles"><span>View all issues</span>@Icon("chevron")</a>
-			</section>
-			<section class="dashboard-card activity-card">
-				<div class="card-head">
-					<h3>Recent activity</h3>
-					<a href="/ops/profiles"><span>View all activity</span>@Icon("arrow")</a>
-				</div>
-				if len(data.Activities) == 0 {
-					<div class="empty-state"><h3>No recent activity</h3><p>Runs and profile updates will appear here after setup starts.</p></div>
-				} else {
-					<div class="activity-list">
-						for _, item := range data.Activities {
-							if item.URL != "" {
-								<a class={ "activity-row tone-" + item.Tone } href={ item.URL }>
-									<div class={ "home-card-icon tone-" + item.Tone }>@Icon(issueIcon(item.Tone))</div>
-									<div><strong>{ item.Title }</strong><span>{ item.Detail }</span></div>
-									<time>{ item.Time }</time>
-									<span class={ "status-label tone-" + item.Tone }>{ activityBadge(item.Title) }</span>
-								</a>
-							} else {
-								<div class={ "activity-row tone-" + item.Tone }>
-									<div class={ "home-card-icon tone-" + item.Tone }>@Icon(issueIcon(item.Tone))</div>
-									<div><strong>{ item.Title }</strong><span>{ item.Detail }</span></div>
-									<time>{ item.Time }</time>
-									<span class={ "status-label tone-" + item.Tone }>{ activityBadge(item.Title) }</span>
-								</div>
-							}
-						}
-					</div>
-				}
-			</section>
-		</div>
-		<section class="advanced-strip">
-			<span>✦</span>
-			<p>Need deeper insights? Advanced details, stacks, runs, GitOps, and access controls are available when you need them.</p>
-			<a class="button-link" href="/ops/profiles"><span>Open advanced details</span>@Icon("arrow")</a>
-		</section>
 	</div>
 }
 
@@ -528,25 +464,32 @@ templ ProfileValuesPanel(data ProfileFormData) {
 				<label><span>Private key</span><input name="private_key" value={ data.PrivateKeyPath } placeholder="~/.ssh/servestead_ed25519"/></label>
 				<label><span>Base domain</span><input name="domain" value={ data.BaseDomain } placeholder="example.com"/></label>
 				<label><span>Let's Encrypt email</span><input name="email" value={ data.LetsEncryptEmail } placeholder="admin@example.com"/></label>
-				<label><span>Pangolin admin email</span><input name="pangolin_admin_email" value={ data.PangolinAdminEmail } placeholder="defaults to Let's Encrypt email"/></label>
-				<label><span>Initial SSH user</span><input name="initial_ssh_user" value={ data.InitialSSHUser } placeholder="root"/></label>
-				<label><span>Admin SSH user</span><input name="admin_user" value={ data.AdminUser } placeholder="servestead"/></label>
-				<label><span>Pangolin admin password</span><input type="password" name="pangolin_admin_password" autocomplete="new-password" placeholder={ data.PangolinAdminStatus }/></label>
+				<details class="setup-optional-fields">
+					<summary>Connection and credential overrides</summary>
+					<div class="setup-optional-grid">
+						<label><span>Pangolin admin email</span><input name="pangolin_admin_email" value={ data.PangolinAdminEmail } placeholder="defaults to Let's Encrypt email"/></label>
+						<label><span>Initial SSH user</span><input name="initial_ssh_user" value={ data.InitialSSHUser } placeholder="root"/></label>
+						<label><span>Admin SSH user</span><input name="admin_user" value={ data.AdminUser } placeholder="servestead"/></label>
+						<label><span>Pangolin admin password</span><input type="password" name="pangolin_admin_password" autocomplete="new-password" placeholder={ data.PangolinAdminStatus }/></label>
+					</div>
+				</details>
 				<div class="form-actions">
 					<button type="button" hx-get="/setup/start" hx-target="#workbench" hx-swap="outerHTML">Back</button>
 					<button class="primary" type="submit">Continue to GitOps</button>
 				</div>
 			</form>
 			</div>
-			<aside class="setup-side-card dashboard-card">
-				<h2>Validation</h2>
-				<p>Values are checked on the server. Secrets are accepted but never rendered back to the browser.</p>
-				<div class="summary-list one-column">
-					<div><strong>SSH</strong><span>Use the private key path on this machine. Servestead never sends it to page chrome.</span></div>
-					<div><strong>Domain</strong><span>The base domain is used for Pangolin, resources, and certificates.</span></div>
-					<div><strong>Pangolin</strong><span>If the admin email is blank, the Let's Encrypt email is used.</span></div>
+			<details class="setup-side-card setup-guidance dashboard-card">
+				<summary>Validation guidance</summary>
+				<div class="setup-guidance-content">
+					<p>Values are checked on the server. Secrets are accepted but never rendered back to the browser.</p>
+					<div class="summary-list one-column">
+						<div><strong>SSH</strong><span>Use the private key path on this machine. Servestead never sends it to page chrome.</span></div>
+						<div><strong>Domain</strong><span>The base domain is used for Pangolin, resources, and certificates.</span></div>
+						<div><strong>Pangolin</strong><span>If the admin email is blank, the Let's Encrypt email is used.</span></div>
+					</div>
 				</div>
-			</aside>
+			</details>
 		</section>
 		@setupAdvancedOptions()
 	</div>
@@ -585,15 +528,17 @@ templ RepositoryPanel(data RepositoryFormData) {
 				</div>
 			</form>
 			</div>
-			<aside class="setup-side-card dashboard-card">
-				<h2>Repository rule</h2>
-				<p>Deployment uses committed configuration. Dirty repository state becomes a recovery step.</p>
-				<div class="summary-list one-column">
-					<div><strong>Create</strong><span>Use the profile default repository location.</span></div>
-					<div><strong>Existing</strong><span>Point Servestead at a local checkout that you own.</span></div>
-					<div><strong>GitHub</strong><span>Clone with an optional PAT that stays masked after submission.</span></div>
+			<details class="setup-side-card setup-guidance dashboard-card">
+				<summary>Repository guidance</summary>
+				<div class="setup-guidance-content">
+					<p>Deployment uses committed configuration. Dirty repository state becomes a recovery step.</p>
+					<div class="summary-list one-column">
+						<div><strong>Create</strong><span>Use the profile default repository location.</span></div>
+						<div><strong>Existing</strong><span>Point Servestead at a local checkout that you own.</span></div>
+						<div><strong>GitHub</strong><span>Clone with an optional PAT that stays masked after submission.</span></div>
+					</div>
 				</div>
-			</aside>
+			</details>
 		</section>
 		@setupAdvancedOptions()
 	</div>
@@ -625,15 +570,17 @@ templ ReviewPanel(data ReviewData) {
 				<button class="primary" type="submit">Run after review</button>
 			</form>
 			</div>
-			<aside class="setup-side-card dashboard-card">
-				<h2>Before execution</h2>
-				<p>Preflight and repository preparation run before any SSH command starts.</p>
-				<div class="summary-list one-column">
-					<div><strong>Preflight</strong><span>Local tools, SSH keys, and required values are checked first.</span></div>
-					<div><strong>Repository</strong><span>The config repository is prepared before the remote stage.</span></div>
-					<div><strong>Recovery</strong><span>Recoverable failures return inline fixes and retry controls.</span></div>
+			<details class="setup-side-card setup-guidance dashboard-card">
+				<summary>Before execution</summary>
+				<div class="setup-guidance-content">
+					<p>Preflight and repository preparation run before any SSH command starts.</p>
+					<div class="summary-list one-column">
+						<div><strong>Preflight</strong><span>Local tools, SSH keys, and required values are checked first.</span></div>
+						<div><strong>Repository</strong><span>The config repository is prepared before the remote stage.</span></div>
+						<div><strong>Recovery</strong><span>Recoverable failures return inline fixes and retry controls.</span></div>
+					</div>
 				</div>
-			</aside>
+			</details>
 		</section>
 		@setupAdvancedOptions()
 	</div>

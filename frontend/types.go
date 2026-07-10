@@ -166,9 +166,21 @@ type OpsProfileDrawerData struct {
 	GitState         string
 	CloudState       string
 	NextAction       string
-	Stacks           OpsStacksData
+	UpdatedAt        string
+	RecentRuns       []OpsRunRow
 	Notice           string
 	Error            string
+}
+
+type OpsDiagnosticsDrawerData struct {
+	CSRFToken string
+	ProfileID string
+	Name      string
+	Runs      []OpsRunRow
+	GitOps    OpsGitOpsData
+	Cloud     OpsCloudData
+	Notice    string
+	Error     string
 }
 
 type OpsStacksData struct {
@@ -217,8 +229,10 @@ type OpsGitOpsData struct {
 	RepositoryPath string
 	Diff           string
 	Status         string
+	State          string
 	Head           string
 	NeedsPush      bool
+	NextAction     string
 	Notice         string
 	Error          string
 }
@@ -230,21 +244,15 @@ type OpsGitOpsReviewData struct {
 	BaseDomain     string
 	RepositoryPath string
 	Status         string
+	State          string
 	Head           string
 	NeedsPush      bool
-	Checklist      []OpsChecklistItem
+	NextAction     string
 	Commits        []OpsCommitRow
 	Runs           []OpsRunRow
 	Diff           string
 	Notice         string
 	Error          string
-}
-
-type OpsChecklistItem struct {
-	Label  string
-	Detail string
-	Status string
-	Tone   string
 }
 
 type OpsCommitRow struct {

@@ -5,11 +5,9 @@ import "strings"
 templ OpsProfilesPanel(data OpsProfilesData) {
 	<div class="profile-screen" id="ops-console">
 		<section class="panel profile-list-panel">
-			<div class="section-header">
-				<div>
-					<h2>Profiles</h2>
-					<p class="muted">Select an environment to open diagnostics, stack operations, access, runs, GitOps, and cloud controls.</p>
-				</div>
+			<div class="section-header profile-list-heading">
+				<h2>Profiles</h2>
+				<a class="ghost button-link" href="/setup">Add profile</a>
 			</div>
 			@opsNotice(data.Notice, data.Error)
 			if len(data.Rows) == 0 {
@@ -21,8 +19,8 @@ templ OpsProfilesPanel(data OpsProfilesData) {
 			} else {
 				<div class="profile-list">
 					for _, row := range data.Rows {
-						<button class={ templ.KV("profile-list-item", true), templ.KV("selected", row.ID == data.Selected) } type="button" hx-get={ "/ops/profiles/" + row.ID + "/drawer" } hx-target="#ops-selected" hx-swap="innerHTML">
-							<span>
+						<a class={ templ.KV("profile-list-item", true), templ.KV("selected", row.ID == data.Selected) } href={ "/ops/profiles?profile=" + row.ID } aria-current={ ternary(row.ID == data.Selected, "page", "false") }>
+							<span class="profile-list-name">
 								<strong>{ row.Name }</strong>
 								<small>{ row.BaseDomain }</small>
 							</span>
@@ -30,12 +28,12 @@ templ OpsProfilesPanel(data OpsProfilesData) {
 								<span class="pill">{ row.SetupStatus }</span>
 								<small>{ row.UpdatedAt }</small>
 							</span>
-						</button>
+						</a>
 					}
 				</div>
 			}
 			<details class="provision-box">
-				<summary>Provision DigitalOcean profile</summary>
+				<summary>New DigitalOcean profile</summary>
 				<form hx-post="/ops/cloud/provision" hx-target="#ops-console" hx-swap="outerHTML" method="post" class="grid-form compact-form" autocomplete="off">
 					<input type="hidden" name="csrf" value={ data.CSRFToken }/>
 					<label><span>Token</span><input type="password" name="token" autocomplete="new-password" placeholder="or DIGITALOCEAN_ACCESS_TOKEN"/></label>
@@ -60,6 +58,8 @@ templ OpsProfilesPanel(data OpsProfilesData) {
 				</div>
 			}
 		</section>
+		<aside class="drawer diagnostics-drawer" id="ops-diagnostics" hidden aria-hidden="true"></aside>
+		<button class="diagnostics-scrim" type="button" data-profile-diagnostics-close aria-label="Close diagnostics"></button>
 	</div>
 }
 
@@ -67,53 +67,183 @@ templ OpsProfileDrawer(data OpsProfileDrawerData) {
 	<div class="drawer-content ops-workspace">
 		<div class="profile-workspace-head">
 			<div class="profile-title">
-				<p class="eyebrow">Profile Details + Diagnostics</p>
+				<p class="eyebrow">Profile</p>
 				<h2>{ data.Name }</h2>
-				<p class="muted">{ data.NextAction }</p>
+				<div class="profile-endpoints">
+					<span>{ data.IP }</span>
+					<span>{ data.BaseDomain }</span>
+				</div>
 			</div>
 			<div class="inline-actions">
-				<a class="button-link" href={ "/ops/profiles/" + data.ProfileID + "/gitops/review" }>GitOps review</a>
-				<a class="ghost button-link" href="/setup">Setup workbench</a>
+				<button class="ghost compact-action" type="button" data-profile-diagnostics-open aria-controls="ops-diagnostics" aria-expanded="false" hx-get={ "/ops/profiles/" + data.ProfileID + "/diagnostics" } hx-target="#ops-diagnostics" hx-swap="outerHTML">
+					@Icon("diagnostics")
+					<span>Diagnostics</span>
+				</button>
+				<a class="ghost button-link compact-action" href="/setup">Setup</a>
 			</div>
 		</div>
 		@opsNotice(data.Notice, data.Error)
-		<div class="profile-diagnostics-grid">
-			<div class="diagnostic-card tone-green">
-				<strong>Health</strong>
-				<span>{ data.SetupStatus }</span>
-				<small>{ data.ActiveRunStatus }</small>
+		<div class="profile-status-strip" aria-label="Profile status">
+			<div>
+				<small>Setup</small>
+				<strong>{ data.SetupStatus }</strong>
 			</div>
-			<div class="diagnostic-card tone-mauve">
-				<strong>GitOps</strong>
-				<span>{ data.GitState }</span>
-				<small>{ data.RepositoryPath }</small>
+			<div>
+				<small>Activity</small>
+				<strong>{ data.ActiveRunStatus }</strong>
 			</div>
-			<div class="diagnostic-card tone-blue">
-				<strong>Cloud</strong>
-				<span>{ data.CloudState }</span>
-				<small>{ data.IP }</small>
+			<div>
+				<small>GitOps</small>
+				<strong>{ data.GitState }</strong>
 			</div>
 		</div>
-		<div class="profile-tabs" role="tablist" aria-label="Profile sections">
-			<button class="tab-active" data-profile-tab="stacks" hx-get={ "/ops/profiles/" + data.ProfileID + "/stacks" } hx-target="#ops-detail" hx-swap="innerHTML" type="button">Stacks</button>
-			<button data-profile-tab="gitops" hx-get={ "/ops/profiles/" + data.ProfileID + "/gitops" } hx-target="#ops-detail" hx-swap="innerHTML" type="button">GitOps</button>
-			<button data-profile-tab="runs" hx-get={ "/ops/profiles/" + data.ProfileID + "/runs" } hx-target="#ops-detail" hx-swap="innerHTML" type="button">Runs</button>
-			<button data-profile-tab="access" hx-get={ "/ops/profiles/" + data.ProfileID + "/access" } hx-target="#ops-detail" hx-swap="innerHTML" type="button">Access</button>
-			<button data-profile-tab="cloud" hx-get={ "/ops/profiles/" + data.ProfileID + "/cloud" } hx-target="#ops-detail" hx-swap="innerHTML" type="button">Cloud</button>
-		</div>
-		<div class="profile-summary-compact">
-			<div><strong>Address</strong><span>{ data.IP }</span></div>
-			<div><strong>Domain</strong><span>{ data.BaseDomain }</span></div>
-			<div><strong>Run</strong><span>{ data.ActiveRunStatus }</span></div>
-			<div><strong>Setup</strong><span>{ data.SetupStatus }</span></div>
-			<div><strong>GitOps</strong><span>{ data.GitState }</span></div>
-			<div><strong>Cloud</strong><span>{ data.CloudState }</span></div>
-			<div class="wide"><strong>Repository</strong><span class="copyable" data-copy={ data.RepositoryPath }>{ data.RepositoryPath }</span></div>
-		</div>
-		<div id="ops-detail" class="ops-detail">
-			@OpsStacksPanel(data.Stacks)
-		</div>
+		<p class="profile-next-action"><strong>Next:</strong> { data.NextAction }</p>
+		<details class="profile-metadata">
+			<summary>Profile metadata</summary>
+			<div class="profile-summary-compact">
+				<div><strong>Address</strong><span>{ data.IP }</span></div>
+				<div><strong>Domain</strong><span>{ data.BaseDomain }</span></div>
+				<div><strong>Email</strong><span>{ data.LetsEncryptEmail }</span></div>
+				<div><strong>Cloud</strong><span>{ data.CloudState }</span></div>
+				<div><strong>Updated</strong><span>{ data.UpdatedAt }</span></div>
+				<div class="wide"><strong>Repository</strong><span class="copyable" data-copy={ data.RepositoryPath }>{ data.RepositoryPath }</span></div>
+			</div>
+		</details>
+		<section class="profile-operation-links">
+			<div class="section-header compact-header">
+				<h3>Manage</h3>
+			</div>
+			<div class="profile-operation-bar">
+				<button hx-get={ "/ops/profiles/" + data.ProfileID + "/stacks" } hx-target="#ops-detail" hx-swap="innerHTML" type="button">
+					@Icon("profiles")
+					<span>Stacks</span>
+				</button>
+				<button hx-get={ "/ops/profiles/" + data.ProfileID + "/gitops" } hx-target="#ops-detail" hx-swap="innerHTML" type="button">
+					@Icon("gitops")
+					<span>GitOps</span>
+				</button>
+				<button hx-get={ "/ops/profiles/" + data.ProfileID + "/access" } hx-target="#ops-detail" hx-swap="innerHTML" type="button">
+					@Icon("access")
+					<span>Access</span>
+				</button>
+				<button hx-get={ "/ops/profiles/" + data.ProfileID + "/cloud" } hx-target="#ops-detail" hx-swap="innerHTML" type="button">
+					@Icon("cloud")
+					<span>Cloud</span>
+				</button>
+			</div>
+		</section>
+		<section class="recent-runs-panel">
+			<div class="section-header compact-header">
+				<h3>Recent runs</h3>
+				<button class="ghost" hx-get={ "/ops/profiles/" + data.ProfileID + "/runs" } hx-target="#ops-detail" hx-swap="innerHTML" type="button">View history</button>
+			</div>
+			if len(data.RecentRuns) == 0 {
+				<div class="empty-state"><h3>No recent runs</h3><p>Setup and stack runs will appear here after they start.</p></div>
+			} else {
+				<div class="run-mini-list">
+					for index, run := range data.RecentRuns {
+						if index < 3 {
+							<a class="run-mini-row" href={ "/ops/profiles/" + data.ProfileID + "/runs/" + run.ID } hx-get={ "/ops/profiles/" + data.ProfileID + "/runs/" + run.ID } hx-target="#ops-detail" hx-swap="innerHTML">
+								<strong>{ run.Status }</strong>
+								<span>{ run.Stages }</span>
+								if run.Error != "" {
+									<small>{ run.Error }</small>
+								} else {
+									<small>{ run.UpdatedAt }</small>
+								}
+							</a>
+						}
+					}
+				</div>
+			}
+		</section>
+		<details class="profile-settings">
+			<summary>
+				@Icon("settings")
+				<span>Profile settings</span>
+			</summary>
+			<div class="profile-delete-panel">
+				<div>
+					<strong>Delete local profile</strong>
+					<p>Removes saved profile details, credentials and encryption keys, state, and run logs. Export any key needed to decrypt existing stack secrets first. The server, cloud resources, and repository files are not changed.</p>
+				</div>
+				<form method="post" action={ "/ops/profiles/" + data.ProfileID + "/delete" } autocomplete="off">
+					<input type="hidden" name="csrf" value={ data.CSRFToken }/>
+					<label>
+						<span>Type <code>{ "delete " + data.Name }</code> to confirm</span>
+						<input name="confirm" required spellcheck="false"/>
+					</label>
+					<button class="danger" type="submit">Delete profile</button>
+				</form>
+			</div>
+		</details>
+		<div id="ops-detail" class="ops-detail"></div>
 	</div>
+}
+
+templ OpsDiagnosticsDrawer(data OpsDiagnosticsDrawerData) {
+	<aside class="drawer diagnostics-drawer is-open" id="ops-diagnostics" aria-hidden="false">
+		<div class="profile-workspace-head">
+			<div class="profile-title">
+				<p class="eyebrow">Diagnostics</p>
+				<h2>{ data.Name }</h2>
+			</div>
+			<button class="ghost" type="button" data-profile-diagnostics-close aria-controls="ops-diagnostics">Close</button>
+		</div>
+		@opsNotice(data.Notice, data.Error)
+		<div class="profile-tabs diagnostics-tabs" role="tablist" aria-label="Diagnostics sections">
+			<button class="tab-active" role="tab" aria-selected="true" aria-controls="diagnostics-runs" data-profile-tab="runs" data-diagnostics-panel="runs" type="button">Runs</button>
+			<button role="tab" aria-selected="false" aria-controls="diagnostics-gitops" data-profile-tab="gitops" data-diagnostics-panel="gitops" type="button">GitOps</button>
+			<button role="tab" aria-selected="false" aria-controls="diagnostics-cloud" data-profile-tab="cloud" data-diagnostics-panel="cloud" type="button">Cloud</button>
+		</div>
+		<section class="diagnostics-section" id="diagnostics-runs" role="tabpanel" data-diagnostics-section="runs">
+			if len(data.Runs) == 0 {
+				<div class="empty-state"><h3>No recent runs</h3><p>Run diagnostics will appear after setup or stack sync starts.</p></div>
+			} else {
+				<div class="run-mini-list">
+					for _, run := range data.Runs {
+						<a class="run-mini-row" data-diagnostics-dismiss href={ "/ops/profiles/" + data.ProfileID + "/runs/" + run.ID } hx-get={ "/ops/profiles/" + data.ProfileID + "/runs/" + run.ID } hx-target="#ops-detail" hx-swap="innerHTML">
+							<strong>{ run.Status }</strong>
+							<span>{ run.Stages }</span>
+							<small>{ run.UpdatedAt }</small>
+						</a>
+					}
+				</div>
+			}
+			<button data-diagnostics-dismiss hx-get={ "/ops/profiles/" + data.ProfileID + "/runs" } hx-target="#ops-detail" hx-swap="innerHTML" type="button">Open run history</button>
+		</section>
+		<section class="diagnostics-section" id="diagnostics-gitops" role="tabpanel" data-diagnostics-section="gitops" hidden>
+			@opsNotice("", data.GitOps.Error)
+			<div class="summary-list one-column">
+				<div><strong>Repository</strong><span class="copyable" data-copy={ data.GitOps.RepositoryPath }>{ data.GitOps.RepositoryPath }</span></div>
+				<div><strong>Status</strong><span>{ data.GitOps.State }</span></div>
+				<div><strong>HEAD</strong><span class="copyable" data-copy={ data.GitOps.Head }>{ data.GitOps.Head }</span></div>
+				<div><strong>Needs push</strong><span>{ ternary(data.GitOps.NeedsPush, "yes", "no") }</span></div>
+			</div>
+			<div class="inline-actions">
+				<a class="button-link" href={ "/ops/profiles/" + data.ProfileID + "/gitops/review" }>Open review</a>
+				<button data-diagnostics-dismiss hx-get={ "/ops/profiles/" + data.ProfileID + "/gitops" } hx-target="#ops-detail" hx-swap="innerHTML" type="button">Open GitOps details</button>
+			</div>
+		</section>
+		<section class="diagnostics-section" id="diagnostics-cloud" role="tabpanel" data-diagnostics-section="cloud" hidden>
+			@opsNotice("", data.Cloud.Error)
+			if data.Cloud.Provider == "" {
+				<div class="empty-state"><h3>No cloud metadata</h3><p>This profile can still be managed as an existing VPS.</p></div>
+			} else {
+				<div class="summary-list one-column">
+					<div><strong>Provider</strong><span>{ data.Cloud.Provider }</span></div>
+					<div><strong>Resource ID</strong><span class="copyable" data-copy={ data.Cloud.ResourceID }>{ data.Cloud.ResourceID }</span></div>
+					<div><strong>Name</strong><span>{ data.Cloud.Name }</span></div>
+					<div><strong>Region</strong><span>{ data.Cloud.Region }</span></div>
+					<div><strong>Size</strong><span>{ data.Cloud.Size }</span></div>
+					<div><strong>Image</strong><span>{ data.Cloud.Image }</span></div>
+					<div><strong>IP</strong><span>{ data.Cloud.IP }</span></div>
+					<div><strong>State</strong><span>{ ternary(data.Cloud.Destroyed, "destroyed locally", "active") }</span></div>
+				</div>
+			}
+			<button data-diagnostics-dismiss hx-get={ "/ops/profiles/" + data.ProfileID + "/cloud" } hx-target="#ops-detail" hx-swap="innerHTML" type="button">Open cloud controls</button>
+		</section>
+	</aside>
 }
 
 templ OpsStacksPanel(data OpsStacksData) {
@@ -246,142 +376,140 @@ templ OpsStackResourceFields(resource OpsStackResourceData, templateRow bool) {
 }
 
 templ OpsGitOpsPanel(data OpsGitOpsData) {
-	<section class="ops-panel">
+	<section class="ops-panel gitops-detail-panel">
 		<div class="section-header">
 			<div>
 				<h2>GitOps</h2>
 				<p class="muted">{ data.RepositoryPath }</p>
 			</div>
-			<div class="inline-actions">
-				<a class="button-link" href={ "/ops/profiles/" + data.ProfileID + "/gitops/review" }>Open review</a>
-				<form hx-post={ "/ops/profiles/" + data.ProfileID + "/gitops/stage" } hx-target="#ops-detail" hx-swap="innerHTML" method="post">
-					<input type="hidden" name="csrf" value={ data.CSRFToken }/>
-					<button type="submit">Stage</button>
-				</form>
-				<form hx-post={ "/ops/profiles/" + data.ProfileID + "/gitops/push" } hx-target="#ops-detail" hx-swap="innerHTML" method="post">
-					<input type="hidden" name="csrf" value={ data.CSRFToken }/>
-					<button type="submit">Push</button>
-				</form>
-			</div>
+			<a class="button-link" href={ "/ops/profiles/" + data.ProfileID + "/gitops/review" }>Open workspace</a>
 		</div>
 		@opsNotice(data.Notice, data.Error)
-		<div class="summary-list">
-			<div><strong>Status</strong><span>{ data.Status }</span></div>
-			<div><strong>HEAD</strong><span class="copyable" data-copy={ data.Head }>{ data.Head }</span></div>
-			<div><strong>Needs push</strong><span>{ ternary(data.NeedsPush, "yes", "no") }</span></div>
+		<div class="gitops-status-strip" aria-label="Repository status">
+			<div><small>Working tree</small><strong>{ data.State }</strong></div>
+			<div><small>Remote sync</small><strong>{ ternary(data.NeedsPush, "needs push", "up to date") }</strong></div>
+			<div><small>HEAD</small><strong class="copyable" data-copy={ data.Head }>{ data.Head }</strong></div>
 		</div>
-		<form hx-post={ "/ops/profiles/" + data.ProfileID + "/gitops/commit" } hx-target="#ops-detail" hx-swap="innerHTML" method="post" class="inline-form">
-			<input type="hidden" name="csrf" value={ data.CSRFToken }/>
-			<input name="message" placeholder="Commit message"/>
-			<button class="primary" type="submit">Commit staged</button>
-		</form>
-		<pre class="diff">{ strings.TrimSpace(data.Diff) }</pre>
+		<p class="gitops-next-action"><strong>Next:</strong> { data.NextAction }</p>
+		<details class="gitops-actions-disclosure">
+			<summary>Repository actions <small>Stage, commit, or push</small></summary>
+			<div class="gitops-action-sheet">
+				<div class="inline-actions">
+					<form hx-post={ "/ops/profiles/" + data.ProfileID + "/gitops/stage" } hx-target="#ops-detail" hx-swap="innerHTML" method="post">
+						<input type="hidden" name="csrf" value={ data.CSRFToken }/>
+						<button type="submit">Stage changes</button>
+					</form>
+					<form hx-post={ "/ops/profiles/" + data.ProfileID + "/gitops/push" } hx-target="#ops-detail" hx-swap="innerHTML" method="post">
+						<input type="hidden" name="csrf" value={ data.CSRFToken }/>
+						<button type="submit">Push commit</button>
+					</form>
+				</div>
+				<form hx-post={ "/ops/profiles/" + data.ProfileID + "/gitops/commit" } hx-target="#ops-detail" hx-swap="innerHTML" method="post" class="inline-form gitops-commit-form">
+					<input type="hidden" name="csrf" value={ data.CSRFToken }/>
+					<input name="message" placeholder="Commit message"/>
+					<button class="primary" type="submit">Commit staged</button>
+				</form>
+			</div>
+		</details>
+		<details class="diff-disclosure">
+			<summary>Review working tree changes</summary>
+			<pre class="diff">{ strings.TrimSpace(data.Diff) }</pre>
+		</details>
 	</section>
 }
 
 templ OpsGitOpsReviewPanel(data OpsGitOpsReviewData) {
 	<div class="gitops-review-screen">
-		<section class="panel review-main">
-			<div class="section-header">
-				<div>
-					<p class="eyebrow">GitOps + Run Review</p>
+		<section class="dashboard-card gitops-overview-card">
+			<div class="profile-workspace-head">
+				<div class="profile-title">
+					<p class="eyebrow">GitOps</p>
 					<h2>{ data.ProfileName }</h2>
-					<p class="muted">{ firstNonEmpty(data.BaseDomain, data.RepositoryPath, "Repository not configured") }</p>
+					<p class="gitops-repository copyable" title={ data.RepositoryPath } data-copy={ data.RepositoryPath }>{ firstNonEmpty(data.RepositoryPath, "Repository not configured") }</p>
 				</div>
 				<div class="inline-actions">
-					<a class="ghost button-link" href={ "/ops/profiles?profile=" + data.ProfileID }>Back to diagnostics</a>
-				</div>
-			</div>
-			@opsNotice(data.Notice, data.Error)
-			<div class="review-status-grid">
-				<div><strong>Repository</strong><span class="copyable" data-copy={ data.RepositoryPath }>{ data.RepositoryPath }</span></div>
-				<div><strong>Status</strong><span>{ data.Status }</span></div>
-				<div><strong>HEAD</strong><span class="copyable" data-copy={ data.Head }>{ data.Head }</span></div>
-				<div><strong>Needs push</strong><span>{ ternary(data.NeedsPush, "yes", "no") }</span></div>
-			</div>
-			<section class="review-section">
-				<h3>Deploy checklist</h3>
-				<div class="checklist">
-					for _, item := range data.Checklist {
-						<div class={ "checklist-item tone-" + item.Tone }>
-							<strong>{ item.Label }</strong>
-							<span>{ item.Detail }</span>
-							<small>{ item.Status }</small>
-						</div>
-					}
-				</div>
-			</section>
-			<section class="review-section">
-				<div class="section-header compact-header">
-					<h3>Recent commits</h3>
+					<a class="ghost button-link" href={ "/ops/profiles?profile=" + data.ProfileID }>Back to profile</a>
 					<form hx-post={ "/ops/profiles/" + data.ProfileID + "/runs/stage" } hx-target="#workbench" hx-swap="outerHTML" method="post">
 						<input type="hidden" name="csrf" value={ data.CSRFToken }/>
 						<input type="hidden" name="stage" value="stacks"/>
 						<button class="primary" type="submit">Run stacks</button>
 					</form>
 				</div>
+			</div>
+			@opsNotice(data.Notice, data.Error)
+			<div class="gitops-status-strip" aria-label="Repository status">
+				<div><small>Working tree</small><strong>{ data.State }</strong></div>
+				<div><small>Remote sync</small><strong>{ ternary(data.NeedsPush, "needs push", "up to date") }</strong></div>
+				<div><small>HEAD</small><strong class="copyable" data-copy={ data.Head }>{ data.Head }</strong></div>
+			</div>
+			<p class="gitops-next-action"><strong>Next:</strong> { data.NextAction }</p>
+		</section>
+		<div class="gitops-activity-grid">
+			<section class="dashboard-card gitops-list-panel">
+				<div class="section-header compact-header"><h3>Recent commits</h3></div>
 				if len(data.Commits) == 0 {
-					<div class="empty-state"><h3>No recent commits</h3><p>No repository commit history is available for this profile.</p></div>
+					<div class="empty-state"><h3>No recent commits</h3><p>No repository history is available.</p></div>
 				} else {
 					<div class="commit-list">
-						for _, commit := range data.Commits {
-							<div class="commit-row">
-								<code>{ commit.Hash }</code>
-								<strong>{ commit.Message }</strong>
-								<time>{ commit.When }</time>
-							</div>
+						for index, commit := range data.Commits {
+							if index < 4 {
+								<div class="commit-row">
+									<code>{ commit.Hash }</code>
+									<strong>{ commit.Message }</strong>
+									<time>{ commit.When }</time>
+								</div>
+							}
 						}
 					</div>
 				}
 			</section>
-			<details class="diff-disclosure">
-				<summary>Show raw diff</summary>
-				<pre class="diff">{ strings.TrimSpace(data.Diff) }</pre>
-			</details>
-			<section class="ops-panel">
-				<div class="section-header">
-					<h3>Repository actions</h3>
-					<div class="inline-actions">
-						<form hx-post={ "/ops/profiles/" + data.ProfileID + "/gitops/stage" } hx-target="#gitops-review-actions" hx-swap="innerHTML" method="post">
-							<input type="hidden" name="csrf" value={ data.CSRFToken }/>
-							<button type="submit">Stage</button>
-						</form>
-						<form hx-post={ "/ops/profiles/" + data.ProfileID + "/gitops/push" } hx-target="#gitops-review-actions" hx-swap="innerHTML" method="post">
-							<input type="hidden" name="csrf" value={ data.CSRFToken }/>
-							<button type="submit">Push</button>
-						</form>
+			<section class="dashboard-card gitops-list-panel">
+				<div class="section-header compact-header"><h3>Recent runs</h3></div>
+				if len(data.Runs) == 0 {
+					<div class="empty-state"><h3>No recent runs</h3><p>Stack runs will appear here after they start.</p></div>
+				} else {
+					<div class="run-mini-list">
+						for index, run := range data.Runs {
+							if index < 4 {
+								<a class="run-mini-row" href={ "/ops/profiles/" + data.ProfileID + "/runs/" + run.ID } hx-get={ "/ops/profiles/" + data.ProfileID + "/runs/" + run.ID } hx-target="#gitops-run-detail" hx-swap="innerHTML">
+									<strong>{ run.Status }</strong>
+									<span>{ run.Stages }</span>
+									<small>{ run.UpdatedAt }</small>
+								</a>
+							}
+						}
 					</div>
+					<div id="gitops-run-detail" class="peek-detail"></div>
+				}
+			</section>
+		</div>
+		<details class="dashboard-card gitops-actions-disclosure">
+			<summary>Repository actions <small>Stage, commit, or push</small></summary>
+			<div class="gitops-action-sheet">
+				<div class="inline-actions">
+					<form hx-post={ "/ops/profiles/" + data.ProfileID + "/gitops/stage" } hx-target="#workbench" hx-swap="innerHTML" method="post">
+						<input type="hidden" name="csrf" value={ data.CSRFToken }/>
+						<input type="hidden" name="view" value="review"/>
+						<button type="submit">Stage changes</button>
+					</form>
+					<form hx-post={ "/ops/profiles/" + data.ProfileID + "/gitops/push" } hx-target="#workbench" hx-swap="innerHTML" method="post">
+						<input type="hidden" name="csrf" value={ data.CSRFToken }/>
+						<input type="hidden" name="view" value="review"/>
+						<button type="submit">Push commit</button>
+					</form>
 				</div>
-				<form hx-post={ "/ops/profiles/" + data.ProfileID + "/gitops/commit" } hx-target="#gitops-review-actions" hx-swap="innerHTML" method="post" class="inline-form">
+				<form hx-post={ "/ops/profiles/" + data.ProfileID + "/gitops/commit" } hx-target="#workbench" hx-swap="innerHTML" method="post" class="inline-form gitops-commit-form">
 					<input type="hidden" name="csrf" value={ data.CSRFToken }/>
+					<input type="hidden" name="view" value="review"/>
 					<input name="message" placeholder="Commit message"/>
 					<button class="primary" type="submit">Commit staged</button>
 				</form>
-				<div id="gitops-review-actions"></div>
-			</section>
-		</section>
-		<aside class="peek-panel run-peek">
-			<h2>Run detail</h2>
-			if len(data.Runs) == 0 {
-				<div class="empty-state"><h3>No recent runs</h3><p>Run status appears here after setup or stack sync starts.</p></div>
-			} else {
-				<div class="peek-tabs">
-					<button class="tab-active" type="button">Overview</button>
-					<button type="button">Changes</button>
-					<button type="button">Logs</button>
-				</div>
-				<div class="run-mini-list">
-					for _, run := range data.Runs {
-						<a class="run-mini-row" href={ "/ops/profiles/" + data.ProfileID + "/runs/" + run.ID } hx-get={ "/ops/profiles/" + data.ProfileID + "/runs/" + run.ID } hx-target="#gitops-run-detail" hx-swap="innerHTML">
-							<strong>{ run.Status }</strong>
-							<span>{ run.Stages }</span>
-							<small>{ run.UpdatedAt }</small>
-						</a>
-					}
-				</div>
-				<div id="gitops-run-detail" class="peek-detail"></div>
-			}
-		</aside>
+			</div>
+		</details>
+		<details class="dashboard-card diff-disclosure">
+			<summary>Review working tree changes</summary>
+			<pre class="diff">{ strings.TrimSpace(data.Diff) }</pre>
+		</details>
 	</div>
 }
 
