@@ -1,0 +1,16 @@
+test -f /etc/ufw/before.rules
+tmp="$(mktemp)"
+awk -v start={{ shellQuote .StartMarker }} -v end={{ shellQuote .EndMarker }} 'BEGIN { skip = 0 } $0 == start { skip = 1; next } $0 == end { skip = 0; next } !skip { print }' /etc/ufw/before.rules > "$tmp"
+cat > /etc/ufw/before.rules <<EOF
+{{ .StartMarker }}
+*nat
+:POSTROUTING ACCEPT [0:0]
+{{ range .Subnets -}}
+-A POSTROUTING -s {{ . }} -o ${egress_interface} -j MASQUERADE
+{{ end -}}
+COMMIT
+{{ .EndMarker }}
+
+EOF
+cat "$tmp" >> /etc/ufw/before.rules
+rm -f "$tmp"

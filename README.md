@@ -4,7 +4,7 @@ Servestead, the Server Homestead, is a local Go CLI for turning a raw Ubuntu VPS
 
 ## Prerequisites
 
-- Go 1.26.4 or newer to build the CLI
+- Go 1.26.5 or newer to build the CLI
 - A DigitalOcean API token when provisioning from Servestead
 - A local ED25519 key pair for administrative access
 

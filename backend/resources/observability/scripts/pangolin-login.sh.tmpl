@@ -1,0 +1,29 @@
+login_response="$(mktemp)"
+set +e
+login_status="$(curl -sS -o "$login_response" -w '%{http_code}' -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data-binary @- <<'SERVESTEAD_LOGIN_PAYLOAD'
+{{ .LoginPayload }}
+SERVESTEAD_LOGIN_PAYLOAD
+)"
+login_result=$?
+set -e
+if [ "$login_result" -ne 0 ]; then
+  echo 'Pangolin administrator login failed before receiving a response.' >&2
+  if [ -s "$login_response" ]; then cat "$login_response" >&2; echo >&2; fi
+  rm -f "$login_response"
+  exit "$login_result"
+fi
+case "$login_status" in
+  2??) rm -f "$login_response" ;;
+  401)
+    echo 'Pangolin rejected the saved administrator credentials. Confirm the current Pangolin admin email and password in Advanced setup, or run the same setup action once with PANGOLIN_ADMIN_PASSWORD set to the current password.' >&2
+    if [ -s "$login_response" ]; then cat "$login_response" >&2; echo >&2; fi
+    rm -f "$login_response"
+    exit 1
+    ;;
+  *)
+    echo "Pangolin administrator login failed (HTTP $login_status)." >&2
+    if [ -s "$login_response" ]; then cat "$login_response" >&2; echo >&2; fi
+    rm -f "$login_response"
+    exit 1
+    ;;
+esac

@@ -1,0 +1,16 @@
+api='http://127.0.0.1:3000/api/v1'
+cookie_file="$(mktemp)"
+specification_file="$(mktemp)"
+cat > "$specification_file" <<'SERVESTEAD_RESOURCE_SPECIFICATION'
+{{ .Specification }}
+SERVESTEAD_RESOURCE_SPECIFICATION
+trap 'rm -f "$cookie_file" "$specification_file"' EXIT
+{{ range .PangolinLoginCommands }}{{ . }}
+{{ end -}}
+for attempt in $(seq 1 30); do
+  resources="$(curl -fsS -b "$cookie_file" "$api/org/servestead/resources?pageSize=100")"
+  if printf '%s' "$resources" | python3 -c {{ shellQuote .VerifyResources }} "$specification_file"; then exit 0; fi
+  sleep 2
+done
+echo {{ shellQuote .FailureMessage }} >&2
+exit 1

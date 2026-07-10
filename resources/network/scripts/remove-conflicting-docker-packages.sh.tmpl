@@ -1,3 +1,0 @@
-for package in docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc; do
-  {{ aptGet "remove -y \"$package\"" }} >/dev/null 2>&1 || true
-done

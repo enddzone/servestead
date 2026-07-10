@@ -1,7 +1,6 @@
 /servestead
 /bin/
 *.test
-.lavish/
 docs/.astro/
 docs/dist/
 docs/node_modules/

@@ -1,0 +1,1101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Servestead Web UI Phased Plan</title>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: "base",
+      themeVariables: {
+        darkMode: true,
+        background: "#0f1516",
+        mainBkg: "#111819",
+        primaryColor: "#17262b",
+        primaryTextColor: "#e9e1c8",
+        primaryBorderColor: "#536266",
+        lineColor: "#536266",
+        secondaryColor: "#2b2110",
+        tertiaryColor: "#2a1718",
+        fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
+      }
+    });
+  </script>
+  <style>
+    :root {
+      --page: #0b1011;
+      --panel: #111819;
+      --panel-2: #0f1516;
+      --tile: #131d1f;
+      --top: #2c2c29;
+      --line: #536266;
+      --line-dim: #364144;
+      --text: #e9e1c8;
+      --muted: #9a9486;
+      --blue: #5bc7f0;
+      --orange: #ffb21a;
+      --green: #74d889;
+      --red: #ff5555;
+      --purple: #c687ff;
+      --yellow: #f5c76b;
+      --red-bg: #2a1718;
+      --yellow-bg: #2b2110;
+      --radius: 10px;
+      --shadow: 0 24px 70px rgba(0,0,0,.42);
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; min-width: 0; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 18% -12%, rgba(91,199,240,.13), transparent 30rem),
+        radial-gradient(circle at 88% 10%, rgba(255,178,26,.08), transparent 24rem),
+        linear-gradient(180deg, #0b1011 0%, #0f1516 46%, #0b1011 100%);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.46;
+    }
+    a { color: var(--blue); }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    .page {
+      width: min(1500px, calc(100vw - 28px));
+      margin: 0 auto;
+      padding: 28px 0 82px;
+    }
+    .hero {
+      border: 1px solid var(--line-dim);
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, rgba(17,24,25,.94), rgba(15,21,22,.88));
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      margin-bottom: 18px;
+    }
+    .hero-bar, .shell-top {
+      background: var(--top);
+      color: var(--text);
+      font-weight: 900;
+      padding: 10px 16px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      overflow-wrap: anywhere;
+    }
+    .hero-body {
+      display: grid;
+      grid-template-columns: minmax(0, 1.08fr) minmax(320px, .92fr);
+      gap: 20px;
+      padding: 24px;
+      align-items: stretch;
+    }
+    .eyebrow {
+      color: var(--orange);
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      font-size: .78rem;
+      margin: 0 0 8px;
+    }
+    h1, h2, h3, h4, p { margin-top: 0; }
+    h1 {
+      font-size: clamp(2.25rem, 3.6vw, 4.6rem);
+      line-height: .96;
+      letter-spacing: -.03em;
+      margin-bottom: 14px;
+    }
+    h2 {
+      color: var(--orange);
+      font-size: clamp(1.45rem, 2.2vw, 2.3rem);
+      margin-bottom: 10px;
+    }
+    h3 { color: var(--text); font-size: 1.08rem; margin-bottom: 8px; }
+    h4 { color: var(--orange); font-size: .95rem; margin: 0 0 10px; }
+    .lead { color: var(--muted); font-size: 1.08rem; max-width: 82ch; }
+    .pill-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .pill, .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--line-dim);
+      border-radius: 999px;
+      background: rgba(15,21,22,.86);
+      color: var(--text);
+      padding: 5px 10px;
+      font-size: .82rem;
+      font-weight: 800;
+      overflow-wrap: anywhere;
+    }
+    .pill { white-space: nowrap; }
+    .badge.green { color: var(--green); border-color: rgba(116,216,137,.48); }
+    .badge.blue { color: var(--blue); border-color: rgba(91,199,240,.5); }
+    .badge.yellow { color: var(--yellow); border-color: rgba(245,199,107,.55); background: var(--yellow-bg); }
+    .badge.red { color: var(--red); border-color: rgba(255,85,85,.56); background: var(--red-bg); }
+    .badge.purple { color: var(--purple); border-color: rgba(198,135,255,.52); }
+    .blue { color: var(--blue); }
+    .orange { color: var(--orange); }
+    .green { color: var(--green); }
+    .red { color: var(--red); }
+    .yellow { color: var(--yellow); }
+    .purple { color: var(--purple); }
+    .muted { color: var(--muted); }
+    .card, .screen-card, .phase-card, .decision-card, .diagram-card {
+      border: 1px solid var(--line-dim);
+      background: rgba(17,24,25,.9);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .card { padding: 18px; }
+    .split {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .mode-card {
+      border: 1px solid var(--line-dim);
+      border-radius: 8px;
+      background: var(--panel-2);
+      padding: 16px;
+    }
+    .mode-card ul { margin: 10px 0 0; padding-left: 18px; color: var(--muted); }
+    .section { margin-top: 28px; }
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 14px;
+      margin-bottom: 12px;
+    }
+    .section-head p { color: var(--muted); margin-bottom: 0; max-width: 86ch; }
+    .screens {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }
+    .screen-card { padding: 14px; }
+    .screen-title {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .screen-title p { color: var(--muted); margin-bottom: 0; }
+    .shell {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+    .shell-top { font-size: .87rem; padding: 8px 10px; }
+    .shell-body {
+      padding: 10px;
+      min-height: 410px;
+      display: grid;
+      gap: 10px;
+    }
+    .workbench-grid {
+      grid-template-columns: 230px minmax(0, 1fr) 260px;
+    }
+    .ops-grid {
+      grid-template-columns: minmax(0, 1fr) 290px;
+    }
+    .pane, .tile, .drawer, .log, .table-shell {
+      border: 1px solid var(--line-dim);
+      border-radius: 7px;
+      background: var(--panel);
+      padding: 11px;
+      overflow: hidden;
+    }
+    .step {
+      border: 1px solid var(--line-dim);
+      border-radius: 8px;
+      padding: 9px;
+      margin-bottom: 8px;
+      background: var(--panel-2);
+    }
+    .step.active { border-color: rgba(245,199,107,.58); background: var(--yellow-bg); }
+    .step.done { border-color: rgba(116,216,137,.45); }
+    .field-grid, .tile-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .field, .tile {
+      background: var(--tile);
+      min-height: 78px;
+    }
+    .field label, .tile .label {
+      display: block;
+      color: var(--muted);
+      font-weight: 850;
+      font-size: .82rem;
+      margin-bottom: 4px;
+    }
+    .field .value, .tile .value {
+      color: var(--blue);
+      font-weight: 900;
+      overflow-wrap: anywhere;
+    }
+    .action {
+      display: grid;
+      grid-template-columns: auto minmax(0,1fr);
+      gap: 8px;
+      align-items: center;
+      margin: 7px 0;
+    }
+    .key {
+      min-width: 38px;
+      min-height: 28px;
+      display: inline-grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #0d1517;
+      color: var(--blue);
+      font-weight: 950;
+    }
+    .review-list, .compact-list { display: grid; gap: 8px; }
+    .review-item {
+      display: grid;
+      grid-template-columns: auto minmax(0,1fr);
+      gap: 9px;
+      align-items: start;
+      border-bottom: 1px solid var(--line-dim);
+      padding-bottom: 8px;
+    }
+    .run-grid {
+      display: grid;
+      grid-template-columns: 250px minmax(0,1fr);
+      gap: 10px;
+    }
+    .progress {
+      height: 12px;
+      border-radius: 999px;
+      background: #293235;
+      overflow: hidden;
+      margin: 9px 0 12px;
+    }
+    .progress span {
+      display: block;
+      height: 100%;
+      width: 64%;
+      background: linear-gradient(90deg, var(--yellow), var(--green));
+    }
+    .log-line {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      color: var(--text);
+      margin: 4px 0;
+      overflow-wrap: anywhere;
+      font-size: .9rem;
+    }
+    .alert {
+      border: 1px solid rgba(255,85,85,.55);
+      background: var(--red-bg);
+      display: grid;
+      grid-template-columns: auto minmax(0,1fr);
+      gap: 10px;
+      padding: 10px;
+      border-radius: 7px;
+      margin-bottom: 10px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line-dim);
+      padding: 8px 7px;
+      text-align: left;
+      overflow-wrap: anywhere;
+      vertical-align: top;
+    }
+    th { color: var(--muted); text-transform: uppercase; font-size: .76rem; letter-spacing: .04em; }
+    tr.selected td { background: var(--tile); color: var(--blue); font-weight: 850; }
+    .drawer p { color: var(--muted); }
+    .bottom-dock {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: 270px minmax(0,1fr);
+      gap: 10px;
+    }
+    .footer-strip {
+      grid-column: 1 / -1;
+      background: var(--top);
+      color: var(--muted);
+      padding: 8px 10px;
+      border: 1px solid var(--line-dim);
+      border-radius: 6px;
+      overflow-wrap: anywhere;
+      font-size: .86rem;
+    }
+    .phase-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0,1fr));
+      gap: 12px;
+    }
+    .phase-card { padding: 14px; }
+    .phase-card .num {
+      width: 34px;
+      height: 34px;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--yellow-bg);
+      color: var(--yellow);
+      border: 1px solid rgba(245,199,107,.45);
+      font-weight: 950;
+      margin-bottom: 10px;
+    }
+    .phase-card ul { padding-left: 18px; margin: 8px 0 0; color: var(--muted); }
+    .matrix {
+      overflow-x: auto;
+      border: 1px solid var(--line-dim);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+    .matrix table { min-width: 1040px; }
+    .diagram-card { padding: 14px; overflow: auto; }
+    .route-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0,1fr));
+      gap: 12px;
+    }
+    .route-card {
+      border: 1px solid var(--line-dim);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--panel-2);
+    }
+    .route-card ul { padding-left: 18px; color: var(--muted); }
+    li, .action span:last-child, .review-item span:last-child { overflow-wrap: anywhere; }
+    .decision-card { padding: 18px; margin-top: 26px; }
+    .decision-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0,1fr));
+      gap: 14px;
+    }
+    fieldset {
+      border: 1px solid var(--line-dim);
+      border-radius: 8px;
+      padding: 12px;
+      margin: 0;
+    }
+    legend { color: var(--orange); font-weight: 900; padding: 0 6px; }
+    label.choice {
+      display: flex;
+      gap: 10px;
+      padding: 8px;
+      border-radius: 7px;
+      align-items: start;
+    }
+    label.choice:hover { background: var(--panel-2); }
+    input, textarea {
+      accent-color: var(--blue);
+      color: var(--text);
+      background: #0d1517;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      font: inherit;
+      padding: 8px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 96px;
+      resize: vertical;
+      margin-top: 10px;
+    }
+    button {
+      border: 1px solid rgba(91,199,240,.6);
+      color: var(--blue);
+      background: #0d1517;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-weight: 900;
+      cursor: pointer;
+    }
+    button.primary {
+      background: var(--blue);
+      color: #061012;
+    }
+    @media (max-width: 1180px) {
+      .hero-body, .split, .screens, .phase-grid, .route-grid, .decision-grid { grid-template-columns: 1fr; }
+      .workbench-grid, .ops-grid, .run-grid, .bottom-dock { grid-template-columns: 1fr; }
+      .shell-body { min-height: auto; }
+    }
+    @media (max-width: 680px) {
+      .field-grid, .tile-grid { grid-template-columns: 1fr; }
+      .page { width: min(100vw - 16px, 1500px); padding-top: 12px; }
+      .hero-body { padding: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <div class="hero-bar">
+        <span>SERVESTEAD WEB PLAN | Guided setup + operations console | Go + templ + htmx + SSE</span>
+        <span class="muted">No command-center shell in v1</span>
+      </div>
+      <div class="hero-body">
+        <div>
+          <p class="eyebrow">Chosen direction</p>
+          <h1>Two-mode web UI for setup and day-2 operations</h1>
+          <p class="lead">Use <strong>Guided Workbench</strong> for setup because it is safer, calmer, and harder to get lost. Use <strong>Operations Console</strong> for day-2 work because saved profiles, stacks, GitOps, cloud state, and run history become resources that need filtering, drawers, and fast recovery actions.</p>
+          <div class="pill-row">
+            <span class="pill">Go local web server</span>
+            <span class="pill">templ components</span>
+            <span class="pill">htmx panels/forms</span>
+            <span class="pill">SSE logs/status</span>
+            <span class="pill">WebSocket optional</span>
+          </div>
+        </div>
+        <div class="split">
+          <div class="mode-card">
+            <span class="badge blue">Mode B</span>
+            <h2>Setup Workbench</h2>
+            <p class="muted">A guided flow for provisioning, profile intake, repository setup, review, execution, and recovery.</p>
+            <ul>
+              <li>Stepper and validation first.</li>
+              <li>Review before billable or destructive actions.</li>
+              <li>Live run dock stays attached to the same page.</li>
+            </ul>
+          </div>
+          <div class="mode-card">
+            <span class="badge yellow">Mode C</span>
+            <h2>Operations Console</h2>
+            <p class="muted">A resource browser for profiles, stacks, GitOps, runs, secrets access, and cloud actions.</p>
+            <ul>
+              <li>Tables, filters, detail drawers.</li>
+              <li>GitOps diff/stage/commit/push/sync in context.</li>
+              <li>Run history and logs are searchable.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">System shape</p>
+          <h2>Architecture: Server-owned state, browser-owned interaction</h2>
+        </div>
+        <p>The browser should not own privileged state. It renders fragments and controls, while the Go process keeps authority over profiles, secrets, Git, SSH, DigitalOcean, and setup runs.</p>
+      </div>
+      <div class="diagram-card">
+        <pre class="mermaid">
+flowchart TD
+  CLI["servestead ui"] --> Server["Local Go HTTP server<br/>loopback + one-time token"]
+  Server --> Store["Profile store<br/>profiles/state/secrets/logs"]
+  Server --> Setup["Setup engine<br/>bootstrap/harden/platform"]
+  Server --> Git["GitOps manager<br/>diff/stage/commit/push/sync"]
+  Server --> Cloud["Cloud manager<br/>DigitalOcean restart/destroy/provision"]
+  Server --> Events["Event broker<br/>run status + logs"]
+  Browser["Browser UI<br/>templ + htmx"] -->|"GET fragments / POST forms"| Server
+  Events -->|"SSE stream"| Browser
+  Browser -. "optional command channel" .-> WS["WebSocket endpoint<br/>cancel/run palette"]
+  WS -.-> Server
+  Browser --> Workbench["Guided Workbench mode"]
+  Browser --> Ops["Operations Console mode"]
+        </pre>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Setup mode</p>
+          <h2>Guided Workbench Screens</h2>
+        </div>
+        <p>These screens replace the current setup TUI path with browser-native forms, clear back/next movement, and persistent run output.</p>
+      </div>
+      <div class="screens">
+        <article class="screen-card">
+          <div class="screen-title">
+            <div><h2>1. Start / Profile Intent</h2><p>Choose whether the user is provisioning, resuming, or connecting an existing VPS.</p></div>
+            <span class="badge green">Phase 1</span>
+          </div>
+          <div class="shell">
+            <div class="shell-top"><span>SERVESTEAD SETUP | Start</span><span class="muted">local session</span></div>
+            <div class="shell-body workbench-grid">
+              <aside class="pane">
+                <h4>Plan steps</h4>
+                <div class="step active"><span class="badge yellow">now</span> Start</div>
+                <div class="step">Profile</div>
+                <div class="step">GitOps</div>
+                <div class="step">Review</div>
+                <div class="step">Run</div>
+              </aside>
+              <section class="pane">
+                <h4>What are you setting up?</h4>
+                <div class="compact-list">
+                  <div class="field"><label>Provision a new DigitalOcean VPS</label><div class="value">Create one Droplet, save profile, then stop.</div></div>
+                  <div class="field"><label>Use an existing VPS</label><div class="value">Collect SSH/domain/repository inputs before remote work.</div></div>
+                  <div class="field"><label>Resume a saved profile</label><div class="value">Open Operations Console or continue setup.</div></div>
+                </div>
+              </section>
+              <aside class="drawer">
+                <h4>Safety</h4>
+                <p>No billable action starts here. Provisioning and destructive actions require review confirmation.</p>
+              </aside>
+            </div>
+          </div>
+        </article>
+
+        <article class="screen-card">
+          <div class="screen-title">
+            <div><h2>2. Required Values</h2><p>One place to fix domain/email/SSH before any stage runs.</p></div>
+            <span class="badge green">Phase 1</span>
+          </div>
+          <div class="shell">
+            <div class="shell-top"><span>SERVESTEAD SETUP | Required values</span><span class="muted">autosaved draft</span></div>
+            <div class="shell-body workbench-grid">
+              <aside class="pane">
+                <h4>Plan steps</h4>
+                <div class="step done"><span class="badge green">done</span> Start</div>
+                <div class="step active"><span class="badge yellow">now</span> Profile values</div>
+                <div class="step">GitOps</div>
+                <div class="step">Review</div>
+              </aside>
+              <section class="pane">
+                <h4>Profile values</h4>
+                <div class="field-grid">
+                  <div class="field"><label>Server IP</label><div class="value">167.172.242.223</div></div>
+                  <div class="field"><label>SSH key</label><div class="value">~/.ssh/servestead_ed25519</div></div>
+                  <div class="field"><label>Domain</label><div class="value">mngo.pro</div></div>
+                  <div class="field"><label>Email</label><div class="value">nipuna.royal@gmail.com</div></div>
+                </div>
+              </section>
+              <aside class="drawer">
+                <h4>Validation</h4>
+                <p><span class="badge green">ok</span> private key found</p>
+                <p><span class="badge yellow">check</span> DNS cannot be fully automated yet</p>
+              </aside>
+            </div>
+          </div>
+        </article>
+
+        <article class="screen-card">
+          <div class="screen-title">
+            <div><h2>3. GitOps Repository</h2><p>Source setup and GitHub PAT live inside the workbench instead of a separate screen.</p></div>
+            <span class="badge green">Phase 1</span>
+          </div>
+          <div class="shell">
+            <div class="shell-top"><span>SERVESTEAD SETUP | GitOps repository</span><span class="muted">paste-friendly</span></div>
+            <div class="shell-body workbench-grid">
+              <aside class="pane">
+                <h4>Plan steps</h4>
+                <div class="step done">Profile</div>
+                <div class="step active"><span class="badge yellow">now</span> GitOps</div>
+                <div class="step">Review</div>
+              </aside>
+              <section class="pane">
+                <h4>Repository source</h4>
+                <div class="field-grid">
+                  <div class="field"><label>Mode</label><div class="value">Clone GitHub repo</div></div>
+                  <div class="field"><label>GitHub HTTPS URL</label><div class="value">https://github.com/me/servestead-config.git</div></div>
+                  <div class="field"><label>Local checkout path</label><div class="value">~/.config/servestead/repositories/...</div></div>
+                  <div class="field"><label>GitHub PAT</label><div class="value green">Profile token configured</div></div>
+                </div>
+              </section>
+              <aside class="drawer">
+                <h4>What happens later</h4>
+                <p>Repository preparation runs before SSH. Dirty config blocks deployment until reviewed and committed.</p>
+              </aside>
+            </div>
+          </div>
+        </article>
+
+        <article class="screen-card">
+          <div class="screen-title">
+            <div><h2>4. Review & Confirm</h2><p>Exact confirmation for billable/destructive workflows; plain review for normal stage runs.</p></div>
+            <span class="badge green">Phase 1</span>
+          </div>
+          <div class="shell">
+            <div class="shell-top"><span>SERVESTEAD SETUP | Review platform run</span><span class="muted">no SSH yet</span></div>
+            <div class="shell-body workbench-grid">
+              <aside class="pane">
+                <h4>Plan steps</h4>
+                <div class="step done">Profile</div>
+                <div class="step done">GitOps</div>
+                <div class="step active"><span class="badge yellow">now</span> Review</div>
+              </aside>
+              <section class="pane">
+                <h4>Will run</h4>
+                <div class="review-list">
+                  <div class="review-item"><span class="badge blue">local</span><span>Preflight checks and repository preparation.</span></div>
+                  <div class="review-item"><span class="badge blue">git</span><span>Create/update observability config, require clean committed state.</span></div>
+                  <div class="review-item"><span class="badge yellow">ssh</span><span>Network, proxy, Pangolin, observability after review.</span></div>
+                  <div class="review-item"><span class="badge green">safe</span><span>No new VPS is provisioned from this action.</span></div>
+                </div>
+              </section>
+              <aside class="drawer">
+                <h4>Action</h4>
+                <div class="action"><span class="key">R</span><span>Run after review</span></div>
+                <div class="action"><span class="key">E</span><span>Edit profile values</span></div>
+                <div class="action"><span class="key">G</span><span>Edit GitOps source</span></div>
+              </aside>
+            </div>
+          </div>
+        </article>
+
+        <article class="screen-card">
+          <div class="screen-title">
+            <div><h2>5. Live Run</h2><p>The workbench stays in place while logs and status stream through SSE.</p></div>
+            <span class="badge yellow">Phase 2</span>
+          </div>
+          <div class="shell">
+            <div class="shell-top"><span>SERVESTEAD SETUP | Running platform</span><span class="muted">SSE connected</span></div>
+            <div class="shell-body">
+              <div class="run-grid">
+                <section class="pane">
+                  <h4>Run status</h4>
+                  <span class="badge yellow">running</span>
+                  <div class="progress"><span></span></div>
+                  <p>Tasks: 23 / 37<br>Current: Configure Pangolin resources</p>
+                  <div class="action"><span class="key">Esc</span><span>Keep running in dock</span></div>
+                  <div class="action"><span class="key">C</span><span>Cancel safely</span></div>
+                </section>
+                <section class="log">
+                  <h4>Logs</h4>
+                  <p class="log-line">[proxy stdout] Waiting for Pangolin API...</p>
+                  <p class="log-line">[proxy stdout] Initial setup endpoint is reachable.</p>
+                  <p class="log-line">[proxy stderr] retry 2/10: target health check not ready.</p>
+                  <p class="log-line green">[proxy stdout] local-vps Newt site registered.</p>
+                </section>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="screen-card">
+          <div class="screen-title">
+            <div><h2>6. Recovery</h2><p>Failures should become guided recovery tasks, not dead ends.</p></div>
+            <span class="badge yellow">Phase 2</span>
+          </div>
+          <div class="shell">
+            <div class="shell-top"><span>SERVESTEAD SETUP | Recovery</span><span class="muted">platform failed</span></div>
+            <div class="shell-body workbench-grid">
+              <aside class="pane">
+                <h4>Blocked step</h4>
+                <div class="step active"><span class="badge red">failed</span> GitOps prep</div>
+                <div class="step">Retry run</div>
+              </aside>
+              <section class="pane">
+                <div class="alert"><span class="badge red">blocked</span><strong>Uncommitted observability config blocks deployment.</strong></div>
+                <div class="action"><span class="key">D</span><span>Review diff</span></div>
+                <div class="action"><span class="key">S</span><span>Stage changes</span></div>
+                <div class="action"><span class="key">K</span><span>Commit with message</span></div>
+                <div class="action"><span class="key">R</span><span>Retry platform</span></div>
+              </section>
+              <aside class="drawer">
+                <h4>Why this is blocked</h4>
+                <p>Servestead deploys committed HEAD. It will not silently deploy dirty repository state.</p>
+              </aside>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Operations mode</p>
+          <h2>Day-2 Operations Console Screens</h2>
+        </div>
+        <p>After setup exists, the user should not be forced through a stepper. They need resource browsing, quick filtering, drawers, and action surfaces.</p>
+      </div>
+      <div class="screens">
+        <article class="screen-card">
+          <div class="screen-title">
+            <div><h2>1. Profiles Resource Browser</h2><p>Landing screen for saved profiles after first setup.</p></div>
+            <span class="badge yellow">Phase 3</span>
+          </div>
+          <div class="shell">
+            <div class="shell-top"><span>SERVESTEAD OPS | Profiles</span><span class="muted">/profiles</span></div>
+            <div class="shell-body ops-grid">
+              <section class="table-shell">
+                <h4>Profiles</h4>
+                <table>
+                  <thead><tr><th>Name</th><th>Domain</th><th>Setup</th><th>GitOps</th><th>Next</th></tr></thead>
+                  <tbody>
+                    <tr class="selected"><td>servestead-vps</td><td>mngo.pro</td><td><span class="badge green">complete</span></td><td>dirty</td><td>Commit config</td></tr>
+                    <tr><td>staging</td><td>stage.mngo.pro</td><td><span class="badge yellow">pending</span></td><td>not ready</td><td>Open setup</td></tr>
+                    <tr><td>demo</td><td>demo.mngo.pro</td><td><span class="badge red">failed</span></td><td>sync required</td><td>Recover</td></tr>
+                  </tbody>
+                </table>
+              </section>
+              <aside class="drawer">
+                <h4>Profile drawer</h4>
+                <p><span class="badge blue">selected</span> servestead-vps</p>
+                <div class="action"><span class="key">O</span><span>Open setup workbench</span></div>
+                <div class="action"><span class="key">G</span><span>GitOps actions</span></div>
+                <div class="action"><span class="key">L</span><span>Run history</span></div>
+                <div class="action"><span class="key">C</span><span>Cloud actions</span></div>
+              </aside>
+            </div>
+          </div>
+        </article>
+
+        <article class="screen-card">
+          <div class="screen-title">
+            <div><h2>2. Stacks Console</h2><p>Everything stack-related becomes a resource table plus detail drawer.</p></div>
+            <span class="badge yellow">Phase 3</span>
+          </div>
+          <div class="shell">
+            <div class="shell-top"><span>SERVESTEAD OPS | Stacks | servestead-vps</span><span class="muted">filter: dirty</span></div>
+            <div class="shell-body ops-grid">
+              <section class="table-shell">
+                <h4>Stacks</h4>
+                <table>
+                  <thead><tr><th>Stack</th><th>Public routes</th><th>Git</th><th>Remote</th><th>Action</th></tr></thead>
+                  <tbody>
+                    <tr class="selected"><td>observability</td><td>3 routes</td><td>dirty</td><td>blocked</td><td>Review diff</td></tr>
+                    <tr><td>actualbudget</td><td>1 route</td><td>clean</td><td>in sync</td><td>Open</td></tr>
+                    <tr><td>homepage</td><td>private</td><td>clean</td><td>sync required</td><td>Sync</td></tr>
+                  </tbody>
+                </table>
+              </section>
+              <aside class="drawer">
+                <h4>observability</h4>
+                <p>Compose file, public resources, runtime secrets, and deployment status.</p>
+                <div class="action"><span class="key">E</span><span>Edit metadata</span></div>
+                <div class="action"><span class="key">R</span><span>Deploy selected stack</span></div>
+                <div class="action"><span class="key">D</span><span>Delete stack</span></div>
+              </aside>
+            </div>
+          </div>
+        </article>
+
+        <article class="screen-card">
+          <div class="screen-title">
+            <div><h2>3. GitOps Console</h2><p>The old hidden stack manager actions become first-class web controls.</p></div>
+            <span class="badge yellow">Phase 3</span>
+          </div>
+          <div class="shell">
+            <div class="shell-top"><span>SERVESTEAD OPS | GitOps | servestead-vps</span><span class="muted">repo dirty</span></div>
+            <div class="shell-body ops-grid">
+              <section class="log">
+                <h4>Diff</h4>
+                <p class="log-line red">- APP_URL: https://beszel.mngo.org</p>
+                <p class="log-line green">+ APP_URL: https://beszel.mngo.pro</p>
+                <p class="log-line red">- full-domain=dozzle.mngo.org</p>
+                <p class="log-line green">+ full-domain=dozzle.mngo.pro</p>
+              </section>
+              <aside class="drawer">
+                <h4>Repo actions</h4>
+                <div class="action"><span class="key">S</span><span>Stage stack changes</span></div>
+                <div class="action"><span class="key">K</span><span>Commit staged changes</span></div>
+                <div class="action"><span class="key">P</span><span>Push branch</span></div>
+                <div class="action"><span class="key">Y</span><span>Sync server</span></div>
+              </aside>
+            </div>
+          </div>
+        </article>
+
+        <article class="screen-card">
+          <div class="screen-title">
+            <div><h2>4. Run History & Logs</h2><p>Searchable history replaces transient terminal output.</p></div>
+            <span class="badge blue">Phase 4</span>
+          </div>
+          <div class="shell">
+            <div class="shell-top"><span>SERVESTEAD OPS | Runs</span><span class="muted">search: crowdsec</span></div>
+            <div class="shell-body ops-grid">
+              <section class="table-shell">
+                <h4>Runs</h4>
+                <table>
+                  <thead><tr><th>When</th><th>Stage</th><th>Status</th><th>Duration</th></tr></thead>
+                  <tbody>
+                    <tr class="selected"><td>Today 12:33</td><td>Platform</td><td><span class="badge red">failed</span></td><td>0:08</td></tr>
+                    <tr><td>Yesterday</td><td>Harden</td><td><span class="badge green">complete</span></td><td>7:42</td></tr>
+                    <tr><td>Jul 2</td><td>Bootstrap</td><td><span class="badge green">complete</span></td><td>1:15</td></tr>
+                  </tbody>
+                </table>
+              </section>
+              <aside class="drawer">
+                <h4>Selected run</h4>
+                <p class="red">Run failed before SSH because GitOps repo was dirty.</p>
+                <div class="action"><span class="key">L</span><span>Open full log</span></div>
+                <div class="action"><span class="key">R</span><span>Retry in workbench</span></div>
+              </aside>
+            </div>
+          </div>
+        </article>
+
+        <article class="screen-card">
+          <div class="screen-title">
+            <div><h2>5. Secrets & Access</h2><p>Explicit reveal actions for GitHub PAT and Pangolin admin access.</p></div>
+            <span class="badge blue">Phase 4</span>
+          </div>
+          <div class="shell">
+            <div class="shell-top"><span>SERVESTEAD OPS | Access</span><span class="muted">masked by default</span></div>
+            <div class="shell-body ops-grid">
+              <section class="table-shell">
+                <h4>Access items</h4>
+                <table>
+                  <thead><tr><th>Item</th><th>Status</th><th>Source</th><th>Action</th></tr></thead>
+                  <tbody>
+                    <tr class="selected"><td>GitHub PAT</td><td>configured</td><td>profile</td><td>rotate/remove</td></tr>
+                    <tr><td>Pangolin admin password</td><td>saved</td><td>secrets file</td><td>reveal</td></tr>
+                    <tr><td>Newt credentials</td><td>saved</td><td>secrets file</td><td>copy</td></tr>
+                  </tbody>
+                </table>
+              </section>
+              <aside class="drawer">
+                <h4>Reveal guard</h4>
+                <p>Secrets remain masked until the user chooses reveal/copy. Revealed values should auto-hide after a timeout.</p>
+              </aside>
+            </div>
+          </div>
+        </article>
+
+        <article class="screen-card">
+          <div class="screen-title">
+            <div><h2>6. Cloud Actions</h2><p>Restart/destroy/provision become review-confirmed browser workflows.</p></div>
+            <span class="badge blue">Phase 4</span>
+          </div>
+          <div class="shell">
+            <div class="shell-top"><span>SERVESTEAD OPS | Cloud</span><span class="muted">DigitalOcean active</span></div>
+            <div class="shell-body ops-grid">
+              <section class="table-shell">
+                <h4>Cloud resource</h4>
+                <div class="tile-grid">
+                  <div class="tile"><div class="label">Droplet</div><div class="value">servestead-vps</div></div>
+                  <div class="tile"><div class="label">Region</div><div class="value">nyc3</div></div>
+                  <div class="tile"><div class="label">Size</div><div class="value">s-1vcpu-1gb</div></div>
+                  <div class="tile"><div class="label">Cost</div><div class="value">$6.00/mo</div></div>
+                </div>
+              </section>
+              <aside class="drawer">
+                <h4>Actions</h4>
+                <div class="action"><span class="key">R</span><span>Restart droplet</span></div>
+                <div class="action"><span class="key">D</span><span>Destroy droplet</span></div>
+                <p class="muted">Destroy requires exact confirmation and keeps local profile data.</p>
+              </aside>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Build plan</p>
+          <h2>Phased Implementation</h2>
+        </div>
+        <p>Each phase has a concrete slice, acceptance criteria, and avoids a big-bang rewrite. The existing CLI/TUI can remain while the web UI matures.</p>
+      </div>
+      <div class="phase-grid">
+        <div class="phase-card">
+          <div class="num">0</div>
+          <h3>Web foundation</h3>
+          <p class="muted">No product workflow yet. Build the local web runtime and component system.</p>
+          <ul>
+            <li>`servestead ui` starts loopback server.</li>
+            <li>One-time browser token and shutdown route.</li>
+            <li>templ layout, CSS tokens, htmx bootstrapping.</li>
+            <li>SSE broker skeleton and error toasts.</li>
+          </ul>
+        </div>
+        <div class="phase-card">
+          <div class="num">1</div>
+          <h3>Guided setup MVP</h3>
+          <p class="muted">Replace the most painful setup input/review flows first.</p>
+          <ul>
+            <li>Start/profile intent screen.</li>
+            <li>Required values form with server validation.</li>
+            <li>GitOps source + GitHub PAT panels.</li>
+            <li>Review screen before execution.</li>
+          </ul>
+        </div>
+        <div class="phase-card">
+          <div class="num">2</div>
+          <h3>Live run + recovery</h3>
+          <p class="muted">Make stage execution feel anchored and observable.</p>
+          <ul>
+            <li>SSE logs and status dock.</li>
+            <li>Cancel/retry run controls.</li>
+            <li>Recovery panels for dirty repo, bad domain, missing credentials.</li>
+            <li>Pangolin access reveal after completion.</li>
+          </ul>
+        </div>
+        <div class="phase-card">
+          <div class="num">3</div>
+          <h3>Operations console MVP</h3>
+          <p class="muted">Introduce day-2 resource management without the command-center shell.</p>
+          <ul>
+            <li>Profiles table + detail drawer.</li>
+            <li>Stacks table + stack drawer.</li>
+            <li>GitOps console with diff/stage/commit/push/sync.</li>
+            <li>Run selected setup/stacks from drawers.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="phase-grid" style="margin-top:12px">
+        <div class="phase-card">
+          <div class="num">4</div>
+          <h3>Access, cloud, history</h3>
+          <p class="muted">Round out the operations surface.</p>
+          <ul>
+            <li>Secrets/access page with reveal guards.</li>
+            <li>Cloud restart/destroy/provision flows.</li>
+            <li>Run history, log search, and saved failure summaries.</li>
+          </ul>
+        </div>
+        <div class="phase-card">
+          <div class="num">5</div>
+          <h3>Polish and accessibility</h3>
+          <p class="muted">Make it feel fast and robust.</p>
+          <ul>
+            <li>Keyboard shortcuts scoped to active region.</li>
+            <li>Focus management after htmx swaps.</li>
+            <li>Responsive layouts for tablet/mobile review.</li>
+            <li>Copy buttons, deep links, empty/error states.</li>
+          </ul>
+        </div>
+        <div class="phase-card">
+          <div class="num">6</div>
+          <h3>Optional enhancements</h3>
+          <p class="muted">Only after core workflows are stable.</p>
+          <ul>
+            <li>Command palette.</li>
+            <li>TinyGo WASM island for very large log/diff virtualization.</li>
+            <li>PWA install shell if local web becomes the primary UI.</li>
+          </ul>
+        </div>
+        <div class="phase-card">
+          <div class="num">✕</div>
+          <h3>Explicitly not v1</h3>
+          <p class="muted">Avoid scope creep while replacing the TUI.</p>
+          <ul>
+            <li>No full command-center dashboard yet.</li>
+            <li>No remote multi-user web service.</li>
+            <li>No full Go/WASM app rewrite.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Implementation map</p>
+          <h2>Routes, Fragments, and Streams</h2>
+        </div>
+        <p>HTMX keeps most interactions simple: links and forms request fragments. SSE streams logs and run status into fixed targets.</p>
+      </div>
+      <div class="route-grid">
+        <div class="route-card">
+          <h3>Shell routes</h3>
+          <ul>
+            <li>`GET /ui` initial shell</li>
+            <li>`GET /setup/start` workbench start</li>
+            <li>`GET /ops/profiles` operations console</li>
+            <li>`GET /assets/*` embedded static assets</li>
+          </ul>
+        </div>
+        <div class="route-card">
+          <h3>Setup fragments</h3>
+          <ul>
+            <li>`POST /setup/profile-values` validate values</li>
+            <li>`POST /setup/repository` validate repo source</li>
+            <li>`GET /setup/review?stage=platform` review panel</li>
+            <li>`POST /setup/run/:stage` start run</li>
+          </ul>
+        </div>
+        <div class="route-card">
+          <h3>Operations fragments</h3>
+          <ul>
+            <li>`GET /ops/profiles/:id/drawer` profile drawer</li>
+            <li>`GET /ops/stacks?profile=:id` stacks table</li>
+            <li>`GET /ops/gitops/:id/diff` diff panel</li>
+            <li>`POST /ops/gitops/:id/commit` commit action</li>
+          </ul>
+        </div>
+        <div class="route-card">
+          <h3>SSE streams</h3>
+          <ul>
+            <li>`GET /events/runs/:runID` logs + progress</li>
+            <li>`GET /events/profile/:id` profile status changes</li>
+            <li>Events swap `#run-status`, append `#run-log`.</li>
+          </ul>
+        </div>
+        <div class="route-card">
+          <h3>Security defaults</h3>
+          <ul>
+            <li>Bind `127.0.0.1` by default.</li>
+            <li>One-time token in URL then cookie/session.</li>
+            <li>CSRF token for POSTs.</li>
+            <li>Mask secrets by default; reveal with timeout.</li>
+          </ul>
+        </div>
+        <div class="route-card">
+          <h3>Testing</h3>
+          <ul>
+            <li>Handler tests for fragments and validation.</li>
+            <li>Golden-ish HTML tests for key screens.</li>
+            <li>Playwright smoke tests for setup/run/GitOps flows.</li>
+            <li>SSE fake run harness.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Acceptance criteria</p>
+          <h2>What “Done” Means Per Phase</h2>
+        </div>
+        <p>These are intentionally behavioral. They should be testable without relying on screenshots alone.</p>
+      </div>
+      <div class="matrix">
+        <table>
+          <thead>
+            <tr><th>Phase</th><th>User-visible result</th><th>Technical acceptance</th><th>Risks to resolve</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>0 Foundation</td><td>`servestead ui` opens a local browser shell.</td><td>Loopback server, token auth, templ layout, CSS tokens, htmx asset loading, graceful shutdown.</td><td>Port conflicts, browser open behavior, token lifetime.</td></tr>
+            <tr><td>1 Workbench MVP</td><td>User can enter/fix profile and repo details without TUI input traps.</td><td>All forms are server-validated and preserve values across fragment swaps.</td><td>Keeping draft state consistent with saved profile state.</td></tr>
+            <tr><td>2 Live run</td><td>Running Platform keeps logs/status visible in the same workbench.</td><td>SSE streams append logs, update progress, handle disconnect/reconnect, and show final failure/success.</td><td>Cancellation semantics and avoiding duplicate run starts.</td></tr>
+            <tr><td>3 Ops MVP</td><td>User can manage profiles, stacks, and GitOps from tables/drawers.</td><td>GitOps actions reuse existing backend functions and return targeted fragments.</td><td>Long diffs/logs need virtualization or pagination.</td></tr>
+            <tr><td>4 Access/cloud/history</td><td>User can reveal access, review cloud state, and inspect historical runs.</td><td>Secret reveal is explicit, auditable in UI state, and masked by default.</td><td>Prevent accidental secret exposure in logs/screenshots.</td></tr>
+            <tr><td>5 Polish</td><td>Keyboard/mouse use feels fast and accessible.</td><td>Focus is restored after htmx swaps; main paths pass Playwright accessibility and responsive checks.</td><td>Shortcut conflicts with text inputs and browser defaults.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="decision-card">
+      <h2>Review Questions</h2>
+      <p class="lead">Queue any decision back to Codex from here, or annotate individual screens directly.</p>
+      <form data-lavish-question="servestead-web-phased-plan" onsubmit="event.preventDefault(); const data = new FormData(event.currentTarget); const scope = [...data.getAll('scope')]; const notes = data.get('notes') || ''; window.lavish.queuePrompt(`Proceed with the Servestead web phased plan. Priority scope: ${scope.join(', ') || 'none selected'}. Notes: ${notes}`, { tag: 'plan-decision', text: `Scope: ${scope.join(', ') || 'none'}`, element: event.currentTarget, data: { scope, notes }, queueKey: 'servestead-web-phased-plan' });">
+        <div class="decision-grid">
+          <fieldset>
+            <legend>Prioritize first</legend>
+            <label class="choice"><input type="checkbox" name="scope" value="Phase 0 foundation" checked><span><strong>Phase 0 foundation</strong><br><span class="muted">Local server, auth, templ shell, htmx/SSE plumbing.</span></span></label>
+            <label class="choice"><input type="checkbox" name="scope" value="Phase 1 setup workbench" checked><span><strong>Phase 1 setup workbench</strong><br><span class="muted">Start, profile values, GitOps source, review.</span></span></label>
+            <label class="choice"><input type="checkbox" name="scope" value="Phase 2 live run recovery"><span><strong>Phase 2 live run/recovery</strong><br><span class="muted">SSE logs and actionable failure states.</span></span></label>
+          </fieldset>
+          <fieldset>
+            <legend>Confirm non-goals</legend>
+            <label class="choice"><input type="checkbox" name="scope" value="No command center v1" checked><span><strong>No command-center shell in v1</strong><br><span class="muted">Use Workbench + Ops Console only.</span></span></label>
+            <label class="choice"><input type="checkbox" name="scope" value="No full WASM rewrite" checked><span><strong>No full WASM rewrite</strong><br><span class="muted">Consider TinyGo islands later only if needed.</span></span></label>
+            <label class="choice"><input type="checkbox" name="scope" value="Keep CLI/TUI fallback initially" checked><span><strong>Keep CLI/TUI fallback initially</strong><br><span class="muted">Do not remove working paths during migration.</span></span></label>
+          </fieldset>
+        </div>
+        <textarea name="notes" placeholder="Optional notes: screens to add, phase order changes, workflows to prioritize, anything that feels off..."></textarea>
+        <div class="pill-row">
+          <button class="primary" type="submit">Queue this plan decision</button>
+          <button type="button" data-lavish-action onclick="window.lavish.queuePrompt('Revise the Servestead web phased plan before implementation.', { tag: 'plan-decision', text: 'Revise plan', element: this, queueKey: 'servestead-web-phased-plan' })">Queue: revise first</button>
+        </div>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

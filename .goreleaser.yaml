@@ -5,10 +5,11 @@ project_name: servestead
 before:
   hooks:
     - go mod tidy
+    - go tool templ generate
 
 builds:
   - id: servestead
-    main: .
+    main: ./backend
     binary: servestead
     env:
       - CGO_ENABLED=0

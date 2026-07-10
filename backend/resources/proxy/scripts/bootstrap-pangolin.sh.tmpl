@@ -1,0 +1,41 @@
+api='http://127.0.0.1:3000/api/v1'
+pangolin_request() {
+  label="$1"
+  shift
+  response_file="$(mktemp)"
+  status="$(curl -sS -o "$response_file" -w '%{http_code}' "$@")" || {
+    result=$?
+    echo "Pangolin $label request failed before receiving a response." >&2
+    cat "$response_file" >&2
+    rm -f "$response_file"
+    return "$result"
+  }
+  case "$status" in
+    2??) cat "$response_file" ;;
+    *)
+      echo "Pangolin $label failed (HTTP $status):" >&2
+      cat "$response_file" >&2
+      echo >&2
+      rm -f "$response_file"
+      return 1
+      ;;
+  esac
+  rm -f "$response_file"
+}
+for attempt in $(seq 1 60); do curl -fsS "$api/" >/dev/null && break; sleep 2; done
+curl -fsS "$api/" >/dev/null
+setup="$(curl -fsS "$api/auth/initial-setup-complete")"
+if printf '%s' "$setup" | grep -Eq '"complete"[[:space:]]*:[[:space:]]*false'; then
+  pangolin_request 'administrator creation' -X PUT "$api/auth/set-server-admin" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data {{ shellQuote .AdminPayload }} >/dev/null
+fi
+cookie_file="$(mktemp)"
+trap 'rm -f "$cookie_file"' EXIT
+pangolin_request 'administrator login' -c "$cookie_file" -X POST "$api/auth/login" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data {{ shellQuote .LoginPayload }} >/dev/null
+orgs="$(curl -fsS -b "$cookie_file" "$api/orgs")"
+if ! printf '%s' "$orgs" | grep -Eq '"orgId"[[:space:]]*:[[:space:]]*"servestead"'; then
+  pangolin_request 'organization creation' -b "$cookie_file" -X PUT "$api/org" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data '{"orgId":"servestead","name":"Servestead","subnet":"100.89.0.0/16","utilitySubnet":"100.88.0.0/16"}' >/dev/null
+fi
+sites="$(curl -fsS -b "$cookie_file" "$api/org/servestead/sites?pageSize=100")"
+if ! printf '%s' "$sites" | grep -Eq '"niceId"[[:space:]]*:[[:space:]]*"local-vps"'; then
+  pangolin_request 'Newt site creation' -b "$cookie_file" -X PUT "$api/org/servestead/site" -H 'Content-Type: application/json' -H 'X-CSRF-Token: x-csrf-protection' --data {{ shellQuote .SitePayload }} >/dev/null
+fi

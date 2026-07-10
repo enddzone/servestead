@@ -1,0 +1,154 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"regexp"
+	"strings"
+	"time"
+)
+
+const usage = `Servestead provisions and hardens Ubuntu VPS instances.
+
+Usage:
+  servestead setup
+  servestead ui
+
+Direct commands:
+  servestead keygen
+  servestead provision --provider digitalocean --name <name> --ssh-key <digitalocean-key-id-or-fingerprint>
+  servestead bootstrap --host <ipv4> --admin-public-key <path> --private-key <path>
+  servestead harden --host <ipv4> --private-key <path>
+  servestead network --host <ipv4> --private-key <path>
+  servestead proxy --host <ipv4> --private-key <path> --domain <domain> --email <email> --server-secret <secret>
+  servestead pangolin-credentials (--profile <id> | --ip <ipv4>)
+  servestead github-token <set|status|remove> --profile <id>
+  servestead secrets <init|status|export-key|import-key> --profile <id>
+  servestead stack add --profile <id> --compose <path> [--publish <service:port:subdomain[:id]> ...] [--env-file <path>]
+  servestead stack env set --profile <id> --stack <name> --file <path>
+  servestead stack env remove --profile <id> --stack <name>
+  servestead doctor
+
+Run "servestead <command> -help" for command-specific options.
+`
+
+type getenvFunc func(string) string
+type cliHandler func() error
+
+func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv getenvFunc) error {
+	if len(args) == 0 {
+		fmt.Fprint(stderr, usage)
+		return errors.New("a command is required")
+	}
+	if isHelpCommand(args[0]) {
+		fmt.Fprint(stdout, usage)
+		return nil
+	}
+	handler, ok := cliHandlers(ctx, args[1:], stdout, stderr, getenv)[args[0]]
+	if !ok {
+		fmt.Fprint(stderr, usage)
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+	return ignoreFlagHelp(handler())
+}
+
+func isHelpCommand(command string) bool {
+	return command == "help" || command == "-h" || command == "--help"
+}
+
+func cliHandlers(ctx context.Context, args []string, stdout, stderr io.Writer, getenv getenvFunc) map[string]cliHandler {
+	return map[string]cliHandler{
+		"provision":            func() error { return runProvision(ctx, args, stdout, stderr, getenv) },
+		"bootstrap":            func() error { return runBootstrap(ctx, args, stdout, stderr) },
+		"harden":               func() error { return runHarden(ctx, args, stdout, stderr) },
+		"network":              func() error { return runNetwork(ctx, args, stdout, stderr) },
+		"proxy":                func() error { return runProxy(ctx, args, stdout, stderr) },
+		"pangolin-credentials": func() error { return runPangolinCredentials(args, stdout, stderr) },
+		"github-token":         func() error { return runGitHubToken(args, stdout, stderr) },
+		"secrets":              func() error { return runSecrets(ctx, args, stdout, stderr) },
+		"keygen":               func() error { return runKeygen(ctx, args, stdout, stderr) },
+		"stack":                func() error { return runStack(ctx, args, stdout, stderr) },
+		"setup":                func() error { return runSetup(ctx, args, stdout, stderr) },
+		"ui":                   func() error { return runUI(ctx, args, stdout, stderr, getenv) },
+		"doctor":               func() error { return runDoctor(args, stdout, stderr) },
+	}
+}
+
+func ignoreFlagHelp(err error) error {
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
+	return err
+}
+
+func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer, getenv getenvFunc) error {
+	flags := flag.NewFlagSet("provision", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	providerName := flags.String("provider", digitalOceanProviderName, "cloud provider: digitalocean")
+	name := flags.String("name", "", "server name")
+	region := flags.String("region", "", "provider region/location (provider default when omitted)")
+	size := flags.String("size", "", "provider server size (provider default when omitted)")
+	image := flags.String("image", "", "Ubuntu image slug (provider default when omitted)")
+	sshKey := flags.String("ssh-key", "", "existing DigitalOcean SSH key ID or fingerprint; run keygen first if needed")
+	timeout := flags.Duration("timeout", 5*time.Minute, "maximum time to wait for a public IPv4 address")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+
+	if *name == "" || *sshKey == "" {
+		return errors.New("--name and --ssh-key are required")
+	}
+	if *timeout <= 0 {
+		return errors.New("--timeout must be greater than zero")
+	}
+
+	config := provisionConfig{
+		Name:   *name,
+		Region: *region,
+		Size:   *size,
+		Image:  *image,
+		SSHKey: *sshKey,
+	}
+
+	var provider cloudProvider
+	switch *providerName {
+	case digitalOceanProviderName:
+		config.withDefaults(defaultDigitalOceanRegion, defaultDigitalOceanSize, defaultDigitalOceanImage)
+		token := firstNonEmpty(getenv("DIGITALOCEAN_ACCESS_TOKEN"), getenv("DIGITALOCEAN_TOKEN"))
+		if token == "" {
+			return errors.New("DIGITALOCEAN_ACCESS_TOKEN or DIGITALOCEAN_TOKEN is required")
+		}
+		provider = newDigitalOceanProvider(token)
+	case "":
+		return errors.New("--provider is required")
+	default:
+		return fmt.Errorf("unsupported provider %q", *providerName)
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, *timeout)
+	defer cancel()
+
+	server, err := provider.Create(waitCtx, config)
+	if err != nil {
+		return fmt.Errorf("provision %s server: %w", *providerName, err)
+	}
+	fmt.Fprintf(stdout, "server created: provider=%s id=%s ipv4=%s\n", *providerName, server.ID, server.IPv4)
+	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+var linuxUsername = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)

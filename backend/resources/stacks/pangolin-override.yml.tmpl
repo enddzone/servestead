@@ -1,0 +1,13 @@
+services:
+{{ range .Services }}  {{ .Name }}:
+{{ if .ResetPorts }}    ports: !reset []
+{{ end }}{{ if .Public }}    networks:
+      - {{ $.ServesteadPublicNetwork }}
+{{ end }}    labels:
+      - {{ yamlDoubleQuote "dockhand.update=false" }}
+      - {{ yamlDoubleQuote "dockhand.notify=false" }}
+{{ range .Labels }}      - {{ yamlDoubleQuote . }}
+{{ end }}{{ end }}{{ if .HasPublicResources }}networks:
+  {{ .ServesteadPublicNetwork }}:
+    external: true
+{{ end }}

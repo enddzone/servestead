@@ -1,0 +1,6 @@
+set -e
+printf '%s' {{ shellQuote .Content }} > {{ shellQuote .TemporaryPath }}
+chown root:root {{ shellQuote .TemporaryPath }}
+chmod 0440 {{ shellQuote .TemporaryPath }}
+visudo -cf {{ shellQuote .TemporaryPath }}
+mv {{ shellQuote .TemporaryPath }} {{ shellQuote .Path }}
