@@ -18,7 +18,7 @@ permissions:
   attestations: write
 
 env:
-  GORELEASER_VERSION: v2.16.0
+  GORELEASER_VERSION: v2.17.0
   SYFT_VERSION: v1.46.0
   TRIVY_VERSION: v0.72.0
 

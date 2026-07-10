@@ -8,11 +8,11 @@ require (
 	charm.land/lipgloss/v2 v2.0.5
 	filippo.io/age v1.3.1
 	github.com/a-h/templ v0.3.1020
-	github.com/digitalocean/godo v1.197.0
+	github.com/digitalocean/godo v1.198.0
 	github.com/getsops/sops/v3 v3.13.2
 	github.com/mattn/go-isatty v0.0.22
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
-	golang.org/x/crypto v0.53.0
+	golang.org/x/crypto v0.54.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -145,15 +145,15 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/mod v0.36.0 // indirect
+	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/term v0.44.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/term v0.45.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	golang.org/x/tools v0.45.0 // indirect
+	golang.org/x/tools v0.47.0 // indirect
 	google.golang.org/api v0.286.0 // indirect
 	google.golang.org/genproto v0.0.0-20260622175928-b703f567277d // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260622175928-b703f567277d // indirect
