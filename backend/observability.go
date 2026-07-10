@@ -70,7 +70,7 @@ var newObservabilityRemoteClient observabilityRemoteClientFactory = func(ctx con
 }
 
 func runObservabilityStepsWithReporter(ctx context.Context, client remoteClient, config observabilityConfig, runID string, reporter TaskReporter, progress io.Writer) error {
-	return runTasksWithReporter(ctx, client, config.SSHUser, runID, "observability", observabilityTasks(config), progress, reporter)
+	return runTasksWithReporter(ctx, client, config.SSHUser, taskRunOptions{runID: runID, stage: "observability", tasks: observabilityTasks(config), progress: progress, reporter: reporter})
 }
 
 func observabilityTasks(config observabilityConfig) []Task {
@@ -304,8 +304,7 @@ func removedStackCleanupTask(config observabilityConfig) Task {
 	}
 	sort.Strings(names)
 	desired := " " + strings.Join(names, " ") + " "
-	loginPayload := fmt.Sprintf(`{"email":%s,"password":%s}`,
-		jsonString(config.AdminEmail), jsonString(config.PangolinPassword))
+	loginPayload := pangolinLoginJSON(config.AdminEmail, config.PangolinPassword)
 	selectResources := `import json,sys
 resources=json.load(sys.stdin)["data"]["resources"]
 names=sys.argv[1:]
@@ -449,15 +448,30 @@ func dockhandGitStackReconcileCommand(config observabilityConfig, stack configur
 	if len(commitPrefix) > 7 {
 		commitPrefix = commitPrefix[:7]
 	}
-	payloadTemplate := fmt.Sprintf(
-		`{"stackName":%s,"repoName":%s,"environmentId":0,"url":%s,"branch":%s,"composePath":%s,"contextDir":%s,"envFilePath":null,"autoUpdate":false,"webhookEnabled":false,"deployNow":false,"buildOnDeploy":false,"noBuildCache":false,"repullImages":false,"forceRedeploy":false}`,
-		jsonString(stackName),
-		jsonString(stackName),
-		jsonString(config.RepositoryOrigin),
-		jsonString(config.RepositoryBranch),
-		jsonString(composePath),
-		jsonString(contextDir),
-	)
+	payloadTemplate := mustJSON(struct {
+		StackName      string  `json:"stackName"`
+		RepoName       string  `json:"repoName"`
+		EnvironmentID  int     `json:"environmentId"`
+		URL            string  `json:"url"`
+		Branch         string  `json:"branch"`
+		ComposePath    string  `json:"composePath"`
+		ContextDir     string  `json:"contextDir"`
+		EnvFilePath    *string `json:"envFilePath"`
+		AutoUpdate     bool    `json:"autoUpdate"`
+		WebhookEnabled bool    `json:"webhookEnabled"`
+		DeployNow      bool    `json:"deployNow"`
+		BuildOnDeploy  bool    `json:"buildOnDeploy"`
+		NoBuildCache   bool    `json:"noBuildCache"`
+		RepullImages   bool    `json:"repullImages"`
+		ForceRedeploy  bool    `json:"forceRedeploy"`
+	}{
+		StackName:   stackName,
+		RepoName:    stackName,
+		URL:         config.RepositoryOrigin,
+		Branch:      config.RepositoryBranch,
+		ComposePath: composePath,
+		ContextDir:  contextDir,
+	})
 	setEnvironmentID := `import json,sys
 payload=json.load(sys.stdin)
 payload["environmentId"]=int(sys.argv[1])
@@ -594,17 +608,36 @@ print(json.load(sys.stdin)["id"])`
 }
 
 func dockhandEnvironmentPayload(publicIP string) string {
-	publicIPValue := "null"
-	if strings.TrimSpace(publicIP) != "" {
-		publicIPValue = jsonString(strings.TrimSpace(publicIP))
+	var publicIPValue *string
+	if trimmed := strings.TrimSpace(publicIP); trimmed != "" {
+		publicIPValue = &trimmed
 	}
-	return fmt.Sprintf(
-		`{"name":%s,"connectionType":"direct","host":%s,"port":%d,"protocol":"http","tlsSkipVerify":false,"icon":"server","collectActivity":true,"collectMetrics":true,"highlightChanges":true,"labels":["servestead"],"publicIp":%s}`,
-		jsonString(dockhandEnvironmentName),
-		jsonString(dockhandEnvironmentHost),
-		dockhandEnvironmentPort,
-		publicIPValue,
-	)
+	return mustJSON(struct {
+		Name             string   `json:"name"`
+		ConnectionType   string   `json:"connectionType"`
+		Host             string   `json:"host"`
+		Port             int      `json:"port"`
+		Protocol         string   `json:"protocol"`
+		TLSSkipVerify    bool     `json:"tlsSkipVerify"`
+		Icon             string   `json:"icon"`
+		CollectActivity  bool     `json:"collectActivity"`
+		CollectMetrics   bool     `json:"collectMetrics"`
+		HighlightChanges bool     `json:"highlightChanges"`
+		Labels           []string `json:"labels"`
+		PublicIP         *string  `json:"publicIp"`
+	}{
+		Name:             dockhandEnvironmentName,
+		ConnectionType:   "direct",
+		Host:             dockhandEnvironmentHost,
+		Port:             dockhandEnvironmentPort,
+		Protocol:         "http",
+		Icon:             "server",
+		CollectActivity:  true,
+		CollectMetrics:   true,
+		HighlightChanges: true,
+		Labels:           []string{"servestead"},
+		PublicIP:         publicIPValue,
+	})
 }
 
 func dockhandCommandPrelude() []string {
@@ -669,8 +702,7 @@ func stackResourceVerifyCommand(config observabilityConfig, stack configuredStac
 		})
 	}
 	specification := mustJSON(specs)
-	loginPayload := fmt.Sprintf(`{"email":%s,"password":%s}`,
-		jsonString(config.AdminEmail), jsonString(config.PangolinPassword))
+	loginPayload := pangolinLoginJSON(config.AdminEmail, config.PangolinPassword)
 	verify := `import json,sys
 resources=json.load(sys.stdin)["data"]["resources"]
 specs=json.load(open(sys.argv[1], encoding="utf-8"))
@@ -834,8 +866,7 @@ func observabilityComposeLabels(config observabilityConfig, key, name, host stri
 }
 
 func observabilityResourceReconcileCommand(config observabilityConfig, composeCommand string) string {
-	loginPayload := fmt.Sprintf(`{"email":%s,"password":%s}`,
-		jsonString(config.AdminEmail), jsonString(config.PangolinPassword))
+	loginPayload := pangolinLoginJSON(config.AdminEmail, config.PangolinPassword)
 	specs := observabilityResourceSpecs(config.BaseDomain)
 	selectDeletes := `import json,sys
 data=json.load(sys.stdin)["data"]["resources"]
@@ -861,8 +892,7 @@ for spec in specs:
 }
 
 func observabilityResourceVerifyCommand(config observabilityConfig) string {
-	loginPayload := fmt.Sprintf(`{"email":%s,"password":%s}`,
-		jsonString(config.AdminEmail), jsonString(config.PangolinPassword))
+	loginPayload := pangolinLoginJSON(config.AdminEmail, config.PangolinPassword)
 	specs := observabilityResourceSpecs(config.BaseDomain)
 	verifyResources := `import json,sys
 data=json.load(sys.stdin)["data"]["resources"]

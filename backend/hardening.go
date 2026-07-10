@@ -66,7 +66,7 @@ func runHardeningSteps(ctx context.Context, client remoteClient, config hardenin
 }
 
 func runHardeningStepsWithReporter(ctx context.Context, client remoteClient, config hardeningConfig, runID string, reporter TaskReporter, progress io.Writer) error {
-	return runTasksWithReporter(ctx, client, config.SSHUser, runID, "harden", hardeningTasks(), progress, reporter)
+	return runTasksWithReporter(ctx, client, config.SSHUser, taskRunOptions{runID: runID, stage: "harden", tasks: hardeningTasks(), progress: progress, reporter: reporter})
 }
 
 func hardeningTasks() []Task {

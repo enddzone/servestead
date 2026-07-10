@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -174,6 +175,30 @@ func TestObservabilityTasksValidateAndVerifyStack(t *testing.T) {
 				t.Fatalf("%s is not valid shell: %v\n%s\n%s", task.Name, err, output, task.Apply)
 			}
 		}
+	}
+}
+
+func TestDockhandPayloadsMarshalUntrustedValues(t *testing.T) {
+	publicIP := "203.0.113.10\n'\""
+	payload := dockhandEnvironmentPayload(publicIP)
+	decoded := struct {
+		PublicIP *string `json:"publicIp"`
+	}{}
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("invalid Dockhand environment payload %q: %v", payload, err)
+	}
+	if decoded.PublicIP == nil || *decoded.PublicIP != publicIP {
+		t.Fatalf("Dockhand public IP = %#v, want %q", decoded.PublicIP, publicIP)
+	}
+
+	script := dockhandGitStackReconcileCommand(observabilityConfig{
+		RepositoryOrigin: `https://example.com/config\"'.git`,
+		RepositoryBranch: `main\"'`,
+	}, configuredStack{Name: "site"})
+	command := exec.Command(testShellPath, "-n")
+	command.Stdin = strings.NewReader(script)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Dockhand reconciliation command is not valid shell: %v\n%s\n%s", err, output, script)
 	}
 }
 

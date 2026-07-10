@@ -32,7 +32,7 @@ func (server *webServer) handleOpsProfiles(response http.ResponseWriter, request
 }
 
 func (server *webServer) handleOpsProfile(response http.ResponseWriter, request *http.Request) {
-	parts := strings.Split(strings.Trim(strings.TrimPrefix(request.URL.Path, "/ops/profiles/"), "/"), "/")
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(request.URL.Path, opsProfilePathPrefix), "/"), "/")
 	if len(parts) < 2 || parts[0] == "" {
 		http.NotFound(response, request)
 		return
@@ -191,7 +191,7 @@ func (server *webServer) opsProfilesData(ctx context.Context, selected string, n
 			ID:              profile.ID,
 			Name:            firstNonEmpty(profile.Name, profile.IP, profile.ID),
 			IP:              profile.IP,
-			BaseDomain:      firstNonEmpty(profile.BaseDomain, "not configured"),
+			BaseDomain:      firstNonEmpty(profile.BaseDomain, notConfiguredLabel),
 			ActiveRunStatus: activeRunStatus,
 			SetupStatus:     setupStatus,
 			GitState:        gitState,
@@ -220,10 +220,10 @@ func (server *webServer) opsProfileDrawerData(ctx context.Context, profileID str
 		CSRFToken:        server.csrf,
 		ProfileID:        profile.ID,
 		Name:             firstNonEmpty(profile.Name, profile.IP, profile.ID),
-		IP:               firstNonEmpty(profile.IP, "not configured"),
-		BaseDomain:       firstNonEmpty(profile.BaseDomain, "not configured"),
-		LetsEncryptEmail: firstNonEmpty(profile.LetsEncryptEmail, "not configured"),
-		RepositoryPath:   firstNonEmpty(profile.ConfigRepositoryPath, "not configured"),
+		IP:               firstNonEmpty(profile.IP, notConfiguredLabel),
+		BaseDomain:       firstNonEmpty(profile.BaseDomain, notConfiguredLabel),
+		LetsEncryptEmail: firstNonEmpty(profile.LetsEncryptEmail, notConfiguredLabel),
+		RepositoryPath:   firstNonEmpty(profile.ConfigRepositoryPath, notConfiguredLabel),
 		ActiveRunStatus:  activeRunStatus,
 		SetupStatus:      setupStatus,
 		GitState:         gitState,
@@ -587,7 +587,7 @@ func (server *webServer) opsGitOpsData(ctx context.Context, profileID string, no
 	if profile.ConfigRepositoryPath == "" {
 		data.Error = firstNonEmpty(data.Error, "profile has no configuration repository")
 		data.Diff = "No stack changes."
-		data.State = "not configured"
+		data.State = notConfiguredLabel
 		data.NextAction = "Configure a repository in Setup before managing stack changes."
 		return data
 	}
@@ -683,14 +683,14 @@ func opsGitWorkingTreeState(status string) string {
 	if strings.TrimSpace(status) == "" {
 		return "unavailable"
 	}
-	return "changes pending"
+	return gitChangesPending
 }
 
 func opsGitNextAction(state string, needsPush bool, errorText string) string {
 	if errorText != "" {
 		return "Resolve repository access before continuing."
 	}
-	if state == "changes pending" {
+	if state == gitChangesPending {
 		return "Review and stage the working tree changes."
 	}
 	if needsPush {
@@ -767,7 +767,7 @@ func (server *webServer) handleOpsRunStage(response http.ResponseWriter, request
 		RunID:     runID,
 		Target:    stage,
 		Status:    runStatusRunning,
-		StreamURL: "/events/runs/" + runID,
+		StreamURL: runEventsPathPrefix + runID,
 	}))
 }
 
@@ -1101,7 +1101,7 @@ func (server *webServer) handleOpsCloudProvision(response http.ResponseWriter, r
 
 func (server *webServer) opsGitSummary(ctx context.Context, repositoryPath string) string {
 	if repositoryPath == "" {
-		return "not configured"
+		return notConfiguredLabel
 	}
 	if _, err := os.Stat(expandUserPath(repositoryPath)); err != nil {
 		return "repository missing"
@@ -1122,7 +1122,7 @@ func (server *webServer) opsGitSummary(ctx context.Context, repositoryPath strin
 		}
 		return "clean"
 	}
-	return "changes pending"
+	return gitChangesPending
 }
 
 func (server *webServer) opsActiveRunStatus(profileID string, state ProfileState) string {
@@ -1186,7 +1186,7 @@ func opsNextAction(profile Profile, activeRunStatus string, setupStatus string, 
 		return "Watch active run"
 	case profile.BaseDomain == "" || profile.LetsEncryptEmail == "":
 		return "Complete setup values"
-	case gitState == "changes pending":
+	case gitState == gitChangesPending:
 		return "Review GitOps"
 	case gitState == "needs push":
 		return "Push repository"
@@ -1331,7 +1331,7 @@ func validStackStage(stage string) bool {
 
 func secretStatus(value string) string {
 	if value == "" {
-		return "not configured"
+		return notConfiguredLabel
 	}
 	return "configured"
 }

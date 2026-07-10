@@ -146,7 +146,7 @@ func runProxySteps(ctx context.Context, client remoteClient, config proxyConfig,
 }
 
 func runProxyStepsWithReporter(ctx context.Context, client remoteClient, config proxyConfig, runID string, reporter TaskReporter, progress io.Writer) error {
-	return runTasksWithReporter(ctx, client, config.SSHUser, runID, "proxy", proxyTasks(config), progress, reporter)
+	return runTasksWithReporter(ctx, client, config.SSHUser, taskRunOptions{runID: runID, stage: "proxy", tasks: proxyTasks(config), progress: progress, reporter: reporter})
 }
 
 func proxyTasks(config proxyConfig) []Task {
@@ -234,21 +234,52 @@ func pangolinComposeFile(config proxyConfig) string {
 }
 
 func pangolinBootstrapCommand(config proxyConfig) string {
-	adminPayload := fmt.Sprintf(`{"email":%s,"password":%s,"setupToken":%s}`,
-		jsonString(config.AdminEmail), jsonString(config.AdminPassword), jsonString(config.SetupToken))
-	loginPayload := fmt.Sprintf(`{"email":%s,"password":%s}`,
-		jsonString(config.AdminEmail), jsonString(config.AdminPassword))
-	sitePayload := fmt.Sprintf(`{"name":"local-vps","niceId":"local-vps","type":"newt","subnet":"100.89.1.0/24","newtId":%s,"secret":%s}`,
-		jsonString(config.NewtID), jsonString(config.NewtSecret))
 	return commandScript(mustRenderResourceTemplate(resources.ProxyBootstrapPangolinScript, struct {
 		AdminPayload string
 		LoginPayload string
 		SitePayload  string
 	}{
-		AdminPayload: adminPayload,
-		LoginPayload: loginPayload,
-		SitePayload:  sitePayload,
+		AdminPayload: pangolinAdminJSON(config),
+		LoginPayload: pangolinLoginJSON(config.AdminEmail, config.AdminPassword),
+		SitePayload:  pangolinSiteJSON(config),
 	}))
+}
+
+func pangolinAdminJSON(config proxyConfig) string {
+	return mustJSON(struct {
+		Email      string `json:"email"`
+		Password   string `json:"password"`
+		SetupToken string `json:"setupToken"`
+	}{
+		Email:      config.AdminEmail,
+		Password:   config.AdminPassword,
+		SetupToken: config.SetupToken,
+	})
+}
+
+func pangolinLoginJSON(email, password string) string {
+	return mustJSON(struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}{Email: email, Password: password})
+}
+
+func pangolinSiteJSON(config proxyConfig) string {
+	return mustJSON(struct {
+		Name   string `json:"name"`
+		NiceID string `json:"niceId"`
+		Type   string `json:"type"`
+		Subnet string `json:"subnet"`
+		NewtID string `json:"newtId"`
+		Secret string `json:"secret"`
+	}{
+		Name:   "local-vps",
+		NiceID: "local-vps",
+		Type:   "newt",
+		Subnet: "100.89.1.0/24",
+		NewtID: config.NewtID,
+		Secret: config.NewtSecret,
+	})
 }
 
 func jsonString(value string) string {

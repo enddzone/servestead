@@ -1551,6 +1551,8 @@ func validateExistingRepositoryInput(value string) error {
 	if path == "" {
 		return errors.New("existing repository path is required")
 	}
+	// The local interactive user deliberately selects this repository path, including paths outside the home directory.
+	// codeql[go/path-injection]
 	if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return errors.New("no Git repository exists at that path; go back and choose create")
@@ -5162,7 +5164,7 @@ func runStackRepositorySyncStage(ctx context.Context, run setupStageRun) error {
 		return err
 	}
 	tasks := stackRepositoryReconcileTasks(syncConfig, firstNonEmpty(run.config.AdminUser, "root"))
-	if err := runTasksWithReporter(ctx, client, run.config.AdminUser, run.runID, stage, tasks, stageStdout, run.reporter); err != nil {
+	if err := runTasksWithReporter(ctx, client, run.config.AdminUser, taskRunOptions{runID: run.runID, stage: stage, tasks: tasks, progress: stageStdout, reporter: run.reporter}); err != nil {
 		_ = client.Close()
 		return fmt.Errorf("stack repository synchronization failed: %w", err)
 	}
@@ -5213,7 +5215,7 @@ func runConfiguredStackStage(ctx context.Context, run setupStageRun, stack confi
 		return err
 	}
 	tasks := configuredStackTasks(observabilityConfig, stack, firstNonEmpty(run.config.AdminUser, "root"))
-	if err := runTasksWithReporter(ctx, client, run.config.AdminUser, run.runID, stage, tasks, stageStdout, run.reporter); err != nil {
+	if err := runTasksWithReporter(ctx, client, run.config.AdminUser, taskRunOptions{runID: run.runID, stage: stage, tasks: tasks, progress: stageStdout, reporter: run.reporter}); err != nil {
 		_ = client.Close()
 		return fmt.Errorf("%s stack deployment failed: %w", stack.Name, err)
 	}

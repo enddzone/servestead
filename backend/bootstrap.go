@@ -83,7 +83,7 @@ func runBootstrapSteps(ctx context.Context, client remoteClient, config bootstra
 }
 
 func runBootstrapStepsWithReporter(ctx context.Context, client remoteClient, config bootstrapConfig, adminPublicKey string, runID string, reporter TaskReporter, progress io.Writer) error {
-	return runTasksWithReporter(ctx, client, config.SSHUser, runID, "bootstrap", bootstrapTasks(config, adminPublicKey), progress, reporter)
+	return runTasksWithReporter(ctx, client, config.SSHUser, taskRunOptions{runID: runID, stage: "bootstrap", tasks: bootstrapTasks(config, adminPublicKey), progress: progress, reporter: reporter})
 }
 
 func bootstrapTasks(config bootstrapConfig, adminPublicKey string) []Task {

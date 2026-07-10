@@ -82,7 +82,7 @@ func runNetworkSteps(ctx context.Context, client remoteClient, config networkCon
 }
 
 func runNetworkStepsWithReporter(ctx context.Context, client remoteClient, config networkConfig, runID string, reporter TaskReporter, progress io.Writer) error {
-	return runTasksWithReporter(ctx, client, config.SSHUser, runID, "network", networkTasks(config), progress, reporter)
+	return runTasksWithReporter(ctx, client, config.SSHUser, taskRunOptions{runID: runID, stage: "network", tasks: networkTasks(config), progress: progress, reporter: reporter})
 }
 
 func networkTasks(config networkConfig) []Task {

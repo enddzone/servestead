@@ -13,7 +13,7 @@
       return;
     }
 
-    const url = root.getAttribute("data-run-stream");
+    const url = root.dataset.runStream;
     if (!url || (source && source.url.endsWith(url))) return;
     if (source) source.close();
 
@@ -107,8 +107,9 @@
       .filter((code) => !Number.isNaN(code));
     if (codes.length === 0) codes.push(0);
 
-    for (let index = 0; index < codes.length; index += 1) {
+    for (let index = 0; index < codes.length;) {
       const code = codes[index];
+      index += 1;
       if (code === 0) {
         activeClasses.clear();
       } else if (code === 1) {
@@ -125,7 +126,7 @@
       } else if (code >= 90 && code <= 97) {
         setAnsiColor(activeClasses, ansiColors[code - 90]);
       } else if (code === 38 || code === 48) {
-        index = skipExtendedAnsiColor(codes, index);
+        index += extendedAnsiColorArgumentCount(codes, index);
       }
     }
   }
@@ -139,10 +140,10 @@
     for (const color of ansiColors) activeClasses.delete(`ansi-${color}`);
   }
 
-  function skipExtendedAnsiColor(codes, index) {
-    if (codes[index + 1] === 5) return index + 2;
-    if (codes[index + 1] === 2) return index + 4;
-    return index;
+  function extendedAnsiColorArgumentCount(codes, index) {
+    if (codes[index] === 5) return 2;
+    if (codes[index] === 2) return 4;
+    return 0;
   }
 
   function captureFocus() {
@@ -292,15 +293,51 @@
   function showDiagnosticsPanel(trigger) {
     const drawer = trigger.closest(".diagnostics-drawer");
     if (!drawer) return;
-    const panel = trigger.getAttribute("data-diagnostics-panel");
+    const panel = trigger.dataset.diagnosticsPanel;
     if (!panel) return;
     for (const tab of drawer.querySelectorAll("[data-diagnostics-panel]")) {
       tab.classList.toggle("tab-active", tab === trigger);
       tab.setAttribute("aria-selected", tab === trigger ? "true" : "false");
     }
     for (const section of drawer.querySelectorAll("[data-diagnostics-section]")) {
-      section.hidden = section.getAttribute("data-diagnostics-section") !== panel;
+      section.hidden = section.dataset.diagnosticsSection !== panel;
     }
+  }
+
+  function selectProfileTab(profileTab) {
+    if (profileTab.matches("[data-diagnostics-panel]")) {
+      showDiagnosticsPanel(profileTab);
+      return;
+    }
+    const tabs = profileTab.closest(".profile-tabs");
+    if (!tabs) return;
+    for (const tab of tabs.querySelectorAll("[data-profile-tab]")) tab.classList.remove("tab-active");
+    profileTab.classList.add("tab-active");
+  }
+
+  function handleGlobalShortcut(event) {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      if (!focusCommandInput()) toggleCommandPalette();
+      return;
+    }
+    if (event.key === "/") {
+      const search = document.querySelector("[data-command-input]") || document.querySelector("input[name='q']");
+      if (search) {
+        event.preventDefault();
+        search.focus();
+        if (search.matches("[data-command-input]")) filterCommandItems(search);
+      }
+      return;
+    }
+    const shortcut = event.key.toLowerCase();
+    let link;
+    if (shortcut === "o") {
+      link = document.querySelector("[data-command-link='ops']");
+    } else if (shortcut === "s") {
+      link = document.querySelector("[data-command-link='setup']");
+    }
+    if (link) window.location.assign(link.href);
   }
 
   document.addEventListener("DOMContentLoaded", () => {
@@ -324,7 +361,7 @@
     const trigger = event.target.closest("[data-copy]");
     if (trigger) {
       event.preventDefault();
-      copyValue(trigger.getAttribute("data-copy"));
+      copyValue(trigger.dataset.copy);
       return;
     }
     const addResource = event.target.closest("[data-add-resource]");
@@ -355,15 +392,7 @@
     if (dismissDiagnostics) closeDiagnosticsDrawer();
     const profileTab = event.target.closest("[data-profile-tab]");
     if (profileTab) {
-      if (profileTab.matches("[data-diagnostics-panel]")) {
-        showDiagnosticsPanel(profileTab);
-        return;
-      }
-      const tabs = profileTab.closest(".profile-tabs");
-      if (tabs) {
-        for (const tab of tabs.querySelectorAll("[data-profile-tab]")) tab.classList.remove("tab-active");
-        profileTab.classList.add("tab-active");
-      }
+      selectProfileTab(profileTab);
       return;
     }
     if (!event.target.closest("[data-command-input], [data-command-results]")) {
@@ -392,28 +421,7 @@
       return;
     }
     if (isTypingTarget(event.target)) return;
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-      event.preventDefault();
-      if (focusCommandInput()) return;
-      toggleCommandPalette();
-      return;
-    }
-    if (event.key === "/") {
-      const search = document.querySelector("[data-command-input]") || document.querySelector("input[name='q']");
-      if (search) {
-        event.preventDefault();
-        search.focus();
-        if (search.matches("[data-command-input]")) filterCommandItems(search);
-      }
-      return;
-    }
-    if (event.key.toLowerCase() === "o") {
-      const link = document.querySelector("[data-command-link='ops']");
-      if (link) window.location.assign(link.href);
-    } else if (event.key.toLowerCase() === "s") {
-      const link = document.querySelector("[data-command-link='setup']");
-      if (link) window.location.assign(link.href);
-    }
+    handleGlobalShortcut(event);
   });
 
   function addStackResourceRow(trigger) {

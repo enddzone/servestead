@@ -42,7 +42,7 @@ type provisionInputConfig struct {
 }
 
 type digitalOceanProvisionModel struct {
-	ctx                 context.Context
+	ctx                 context.Context // NOSONAR: Bubble Tea's Update method has no context parameter; this is the program-scoped cancellation context.
 	store               ProfileStore
 	screen              provisionScreen
 	inputs              []textinput.Model

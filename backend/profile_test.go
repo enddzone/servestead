@@ -17,18 +17,26 @@ const profileTestHost = "203.0.113.10"
 
 func TestProfileStoreCreatesPrivateProfileFiles(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
+	profile := createTestProfileWithSecrets(t, store)
+	loaded, state, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.IP != profileTestHost || state.Runs == nil {
+		t.Fatalf("unexpected loaded profile/state: %+v %+v", loaded, state)
+	}
+	assertPrivateProfileFiles(t, store, profile.ID)
+}
 
-	profile, err := store.Create(Profile{
-		IP:             profileTestHost,
-		PrivateKeyPath: "/tmp/aegis-key",
-	})
+func createTestProfileWithSecrets(t *testing.T, store *fileProfileStore) Profile {
+	t.Helper()
+	profile, err := store.Create(Profile{IP: profileTestHost, PrivateKeyPath: "/tmp/aegis-key"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if profile.ID == "" || profile.InitialSSHUser != "root" || profile.AdminUser != "servestead" {
 		t.Fatalf("unexpected profile defaults: %+v", profile)
 	}
-
 	secrets := ProfileSecrets{}
 	if err := secrets.EnsureServerSecret(); err != nil {
 		t.Fatal(err)
@@ -45,27 +53,24 @@ func TestProfileStoreCreatesPrivateProfileFiles(t *testing.T) {
 	if err := store.SaveSecrets(profile.ID, secrets); err != nil {
 		t.Fatal(err)
 	}
+	return profile
+}
 
-	loaded, state, err := store.Load(profile.ID)
+func assertPrivateProfileFiles(t *testing.T, store *fileProfileStore, profileID string) {
+	t.Helper()
+	profileDirectory, err := store.profileDirectory(profileID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.IP != profileTestHost || state.Runs == nil {
-		t.Fatalf("unexpected loaded profile/state: %+v %+v", loaded, state)
-	}
-	profileDirectory, err := store.profileDirectory(profile.ID)
+	profilePath, err := store.profilePath(profileID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	profilePath, err := store.profilePath(profile.ID)
+	statePath, err := store.statePath(profileID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	statePath, err := store.statePath(profile.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secretsPath, err := store.secretsPath(profile.ID)
+	secretsPath, err := store.secretsPath(profileID)
 	if err != nil {
 		t.Fatal(err)
 	}
