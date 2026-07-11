@@ -28,7 +28,7 @@ jobs:
         run: npm install --global openwiki
 
       - name: Run OpenWiki
-        run: openwiki --update --print
+        run: openwiki code --update --print
         env:
           FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
           OPENWIKI_PROVIDER: "fireworks"
