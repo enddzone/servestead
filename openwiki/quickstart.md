@@ -94,7 +94,7 @@ backend/           Go source — single-package CLI (package main)
 frontend/          templ components for the web UI (compiled to Go)
 docs/              Astro Starlight documentation site
 examples/          Example Docker Compose stacks (arr-vpn)
-.github/workflows/ CI/CD: ci, codeql, docs, release, release-please, renovate, security
+.github/workflows/ CI/CD: ci, codeql, docs, openwiki-update, release, release-please, renovate, security
 ```
 
 All Go source lives in `backend/` as a single `package main`. The `frontend/` directory contains templ source files (`.templ`) and their generated Go code (`_templ.go`). Deployment scripts and config templates are embedded at compile time via `go:embed` in `backend/resources/resources.go`.

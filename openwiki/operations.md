@@ -40,6 +40,12 @@ Runs `googleapis/release-please-action@v5.0.0` with `release-please-config.json`
 1. **Binaries**: checkout at tag → `templ generate` + verify → install Syft → GoReleaser v2.16.0 → attest binary checksums (build provenance)
 2. **GHCR image**: multi-arch (amd64+arm64) Docker build via `Dockerfile.release` → push to `ghcr.io/<owner>/servestead:<tag>` + `:latest` with SBOM → attest image provenance → Trivy image scan (SARIF upload + fail on HIGH/CRITICAL)
 
+### openwiki-update.yml — OpenWiki Documentation Refresh
+
+**Triggers**: Daily cron (08:00 UTC), manual.
+
+Checks out the repo (Node.js 22), installs `openwiki` globally via npm, and runs `openwiki code --update --print` with an OpenRouter-backed model (`z-ai/glm-5.2`). Creates a pull request via `peter-evans/create-pull-request@v7` that includes `openwiki/`, `AGENTS.md`, `CLAUDE.md`, and the workflow file itself. LangSmith tracing is enabled.
+
 ### renovate.yml — Dependency Updates
 
 **Triggers**: Daily cron (10:17), manual.
