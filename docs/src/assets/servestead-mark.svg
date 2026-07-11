@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img">
+  <defs>
+    <linearGradient id="servestead-mark" x1="8" y1="6" x2="40" y2="42" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#cba6f7"/>
+      <stop offset="1" stop-color="#f5c2e7"/>
+    </linearGradient>
+  </defs>
+  <rect width="48" height="48" rx="14" fill="url(#servestead-mark)"/>
+  <path d="M24 11c5.6 6.6 12 9.6 18 9-2.4 11.2-9.4 18.6-18 23-8.6-4.4-15.6-11.8-18-23 6 .6 12.4-2.4 18-9Z" fill="#11111b"/>
+  <path d="M11.2 24.6c8.2 4.8 17.4 4.8 25.6 0-3 5.2-7.2 9-12.8 11.8-5.6-2.8-9.8-6.6-12.8-11.8Z" fill="#cba6f7"/>
+</svg>

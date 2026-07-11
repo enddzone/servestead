@@ -1,0 +1,75 @@
+---
+title: Connect an Existing VPS
+description: Use the Setup Workbench to review and run Servestead against a fresh Ubuntu server you already own.
+---
+
+import UiScreenshot from '../../../components/UiScreenshot.astro';
+import setupWorkbench from '../../../assets/screenshots/setup-workbench.jpg';
+
+This path creates a local profile, prepares its Git-backed configuration, and runs bootstrap, hardening, networking, proxy, and observability as one visible plan.
+
+## Before You Begin
+
+You need a [supported fresh VPS, working SSH key, domain, and DNS access](../prerequisites/). Start [Servestead Web](../build/) and keep the CLI process running.
+
+<UiScreenshot
+  src={setupWorkbench}
+  alt="Setup Workbench showing Connect existing VPS as the recommended setup path"
+  caption="Choose Connect existing VPS for the most direct first run; saved profiles can be resumed from the same screen."
+/>
+
+## 1. Choose the Server Path
+
+Open **Setup**, choose **Connect existing VPS**, and select **Continue**.
+
+## 2. Enter Required Values
+
+Complete the **Profile** step:
+
+| Field | What to enter |
+| --- | --- |
+| Profile name | A recognizable local name such as `production-vps`. |
+| Server IP or hostname | The fresh server's public address. |
+| Private key | A path on this machine, such as `~/.ssh/servestead_ed25519`. |
+| Base domain | The domain Servestead will use for Pangolin and application routes. |
+| Let's Encrypt email | The certificate contact address. |
+
+Open **Connection and credential overrides** only when the server does not use the default initial user `root`, the administrative user `servestead`, or the certificate email for Pangolin administration.
+
+Select **Continue to GitOps**.
+
+## 3. Choose the Configuration Repository
+
+Pick one repository mode:
+
+- **Create local repository** uses the profile's default configuration location.
+- **Use existing local checkout** uses a repository you already own.
+- **Clone GitHub repository** clones an HTTPS URL. Add a PAT only when the repository is private or anonymous rate limits are a concern.
+
+Servestead deploys committed configuration. Repository preparation happens before any SSH command starts.
+
+## 4. Review the Plan
+
+On **Review and confirm**, verify the server address, users, domain, repository action, and planned stages. Nothing remote has run yet.
+
+Select **Run after review** only when the plan matches your intent.
+
+## 5. Follow the Run
+
+The run view shows status, progress, and live logs. If Servestead identifies a recoverable problem, use the inline credential or repository guidance, then select **Retry**. Use **Cancel safely** when you need to stop a running plan.
+
+### Expected Result
+
+The profile reports **complete**, the Command Center reports a healthy environment, and **Profiles** shows clean GitOps state plus the completed run.
+
+If a stage fails, open [Common issues](../../troubleshooting/) and start with the exact failed stage and its saved log.
+
+## Terminal Alternative
+
+For a direct interactive run:
+
+```sh
+./bin/servestead setup --ip 203.0.113.10
+```
+
+Use `--fresh` only when you intentionally want a new local profile for a reused address. Servestead preserves the prior profile instead of overwriting it.

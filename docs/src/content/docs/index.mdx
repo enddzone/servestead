@@ -1,60 +1,64 @@
 ---
 title: Servestead
-description: Beginner-first docs for turning a raw Ubuntu VPS into a hardened, Git-backed place to run private application stacks.
+description: A local control plane for provisioning, hardening, and operating a Git-backed Ubuntu VPS.
 template: splash
 hero:
-  tagline: Set up SSH, firewalling, Docker, ingress, observability, and app stacks without stitching the server together by hand.
+  title: Your server homestead, under control.
+  tagline: Provision, harden, deploy, and recover from one local workspace—with every consequential action reviewed before it runs.
   image:
     html: |
-      <div class="hero-terminal" aria-label="Servestead setup progress">
-        <div class="hero-terminal__bar">
-          <span></span>
-          <span></span>
-          <span></span>
-        </div>
-        <pre><code><span class="hero-terminal__muted">$</span> servestead setup --ip 203.0.113.10
-      <span class="hero-terminal__ok">✓</span> bootstrap admin access
-      <span class="hero-terminal__ok">✓</span> harden ssh and packages
-      <span class="hero-terminal__ok">✓</span> configure Docker and UFW
-      <span class="hero-terminal__ok">✓</span> deploy Pangolin ingress</code></pre>
-      </div>
+      <figure class="hero-product-shot">
+        <img src="./screenshots/dashboard.jpg" alt="Servestead Command Center showing a healthy production VPS, GitOps state, and recent activity" width="1280" height="720" />
+        <figcaption>The Command Center keeps health, GitOps, and the next safe action in one view.</figcaption>
+      </figure>
   actions:
-    - text: Start here
-      link: /getting-started/
+    - text: Install and launch
+      link: getting-started/build/
+      icon: rocket
+    - text: See the workflow
+      link: getting-started/
       icon: right-arrow
-    - text: Command reference
-      link: /reference/commands/
-      icon: document
-      variant: minimal
+      variant: secondary
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-Servestead turns a fresh Ubuntu VPS into a hardened host for private application stacks. It can provision a server, create an administrative user, harden SSH and the operating system, configure Docker networking, deploy Pangolin-backed ingress, and add observability.
+Servestead turns a fresh Ubuntu VPS into a hardened, Git-backed host for private application stacks. The browser interface is the recommended way to work: it keeps profile values, repository state, run progress, diagnostics, and guarded cloud actions in context.
 
-<CardGrid stagger>
-  <Card title="Begin with one path" icon="open-book" href="/getting-started/">
-    Choose an existing VPS or let Servestead provision one, then follow the guided setup.
-  </Card>
-  <Card title="Know what changes" icon="setting" href="/reference/security-model/">
-    See which steps touch cloud APIs, SSH, UFW, Docker, Pangolin, and local profile files.
-  </Card>
-  <Card title="Deploy a real stack" icon="add-document" href="/guides/add-stack/">
-    Import a Compose file, choose public routes, keep secrets encrypted, and deploy from a committed repository.
-  </Card>
-  <Card title="Recover faster" icon="document" href="/troubleshooting/">
-    Jump to common SSH, DNS, ACME, Docker, Pangolin, and profile-state issues.
-  </Card>
+<ol class="workflow-strip" aria-label="Servestead workflow">
+  <li class="workflow-step"><span>1</span><strong>Connect</strong><small>Use an existing Ubuntu VPS or create a DigitalOcean profile.</small></li>
+  <li class="workflow-step"><span>2</span><strong>Review</strong><small>Confirm the profile, repository, and complete setup plan.</small></li>
+  <li class="workflow-step"><span>3</span><strong>Run</strong><small>Watch each hardening and platform task complete in context.</small></li>
+  <li class="workflow-step"><span>4</span><strong>Operate</strong><small>Manage stacks, GitOps state, access, cloud controls, and recovery.</small></li>
+</ol>
+
+## Start With the Outcome You Need
+
+<CardGrid>
+  <LinkCard
+    title="Set up a server"
+    description="Launch Servestead Web and walk through the five-step Setup Workbench."
+    href="getting-started/existing-vps/"
+  />
+  <LinkCard
+    title="Understand the dashboard"
+    description="Read health, setup, GitOps, and cloud state from the Command Center."
+    href="guides/command-center/"
+  />
+  <LinkCard
+    title="Deploy an application"
+    description="Add a Compose stack, define public routes, review Git changes, and run it."
+    href="guides/add-stack/"
+  />
+  <LinkCard
+    title="Recover a failed run"
+    description="Use run history, diagnostics, inline recovery, and retry controls."
+    href="troubleshooting/"
+  />
 </CardGrid>
 
-## The Fastest Beginner Path
-
-1. [Check the prerequisites](/getting-started/prerequisites/).
-2. [Build the CLI](/getting-started/build/).
-3. [Run guided setup on an existing VPS](/getting-started/existing-vps/).
-4. [Point DNS and deploy the proxy](/guides/dns-and-proxy/).
-5. [Add your first application stack](/guides/add-stack/).
-
-:::caution[Run this on a disposable server first]
-Servestead is intentionally powerful. It changes SSH access, firewall policy, Docker networking, reverse-proxy configuration, and server packages. Practice on a fresh VPS before using it on a machine with data you care about.
+:::caution[Begin with a disposable VPS]
+Servestead changes SSH access, firewall policy, packages, Docker networking, reverse-proxy configuration, and cloud resources. Learn the workflow on a fresh server before using it on a machine that holds important data.
 :::
+
+Prefer the terminal? The [Terminal UI](reference/terminal-ui/) remains available for interactive DigitalOcean catalog selection, and the [CLI reference](reference/commands/) covers repeatable automation.

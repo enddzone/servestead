@@ -5,6 +5,20 @@ description: Security boundaries, trust assumptions, and secret handling in Serv
 
 Servestead is designed for fresh VPS setup. It makes strong changes to SSH, package state, firewall policy, Docker networking, and reverse proxy resources.
 
+## Local Web Boundary
+
+`servestead ui` is a local control plane, not a remotely hosted dashboard.
+
+- The listener accepts only `localhost`, `127.0.0.1`, or `::1` addresses.
+- Each launch generates a random bootstrap token, session value, and CSRF token.
+- The tokenized `/ui` URL establishes an `HttpOnly`, `SameSite=Lax` session cookie and immediately redirects to a URL without the token.
+- Every state-changing POST requires the session cookie and matching CSRF value.
+- **Shutdown** stops the local HTTP server; closing a browser tab alone does not.
+
+The cookie is not marked `Secure` because the loopback-only server uses local HTTP. Do not expose the listener through a proxy, tunnel, port forward, or non-loopback interface. Treat the printed bootstrap URL as a temporary session credential.
+
+The interface masks saved secrets by default, but an explicit reveal displays the selected value in the page for the current session. The local machine and browser are therefore part of the trust boundary.
+
 ## SSH Trust
 
 The first SSH connection uses a native trust-on-first-use host key policy similar to OpenSSH `accept-new`:
@@ -68,6 +82,6 @@ GitHub personal access tokens are managed with `servestead github-token set`, `s
 
 ## Provisioning Boundary
 
-Direct `servestead provision` creates one billable DigitalOcean Droplet and stops after reporting the public IPv4 address. Guided setup can also create one DigitalOcean Droplet, save it as a local profile, and return to the dashboard. Provisioning does not bootstrap or harden automatically.
+Direct `servestead provision` creates one billable DigitalOcean Droplet and stops after reporting the public IPv4 address. The browser provisioning form under **Profiles** also creates one Droplet immediately on valid submission and saves it as a local profile. The Terminal UI adds live catalog prices and an exact typed confirmation before it creates the Droplet. No provisioning path bootstraps or hardens automatically.
 
-DigitalOcean API tokens are used from the environment or a masked TUI prompt for the current run. They are not saved in profile metadata or profile secrets.
+DigitalOcean API tokens are used from the environment or a masked browser/Terminal UI field for the current action. They are not saved in profile metadata or profile secrets.
