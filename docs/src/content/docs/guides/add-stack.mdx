@@ -1,0 +1,97 @@
+---
+title: Add an Application Stack
+description: Add Compose, define public routes, review the Git diff, and deploy committed configuration from Servestead Web.
+---
+
+import UiScreenshot from '../../../components/UiScreenshot.astro';
+import gitopsReview from '../../../assets/screenshots/gitops-review.jpg';
+
+Servestead keeps the Compose file consumer-owned and stores public routing as separate metadata. Every service can deploy; only routes you explicitly define become public through Pangolin.
+
+## Before You Begin
+
+The profile must have a configuration repository and completed platform setup. Prepare a working Compose model and know which service ports, if any, should be public.
+
+## 1. Open Stack Inventory
+
+Open **Profiles**, select the environment, choose **Stacks**, then select **Add stack**.
+
+The inventory shows each stack's public-resource count, metadata status, Git state, and whether deployment is currently eligible.
+
+## 2. Add Compose
+
+Enter a lowercase DNS-label stack name and the complete `compose.yaml` content. Servestead validates the Compose services before saving.
+
+Use `/data/<stack>/...` for application bind mounts. Servestead creates the stack data directory with owner `1000:1000` on first deployment. Use a named volume or prepare the directory yourself when the image runs as another UID or GID.
+
+Do not bind writable application data from `/opt/servestead/repository`; that checkout is deployment input.
+
+## 3. Define Public Resources
+
+Select **Add resource** for each route that should be reachable through Pangolin. Provide:
+
+- Stable resource ID.
+- Compose service name.
+- Subdomain and display name.
+- Container port and protocol.
+- SSO setting.
+- Health-check path.
+
+Leave a service without a public resource to keep it private.
+
+## 4. Save and Review Git
+
+Saving writes the stack files but does not deploy them. Open **GitOps Review** and inspect the working-tree changes.
+
+<UiScreenshot
+  src={gitopsReview}
+  alt="GitOps Review showing repository status, recent commits, recent runs, and guarded stack controls"
+  caption="A saved stack becomes deployable only after its repository changes are intentional and committed."
+/>
+
+Stage the managed stack changes, commit with a specific message, and push when your repository uses an origin. See [GitOps review and sync](../gitops/) for the full sequence.
+
+## 5. Deploy
+
+Return to **Stacks** and deploy the eligible stack, or use **Run stacks** to reconcile all current committed stacks. The run validates the merged Compose model before replacing containers and verifies the expected Pangolin resources afterward.
+
+### Expected Result
+
+The run completes, the stack inventory reports an understood Git state, and each configured public resource is reachable at its intended hostname after DNS and certificate issuance succeed.
+
+## Files Servestead Creates
+
+| File | Purpose |
+| --- | --- |
+| `stacks/<name>/compose.yaml` | Your reviewed Compose model. |
+| `stacks/<name>/servestead.yaml` | Public-resource contract and route metadata. |
+| `stacks/<name>/servestead.secrets.yaml` | Age-encrypted runtime values when secrets are configured. |
+
+Servestead does not inject labels into the consumer-owned Compose file.
+
+## Add Runtime Secrets
+
+The browser editor does not import a new `.env` file. Use the CLI:
+
+```sh
+./bin/servestead stack env set \
+  --profile <profile-id> \
+  --stack <name> \
+  --file /path/to/.env
+```
+
+Commit the resulting encrypted `servestead.secrets.yaml`, never the populated `.env`. Back up the profile age identity as described in [Access and secrets](../access-and-secrets/).
+
+## CLI Alternative
+
+For a scripted import:
+
+```sh
+./bin/servestead stack add \
+  --profile <profile-id> \
+  --compose /path/to/docker-compose.yml \
+  --publish web:3000:app \
+  --env-file /path/to/.env
+```
+
+`--publish` is repeatable and uses `service:port:subdomain[:id]`. Omitting it creates a private stack.

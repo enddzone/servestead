@@ -1,0 +1,59 @@
+---
+title: GitOps Review and Sync
+description: Review repository state, stage stack changes, commit, push, and run the committed configuration.
+---
+
+import UiScreenshot from '../../../components/UiScreenshot.astro';
+import gitopsReview from '../../../assets/screenshots/gitops-review.jpg';
+
+Servestead treats committed configuration as deployment input. The GitOps workspace separates editing from deployment so you can inspect exactly what will become authoritative.
+
+<UiScreenshot
+  src={gitopsReview}
+  alt="Servestead GitOps Review showing a clean working tree, up-to-date remote state, recent commits, and recent runs"
+  caption="Repository status, recent commits, recent runs, and the next safe action stay visible before guarded Git operations or stack runs."
+/>
+
+## Read Repository Status
+
+| Signal | Meaning |
+| --- | --- |
+| **Working tree** | `clean` or changes that need review. |
+| **Remote sync** | `up to date` or `needs push` when an origin and branch are available. |
+| **HEAD** | The exact local commit Servestead will use. |
+
+The **Next** line explains whether to review changes, push, resolve repository access, or run stacks.
+
+## Review Before You Change Git
+
+1. Open **Review working tree changes**.
+2. Confirm that every Compose, metadata, and encrypted-secret change is intentional.
+3. Expand **Repository actions**.
+4. Select **Stage changes** to stage managed stack changes.
+5. Enter a specific commit message and select **Commit staged**.
+6. Select **Push commit** when the repository has an `origin` remote.
+
+If the repository has no origin, pushing is unavailable but local committed deployment can still be valid for your workflow.
+
+## Run Committed Stacks
+
+Select **Run stacks** only after the status and commit are correct. The run reconciles current stacks and removes managed containers, generated overrides, manifests, and Pangolin resources for stacks that were deleted from the committed repository.
+
+Servestead does not deploy an uncommitted observability Compose change. Application stack eligibility is also shown in **Profiles → Stacks** before an individual deploy.
+
+## Investigate Drift
+
+When the Command Center reports drift:
+
+1. Open GitOps Review.
+2. Compare the working-tree diff with the current `HEAD`.
+3. Decide whether to discard the edit outside Servestead, commit it through the workspace, or complete a pending push.
+4. Run stacks only after the repository state is intentional.
+
+### Expected Result
+
+The workspace reports a clean working tree, an understood remote state, and the commit you intend to deploy. The next stack run records that outcome in recent runs.
+
+:::note[Repository ownership]
+Servestead can stage and commit stack paths, but it does not replace normal repository review. Use branches and pull requests when your team requires them before deployment.
+:::

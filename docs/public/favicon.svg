@@ -1,6 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Servestead">
-  <rect width="64" height="64" rx="12" fill="#101318"/>
-  <path d="M12 32 32 14l20 18v18a4 4 0 0 1-4 4H16a4 4 0 0 1-4-4V32Z" fill="#f0b84f"/>
-  <path d="M21 54V35h22v19" fill="#101318"/>
-  <path d="M24 42h16M24 48h10" stroke="#f0b84f" stroke-width="4" stroke-linecap="round"/>
+  <defs>
+    <linearGradient id="mark" x1="10" y1="8" x2="54" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#cba6f7"/>
+      <stop offset="1" stop-color="#f5c2e7"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="18" fill="#11111b"/>
+  <path d="M32 12c7.5 8.8 16 12.8 24 12-3.2 15-12.5 24.8-24 30.7C20.5 48.8 11.2 39 8 24c8 .8 16.5-3.2 24-12Z" fill="url(#mark)"/>
+  <path d="M14.9 30.1c10.9 6.4 23.2 6.4 34.2 0-4 6.9-9.7 12-17.1 15.7-7.4-3.7-13.1-8.8-17.1-15.7Z" fill="#11111b"/>
 </svg>

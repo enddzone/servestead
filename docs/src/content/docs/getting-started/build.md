@@ -1,38 +1,67 @@
 ---
-title: Build the CLI
-description: Build Servestead from source before running setup commands.
+title: Install and Launch
+description: Build Servestead from source and open its local web interface.
 ---
 
-From the repository root, build the CLI:
+Build the current Servestead source, confirm the CLI, and open the local control plane.
+
+## 1. Build the CLI
+
+From the repository root:
 
 ```sh
-go build -o bin/servestead .
+mkdir -p bin
+go build -o ./bin/servestead ./backend
 ```
 
-Confirm the binary exists:
+Confirm the binary is available:
 
 ```sh
-bin/servestead --help
+./bin/servestead --help
 ```
 
-## Run Tests
-
-Before changing the CLI, run:
+## 2. Run the Preflight
 
 ```sh
-go test ./...
+./bin/servestead doctor
 ```
 
-Provider provisioning is billable and is not run by the test suite. Cloud API clients are tested against local HTTP servers.
+Resolve missing local requirements before connecting to a server.
 
-## Local Docs Site
-
-The docs site is separate from the Go CLI:
+## 3. Launch Servestead Web
 
 ```sh
-cd docs
-npm install
-npm run dev
+./bin/servestead ui
 ```
 
-Use `npm run build` to verify the static docs output.
+Servestead binds to a random local loopback port, prints the session URL, and opens it in your default browser. Keep this terminal process running while you use the interface.
+
+### If the Browser Does Not Open
+
+```sh
+./bin/servestead ui --no-open
+```
+
+Copy the printed `http://127.0.0.1:…/ui?token=…` URL into a browser on the same machine. Treat that URL as a temporary session credential and do not share it.
+
+### Use a Predictable Local Port
+
+```sh
+./bin/servestead ui --addr 127.0.0.1:8080 --no-open
+```
+
+The address must use `localhost`, `127.0.0.1`, or `::1`. Servestead rejects non-loopback bindings.
+
+## 4. Close the Session
+
+Use **Shutdown** in the left navigation, or return to the terminal and press `Ctrl+C`. Closing only the browser tab does not stop the local process.
+
+### Expected Result
+
+The Command Center opens. On a first run it shows **No profiles yet** and links to **Start setup**. On later runs it selects the most recently updated profile.
+
+Continue with [Connect an existing VPS](../existing-vps/) or [Provision with DigitalOcean](../provision-vps/).
+
+:::note[Contributor checks]
+Development tests and docs-site commands live in the repository README and `docs/README.md`; they are not required for normal operator setup.
+:::

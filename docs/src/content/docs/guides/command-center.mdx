@@ -1,0 +1,59 @@
+---
+title: Command Center
+description: Read environment health, setup progress, GitOps state, cloud state, issues, and recent activity at a glance.
+---
+
+import UiScreenshot from '../../../components/UiScreenshot.astro';
+import dashboard from '../../../assets/screenshots/dashboard.jpg';
+
+The Command Center answers three operator questions: which environment is active, what state is it in, and what should happen next.
+
+<UiScreenshot
+  src={dashboard}
+  alt="Servestead Command Center showing a healthy production VPS, clean GitOps state, cloud state, and recent activity"
+  caption="The selected environment, four status signals, and one next action lead the page; deeper operations remain one click away."
+  eager={true}
+/>
+
+## Active Environment
+
+Use the environment selector when more than one profile exists. The selected profile controls the status card and enables profile-specific navigation for GitOps, diagnostics, access, and cloud operations.
+
+The status card summarizes:
+
+| Signal | Meaning |
+| --- | --- |
+| **Setup** | The latest setup outcome or the most advanced completed stage. |
+| **Health** | Whether setup is ready, running, healthy, or needs attention. |
+| **GitOps** | Whether the repository is clean, has changes, or needs a push. |
+| **Cloud** | DigitalOcean state, destroyed state, or no provider metadata. |
+
+**Next** is the safest useful action derived from those signals. Follow it before opening lower-level controls.
+
+## Primary Work Areas
+
+- **Setup** creates or resumes the reviewed five-step setup flow.
+- **Profiles & Diagnostics** combines profile metadata, recent runs, stack operations, and diagnostics.
+- **GitOps Review** opens repository status, recent commits, diffs, and guarded repository actions.
+- **Access & Cloud** leads to masked credentials and provider controls for the selected profile.
+
+The search capsule, or `⌘ K`, provides quick navigation to these work areas. It does not run remote commands by itself.
+
+## Needs Attention
+
+Servestead may surface:
+
+- Repository drift or a pending push.
+- Optional credentials that are not configured.
+- A failed or cancelled latest run.
+- A setup profile that is ready to continue.
+
+Open the linked review surface rather than guessing from the summary. When no issue is detected, the card reports that explicitly.
+
+## Recent Activity
+
+Recent profile updates and the latest run appear with a timestamp and link back to the relevant workspace. For full run history and logs, open the selected profile and choose **View history**.
+
+### Expected Result
+
+A stable environment shows **Healthy**, a clean or understood GitOps state, and a next action such as **Sync stacks as needed**. If health reports **Needs attention**, continue with [Profiles and diagnostics](../profiles-and-diagnostics/) or [Common issues](../../troubleshooting/).

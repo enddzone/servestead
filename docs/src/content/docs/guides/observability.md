@@ -1,73 +1,72 @@
 ---
 title: Observability
-description: Understand the built-in Beszel, Dozzle, and Dockhand deployment.
+description: Verify the built-in Beszel, Dozzle, and Dockhand platform and understand its Git-backed configuration.
 ---
 
-The observability stage deploys local tools behind Pangolin SSO. It does not expose public host ports for those services.
+The observability stage deploys a private operations suite behind Pangolin SSO. None of these services publishes a direct host port.
 
-## Services
+## Verify the Stage
 
-| Service | Public hostname | Purpose |
+After a platform run:
+
+1. Open **Profiles** and select the environment.
+2. Confirm setup is complete and open the latest run.
+3. Verify the observability stage completed without a recovery message.
+4. Use the configured Pangolin administrator to open each hostname.
+
+| Service | Default hostname | Purpose |
 | --- | --- | --- |
 | Beszel | `beszel.example.com` | Host metrics and system overview. |
 | Dozzle | `dozzle.example.com` | Container log viewing. |
 | Dockhand | `dockhand.example.com` | Git-backed stack visibility and Docker environment integration. |
 
-Replace `example.com` with your configured domain.
+Replace `example.com` with the profile's base domain.
+
+### Expected Result
+
+Pangolin protects all three services with SSO, each target passes its configured health check, Beszel sees the local system, and Dockhand can list the server's containers.
 
 ## Where Files Live
 
 | Path | Purpose |
 | --- | --- |
-| `/opt/servestead/repository` | Committed deployment input. |
+| `/opt/servestead/repository` | Exact committed deployment input. |
 | `/opt/servestead/stacks/observability` | Runtime data. |
 | `/etc/servestead/observability.env` | Runtime secrets, mode `0600`. |
 
-The configuration is consumer-owned and Git-backed at `stacks/observability/compose.yaml`.
+The consumer-owned configuration is `stacks/observability/compose.yaml` in the profile repository.
 
-## Repository Behavior
+## Repository Rules
 
-By default, setup creates one repository per profile under the Servestead configuration directory, initializes `main`, and commits the scaffold as `Servestead <servestead@localhost>`.
+Servestead deploys the exact committed `HEAD`. An uncommitted observability Compose change blocks deployment, while unrelated working-tree changes do not.
 
-You can choose a different repository:
+When the repository has a GitHub origin and branch, stack synchronization creates or updates matching Dockhand Git-stack records with automatic updates disabled. Servestead remains the authoritative deployer.
 
-```sh
-bin/servestead setup \
-  --ip 203.0.113.10 \
-  --config-repo /path/to/repository
-```
+Use [GitOps review and sync](../gitops/) to inspect, commit, and push changes before rerunning the stage.
 
-Or clone a GitHub HTTPS repository:
+## GitHub Personal Access Token
 
-```sh
-bin/servestead setup \
-  --ip 203.0.113.10 \
-  --github-repo https://github.com/owner/repo.git
-```
+Private repositories require a GitHub PAT. Public repositories can also use one to avoid anonymous rate limits.
 
-## GitHub Personal Access Tokens
+Prefer a fine-grained token that is limited to the configuration repository, grants read-only `Contents` access, and has an expiration you can rotate. Save or replace it under **Profiles → Access**.
 
-Private repositories require a GitHub personal access token. Public repositories can also use one to avoid anonymous rate limits.
-
-Create a fine-grained personal access token in GitHub:
-
-- Select the resource owner that owns the configuration repository.
-- Select only the repository Servestead should read.
-- Grant repository `Contents` permission as `Read-only`.
-- Set an expiration you can rotate before it expires.
-
-Save the token locally, then store it in the Servestead profile:
+For a terminal-only workflow:
 
 ```sh
-bin/servestead github-token set --profile <profile-id> --file ./github-token.txt
+./bin/servestead github-token set \
+  --profile <profile-id> \
+  --file ./github-token.txt
 rm ./github-token.txt
-bin/servestead github-token status --profile <profile-id>
+./bin/servestead github-token status --profile <profile-id>
 ```
 
-`SERVESTEAD_GITHUB_TOKEN` can still be set before launching Servestead for a one-off run. When both exist, the environment token wins.
+`SERVESTEAD_GITHUB_TOKEN` remains available as a one-run override. When both exist, the environment value wins.
 
-## Deployment Rules
+## If Verification Fails
 
-Servestead deploys the exact committed `HEAD`. Uncommitted changes to the observability Compose file block deployment. Unrelated working-tree changes do not.
+- Check DNS and ports 80/443 for hostname or certificate failures.
+- Open the latest run for the exact proxy or observability task error.
+- Review GitOps when the committed revision or working tree is rejected.
+- Save existing Pangolin credentials under **Access** when a retry reports missing credentials.
 
-If a GitHub origin and branch are configured, stack synchronization creates or updates matching Dockhand Git-stack records with automatic updates disabled. Servestead still performs the authoritative deployment.
+Continue with [Common issues](../../troubleshooting/) for focused recovery steps.

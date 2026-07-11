@@ -1,29 +1,60 @@
 ---
 title: DNS and Proxy
-description: Point DNS and deploy the Pangolin-backed reverse proxy stack.
+description: Point DNS, review the domain values, and deploy the Pangolin-backed ingress platform.
 ---
 
-Servestead deploys a Pangolin-backed ingress stack after DNS points at your VPS.
+Servestead deploys Pangolin, Gerbil, Traefik, and Newt after your domain points to the VPS. Complete DNS first so HTTP-01 certificate issuance can succeed during the platform run.
 
-## Required DNS
+## Before You Begin
 
-Create these records at your DNS provider:
+The profile needs a server address, base domain, Let's Encrypt email, and working administrative SSH access.
+
+## 1. Create DNS Records
+
+At your DNS provider, create:
 
 | Hostname | Type | Value |
 | --- | --- | --- |
 | `example.com` | `A` | VPS public IPv4 |
 | `*.example.com` | `A` | VPS public IPv4 |
 
-Replace `example.com` with your real domain.
+Replace `example.com` with the profile's base domain. Traefik uses HTTP-01, so TCP port 80 must remain reachable; HTTPS traffic requires TCP port 443.
 
-Traefik uses HTTP-01 to issue a separate certificate for each hostname, so TCP port 80 must remain reachable.
+DNS changes remain outside Servestead. Confirm propagation from the resolver you will use before starting the proxy stage.
 
-## Direct Proxy Command
+## 2. Review Profile Values
 
-Most users should let guided setup generate and save the server secret. Use the direct proxy command for scripts:
+Open **Setup**, resume the profile, and verify **Base domain** and **Let's Encrypt email**. Open **Connection and credential overrides** only when Pangolin should use a different administrator email.
+
+Continue through GitOps and read the review plan before running.
+
+## 3. Run the Platform
+
+For a new environment, the full reviewed setup includes networking, proxy, and observability after bootstrap and hardening. A resumed profile can target the remaining platform work.
+
+Follow the live logs. A certificate or resource failure usually points to DNS propagation, blocked ports, or previously registered Pangolin credentials.
+
+## 4. Verify the Result
+
+The proxy stage:
+
+- Writes deployment input below `/opt/servestead`.
+- Starts Pangolin, Gerbil, Traefik, Newt, and a read-only Docker socket proxy.
+- Registers the Pangolin administrator, `servestead` organization, and `local-vps` Newt site.
+- Verifies the expected services and public resources.
+
+Open **Profiles → Access** to check the Pangolin credential status. Reveal the administrator password only when you need to sign in, then close the local session when finished.
+
+## Generated Credentials
+
+Profile-aware setup generates and stores the Pangolin administrator password, server secret, Newt credentials, Beszel credentials, and Beszel key material. See [Access and secrets](../access-and-secrets/) for storage boundaries.
+
+## Direct CLI Alternative
+
+Use the direct command only for a scripted workflow that already manages the server secret:
 
 ```sh
-bin/servestead proxy \
+./bin/servestead proxy \
   --host 203.0.113.10 \
   --private-key "$HOME/.ssh/id_ed25519" \
   --domain example.com \
@@ -31,39 +62,8 @@ bin/servestead proxy \
   --server-secret 'replace-with-a-long-random-secret'
 ```
 
-## What Gets Deployed
+Normal profile-aware setup generates and saves this secret for you.
 
-The proxy stage writes deployment files under `/opt/servestead`, starts the Compose stack, and verifies the expected services are running.
-
-The stack includes:
-
-- Pangolin for access and resources.
-- Gerbil for tunneling.
-- Traefik for HTTP routing and certificates.
-- Newt for resource reconciliation through a read-only Docker socket proxy.
-
-## Generated Credentials
-
-Profile-aware setup generates and saves:
-
-- Pangolin administrator password.
-- Pangolin server secret.
-- Newt credentials.
-- Beszel credentials.
-- Beszel key material.
-
-Retrieve the generated Pangolin administrator credentials with:
-
-```sh
-bin/servestead pangolin-credentials --profile <profile-id>
-```
-
-Or by IP:
-
-```sh
-bin/servestead pangolin-credentials --ip 203.0.113.10
-```
-
-:::tip
-If an existing Pangolin profile was registered before automated bootstrap, set `PANGOLIN_ADMIN_PASSWORD` once when rerunning setup so Servestead can save the existing password in the owner-only profile secrets file.
+:::tip[Existing Pangolin registration]
+If an older profile was registered before automated bootstrap, save the existing administrator email and password through the recovery form or **Profiles → Access**, then retry the platform run.
 :::

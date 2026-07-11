@@ -1,6 +1,6 @@
 # Servestead
 
-Servestead, the Server Homestead, is a local Go CLI for turning a raw Ubuntu VPS into a hardened, Git-backed place to run private application stacks. It supports DigitalOcean provisioning, administrative-user bootstrapping, operating-system hardening, Pangolin-backed ingress, and observability through native Go orchestration.
+Servestead, the Server Homestead, is a local control plane and CLI for turning a raw Ubuntu VPS into a hardened, Git-backed place to run private application stacks. Its browser interface guides setup, profiles, diagnostics, GitOps, access, cloud controls, and recovery; direct commands remain available for automation.
 
 ## Prerequisites
 
@@ -13,8 +13,21 @@ Servestead, the Server Homestead, is a local Go CLI for turning a raw Ubuntu VPS
 ## Build
 
 ```sh
-go build -o bin/servestead .
+mkdir -p bin
+go build -o bin/servestead ./backend
 ```
+
+## Servestead Web
+
+Launch the recommended local interface:
+
+```sh
+bin/servestead ui
+```
+
+Servestead binds a random loopback port, prints a tokenized session URL, and opens it in the default browser. Use `bin/servestead ui --no-open` when you want to copy the printed URL yourself. Keep the CLI process running while the interface is open; use **Shutdown** in the navigation or `Ctrl+C` to stop it.
+
+The public documentation at [docs.servestead.com](https://docs.servestead.com) leads with the browser workflow and keeps Terminal UI and direct commands as reference paths.
 
 ## Documentation site
 
@@ -65,7 +78,9 @@ Defaults target Ubuntu 24.04 in `nyc3` on `s-1vcpu-1gb` and can be overridden wi
 
 ## Guided setup
 
-For guided setup on an existing disposable Ubuntu VPS, lead with the server IP:
+For a guided setup on an existing disposable Ubuntu VPS, launch Servestead Web, open **Setup**, and choose **Connect existing VPS**. The five-step workbench collects profile and repository values, presents the complete plan before repository or SSH work begins, and keeps live status, logs, recovery, and retry controls in context.
+
+The direct interactive alternative starts from the server IP:
 
 ```sh
 bin/servestead setup --ip 203.0.113.10
@@ -96,7 +111,7 @@ Running `setup` without `--ip` opens the full-screen, profile-first terminal UI.
 
 Existing profile dashboards present three setup actions: Bootstrap, Harden, and Platform. Platform runs networking, Pangolin proxy, and observability in order from one command. The TUI collects missing full-run values before any remote command runs and presents explicit choices to create a local configuration repository, use an existing checkout, or clone GitHub. The review screen shows the selected repository action. After confirmation, Servestead prepares the repository first and starts SSH execution only after that succeeds. From a saved profile dashboard, use `j`/`k` to select an action and press `r` to run it once, even if it is already marked complete. Press `p` to reveal the saved Pangolin administrator username and password. Retrying Platform after Pangolin has already been registered opens masked administrator email/password inputs and saves the supplied credentials in the owner-only profile secrets file. Press `q` to quit from navigation or run screens, `esc` to go back, or `x` to delete only the local saved profile, secrets, state, and run logs; local profile delete does not change the remote server. The older one-off guided paths remain available from the advanced legacy setup entry.
 
-For a quick preflight check without opening the TUI:
+For a quick preflight check without opening an interface:
 
 ```sh
 bin/servestead doctor

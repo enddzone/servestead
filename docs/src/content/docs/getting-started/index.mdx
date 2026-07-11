@@ -1,0 +1,55 @@
+---
+title: Start With Servestead
+description: Follow the browser-first path from a fresh Ubuntu VPS to a healthy, Git-backed environment.
+---
+
+import UiScreenshot from '../../../components/UiScreenshot.astro';
+import setupWorkbench from '../../../assets/screenshots/setup-workbench.jpg';
+
+The recommended Servestead path is a short, reviewed workflow in your browser. You provide the server and repository details; Servestead shows the complete plan before it prepares files or opens an SSH connection.
+
+## Before You Begin
+
+Have the [local, server, SSH, domain, and DNS requirements](prerequisites/) ready, then [build and launch Servestead Web](build/).
+
+## Choose a Starting Point
+
+<div class="setup-path">
+  <div class="path-card">
+    <h3>Connect an existing VPS</h3>
+    <p>You already have a fresh Ubuntu server, its public address, and SSH key access. This is the clearest first run.</p>
+    <p><a href="existing-vps/">Connect an existing VPS →</a></p>
+  </div>
+  <div class="path-card">
+    <h3>Provision with DigitalOcean</h3>
+    <p>Create a billable Droplet profile from Profiles, or use the Terminal UI for guided catalog and price selection.</p>
+    <p><a href="provision-vps/">Choose a provisioning path →</a></p>
+  </div>
+</div>
+
+<UiScreenshot
+  src={setupWorkbench}
+  alt="Servestead Setup Workbench with five steps and existing VPS, DigitalOcean, and saved-profile choices"
+  caption="The Setup Workbench makes the five-step sequence visible before any server work begins."
+/>
+
+## The Browser Workflow
+
+1. Open **Setup** and choose **Connect existing VPS**, or resume a saved profile.
+2. Enter the profile name, server address, SSH key path, base domain, and certificate email.
+3. Choose whether Servestead should create a local repository, use an existing checkout, or clone GitHub.
+4. Read **Review and confirm**. Repository preparation and SSH execution have not started yet.
+5. Select **Run after review** and follow the live status and logs.
+6. Open **Profiles** after completion to verify setup, GitOps, recent runs, and diagnostics.
+
+### Expected Result
+
+The active profile reports a healthy or completed setup state, the configuration repository has a clear Git status, and the Command Center names the next useful action.
+
+:::tip[Simple by default, details when needed]
+The primary screens lead with one status and one next action. Expand profile metadata, repository actions, diffs, advanced setup fields, or diagnostics only when the task requires them.
+:::
+
+## Terminal Alternatives
+
+Use `servestead setup` for the full-screen Terminal UI, including guided DigitalOcean catalog selection. Use `servestead setup --ip <address>` for a direct interactive run, or add `--yes` only when every required value is supplied for automation. See [Terminal UI](../reference/terminal-ui/) and [CLI commands](../reference/commands/).

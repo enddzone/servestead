@@ -1,0 +1,75 @@
+---
+title: Setup Workbench
+description: Understand the five browser steps, their safety boundaries, and how to resume or recover a run.
+---
+
+import UiScreenshot from '../../../components/UiScreenshot.astro';
+import setupWorkbench from '../../../assets/screenshots/setup-workbench.jpg';
+
+The Setup Workbench keeps one profile, one repository decision, and one reviewed run in a visible five-step sequence.
+
+<UiScreenshot
+  src={setupWorkbench}
+  alt="Servestead Setup Workbench with Start, Profile, GitOps, Review, and Run steps"
+  caption="Start, Profile, GitOps, Review, and Run stay visible so you always know what has and has not happened."
+/>
+
+## Step 1: Start
+
+Choose **Connect existing VPS** for a new server you already own, or **Resume a saved profile** to continue prior work.
+
+The DigitalOcean card currently routes guided provisioning to the Terminal UI. A concise provisioning form is also available under **Profiles → New DigitalOcean profile**; see [Provision with DigitalOcean](../../getting-started/provision-vps/).
+
+## Step 2: Profile
+
+Provide the values required for remote work:
+
+- Local profile name.
+- Server IP address or hostname.
+- Private key path on the machine running Servestead.
+- Base domain and Let's Encrypt email.
+
+Connection users and Pangolin credentials live behind **Connection and credential overrides**. Leave them collapsed when the defaults are correct.
+
+## Step 3: GitOps
+
+Choose how Servestead should prepare the configuration repository:
+
+- Create the profile's local repository.
+- Use an existing local checkout.
+- Clone a GitHub HTTPS repository.
+
+Private GitHub repositories require a PAT. The submitted value is stored in the owner-only local profile secrets and is not rendered back to the browser.
+
+## Step 4: Review
+
+**Review and confirm** is the execution boundary. Verify the full plan, run target, and repository action. At this point Servestead has not prepared the repository or opened an SSH connection.
+
+After you select **Run after review**, Servestead performs local preflight and repository preparation first. Remote stages begin only after those checks succeed.
+
+## Step 5: Run
+
+The run view keeps status, progress, and live logs together.
+
+- **Cancel safely** requests cancellation and preserves the run outcome.
+- Recoverable credential or repository problems appear with inline guidance.
+- **Retry** starts a new run from the saved profile state.
+
+Completed stages are persisted. A later full run can skip work already marked complete.
+
+## Resume a Profile
+
+Return to **Setup**, choose the profile in **Resume a saved profile**, and select **Resume**. Review the loaded values before continuing. Deleting a local profile does not change the server or cloud resource.
+
+## Where Local State Lives
+
+Servestead stores profiles below the operating system's user configuration directory in a `servestead` subdirectory.
+
+| File | Purpose |
+| --- | --- |
+| `profile.json` | Server, domain, user, cloud, and repository metadata. |
+| `state.json` | Completed stages and run state. |
+| `secrets.json` | Owner-only generated credentials and profile tokens. |
+| `logs/*.jsonl` | Structured events for run history and diagnostics. |
+
+Use [Profiles and diagnostics](../profiles-and-diagnostics/) to inspect that state through the interface. Use the [Terminal UI](../../reference/terminal-ui/) only when you need its keyboard workflow or guided provider catalog.

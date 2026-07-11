@@ -1,0 +1,58 @@
+---
+title: Profiles and Diagnostics
+description: Inspect saved environments, recent runs, stack state, GitOps, credentials, cloud metadata, and recovery details.
+---
+
+import UiScreenshot from '../../../components/UiScreenshot.astro';
+import profileWorkspace from '../../../assets/screenshots/profile-workspace.jpg';
+
+A profile is Servestead's local record of one environment. The Profiles workspace puts its setup state, repository, run history, credentials, and cloud metadata behind one selection.
+
+<UiScreenshot
+  src={profileWorkspace}
+  alt="Servestead Profiles workspace showing a completed profile, clean GitOps state, management actions, and recent runs"
+  caption="Select a profile on the left; its current state, next action, management areas, and recent runs appear in one workspace."
+/>
+
+## Select and Read a Profile
+
+Open **Profiles** and choose a row. The status strip shows:
+
+- **Setup** — the latest setup result.
+- **Activity** — whether a run is idle, active, completed, failed, or cancelled.
+- **GitOps** — the current repository state.
+
+The **Next** line gives the most relevant follow-up. Expand **Profile metadata** when you need the server address, domain, certificate email, cloud state, update time, or repository path.
+
+## Manage the Environment
+
+The compact operation bar opens focused controls without leaving the profile:
+
+- **Stacks** inventories editable application stacks, public resources, and deployment eligibility.
+- **GitOps** shows working-tree state, the current commit, push status, repository actions, and diffs.
+- **Access** shows masked credential status and controlled reveal/update actions.
+- **Cloud** shows provider metadata plus guarded restart and destroy controls.
+
+## Use Diagnostics
+
+Select **Diagnostics** to open a side panel that connects three common investigations:
+
+1. **Runs** lists recent outcomes and links to persisted logs.
+2. **GitOps** shows repository status, the current commit, and whether a push is pending.
+3. **Cloud** shows provider, resource, image, region, size, address, and active/destroyed state.
+
+Start with the failed run, then compare repository or cloud state only when the failure points there.
+
+## Review Run History
+
+Select **View history** to search runs and logs. Open a run to see the stored JSONL events with known profile secrets masked. The newest runs appear first.
+
+## Delete a Local Profile
+
+Expand **Profile settings** and read the impact carefully. Deleting removes local profile metadata, credentials, encryption keys, state, and logs. It does not change the remote server, cloud resource, or configuration repository.
+
+Export any age identity needed to recover encrypted stack secrets before deletion. The form requires the displayed `delete <profile-name>` phrase, and deletion is blocked while a run is active.
+
+### Expected Result
+
+You can explain the profile's current setup, activity, and GitOps state, identify its next action, and open the exact run or subsystem that needs attention.
