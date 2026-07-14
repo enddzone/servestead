@@ -23,7 +23,7 @@ jobs:
         run: test -n "$RENOVATE_TOKEN"
 
       - name: Run Renovate
-        uses: renovatebot/github-action@v46.1.18
+        uses: renovatebot/github-action@v46.1.19
         with:
           configurationFile: renovate.json
           token: ${{ secrets.RENOVATE_TOKEN }}
