@@ -8,9 +8,9 @@ require (
 	charm.land/lipgloss/v2 v2.0.5
 	filippo.io/age v1.3.1
 	github.com/a-h/templ v0.3.1020
-	github.com/digitalocean/godo v1.198.0
+	github.com/digitalocean/godo v1.199.0
 	github.com/getsops/sops/v3 v3.13.2
-	github.com/mattn/go-isatty v0.0.22
+	github.com/mattn/go-isatty v0.0.23
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	golang.org/x/crypto v0.54.0
 	gopkg.in/yaml.v3 v3.0.1
