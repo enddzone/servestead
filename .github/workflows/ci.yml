@@ -103,7 +103,7 @@ jobs:
         run: test -n "$SONAR_TOKEN"
 
       - name: Scan with SonarQube Cloud
-        uses: SonarSource/sonarqube-scan-action@v8.2.0
+        uses: SonarSource/sonarqube-scan-action@v8.2.1
         with:
           args: >
             -Dsonar.qualitygate.wait=true
