@@ -1,3 +1,10 @@
+---
+type: Architecture Guide
+title: Servestead Architecture
+description: Technical architecture of the Servestead Go CLI, including command dispatch, setup orchestration, Bubble Tea and web interfaces, SSH task execution, embedded resources, profile persistence, and system data flow.
+tags: [servestead, architecture, golang, ssh, tui, web-ui]
+---
+
 # Architecture
 
 Servestead is a single-binary Go CLI (`package main` in `backend/`) that orchestrates remote server configuration over SSH. It has no runtime dependency on local Ansible, OpenSSH clients, or `ssh-keygen` — all SSH operations use `golang.org/x/crypto/ssh` and all key generation uses `golang.org/x/crypto/ssh` + `crypto/ed25519`.

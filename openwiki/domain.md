@@ -1,3 +1,10 @@
+---
+type: Domain Concepts Guide
+title: Servestead Domain Concepts
+description: Core Servestead domain model covering server profiles, Git-backed configuration repositories, Pangolin ingress routes, observability services, Docker Compose application stacks, SOPS and age secrets, and DigitalOcean integration.
+tags: [servestead, domain-model, gitops, pangolin, docker-compose, secrets]
+---
+
 # Domain Concepts
 
 This page covers the core conceptual domains of Servestead: profiles, the config repository, Pangolin ingress, observability, application stacks, secrets, and cloud integration.

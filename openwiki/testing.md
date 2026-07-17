@@ -1,3 +1,10 @@
+---
+type: Testing Guide
+title: Servestead Testing
+description: Guide to the Servestead Go test suite, including test commands, backend test inventory, table-driven and mock-based patterns, race detection, coverage, linting, frontend template checks, and untested integration boundaries.
+tags: [servestead, testing, golang, coverage, linting, ci]
+---
+
 # Testing
 
 Servestead has a comprehensive Go test suite. All tests are in `backend/` alongside the source code, following standard Go test conventions (`_test.go` suffix, `package main`).

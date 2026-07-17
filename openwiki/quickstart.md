@@ -1,3 +1,10 @@
+---
+type: Quickstart Guide
+title: Servestead OpenWiki Quickstart
+description: Build and use the Servestead Go CLI to provision, harden, network, and operate Ubuntu VPS application stacks with Pangolin ingress, observability, Git-backed configuration, and encrypted secrets. Includes commands, prerequisites, key concepts, and repository layout.
+tags: [servestead, quickstart, cli, vps, docker, pangolin]
+---
+
 # Servestead — OpenWiki Quickstart
 
 Servestead is a local Go CLI for turning a raw Ubuntu VPS into a hardened, Git-backed platform for running private application stacks. It handles the full server lifecycle — cloud provisioning, admin-user bootstrap, OS hardening, Docker/UFW networking, Pangolin-backed ingress, observability, and application stack management — all orchestrated over SSH from a single binary. No local Ansible, OpenSSH, or `ssh-keygen` binaries are required.
