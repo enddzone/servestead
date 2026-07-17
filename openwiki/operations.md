@@ -1,3 +1,10 @@
+---
+type: Operations Guide
+title: Servestead Operations
+description: Operational reference for Servestead continuous integration, release automation, dependency updates, linting, vulnerability scanning, SonarCloud analysis, documentation deployment, and container publishing workflows.
+tags: [servestead, operations, ci-cd, releases, security, documentation]
+---
+
 # Operations
 
 This page covers CI/CD pipelines, release management, linting, security scanning, and the documentation site.
@@ -37,7 +44,7 @@ Runs `googleapis/release-please-action@v5.0.0` with `release-please-config.json`
 **Triggers**: Release published event, manual (with tag input).
 
 **Jobs**:
-1. **Binaries**: checkout at tag → `templ generate` + verify → install Syft → GoReleaser v2.16.0 → attest binary checksums (build provenance)
+1. **Binaries**: checkout at tag → `templ generate` + verify → install Syft v1.48.0 → GoReleaser v2.17.0 → attest binary checksums (build provenance)
 2. **GHCR image**: multi-arch (amd64+arm64) Docker build via `Dockerfile.release` → push to `ghcr.io/<owner>/servestead:<tag>` + `:latest` with SBOM → attest image provenance → Trivy image scan (SARIF upload + fail on HIGH/CRITICAL)
 
 ### openwiki-update.yml — OpenWiki Documentation Refresh
@@ -50,14 +57,14 @@ Checks out the repo (Node.js 22), installs `openwiki` globally via npm, and runs
 
 **Triggers**: Daily cron (10:17), manual.
 
-Runs Renovate bot (`renovatebot/github-action@v46.1.17`) against the repo using `renovate.json` config. Gated to the `enddzone/servestead` repo only. Uses `RENOVATE_TOKEN` secret.
+Runs Renovate bot (`renovatebot/github-action@v46.1.19`) against the repo using `renovate.json` config. Gated to the `enddzone/servestead` repo only. Uses `RENOVATE_TOKEN` secret.
 
 ### security.yml — Security Scanning
 
 **Triggers**: PR, push to main, weekly cron (Mon 10:11), manual.
 
 **Jobs**:
-1. **govulncheck**: Go vulnerability scanner v1.5.0 + frontend asset check
+1. **govulncheck**: Go vulnerability scanner v1.6.0 + frontend asset check
 2. **Dependency review**: PR-only, `dependency-review-action`, fails on high-severity vulnerabilities
 3. **Trivy filesystem scan**: SARIF report upload + fail on HIGH/CRITICAL findings
 

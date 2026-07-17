@@ -1,3 +1,10 @@
+---
+type: Workflow Guide
+title: Servestead Server Lifecycle Workflows
+description: End-to-end Servestead server lifecycle from DigitalOcean provisioning through bootstrap, Ubuntu hardening, Docker and UFW networking, Pangolin proxy deployment, observability, and application stack synchronization over SSH.
+tags: [servestead, workflows, provisioning, hardening, docker, pangolin]
+---
+
 # Server Lifecycle Workflows
 
 Servestead transforms a raw Ubuntu VPS into a fully managed platform through a sequence of stages. Each stage is a set of SSH-executed tasks built from embedded shell scripts and config templates. The stages run in order: **provision → bootstrap → harden → network → proxy → observability → stacks**.
