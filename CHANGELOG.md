@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0](https://github.com/enddzone/servestead/compare/v0.3.0...v0.4.0) (2026-07-17)
+
+
+### Features
+
+* update the docs site to match the new Servestead design ([#49](https://github.com/enddzone/servestead/issues/49)) ([f8c751d](https://github.com/enddzone/servestead/commit/f8c751dfdc1b740370005a9a0b1ebe9ffcd188e0))
+
+
+### Bug Fixes
+
+* remove openwiki's ability to updates it's own workflow ([#60](https://github.com/enddzone/servestead/issues/60)) ([708dd2c](https://github.com/enddzone/servestead/commit/708dd2c85c1ae18d6e1fb3f53336d22b7166a180))
+* resolve security scanning findings ([#47](https://github.com/enddzone/servestead/issues/47)) ([3f807e5](https://github.com/enddzone/servestead/commit/3f807e5be1455256d9394b0069b319ce467056e3))
+
 ## [0.3.0](https://github.com/enddzone/servestead/compare/v0.2.1...v0.3.0) (2026-07-10)
 
 
