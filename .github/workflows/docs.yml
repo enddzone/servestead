@@ -29,7 +29,7 @@ jobs:
       DOCS_SITE_URL: https://docs.servestead.com
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Node
         uses: actions/setup-node@v7.0.0
