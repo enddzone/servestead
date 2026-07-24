@@ -65,17 +65,17 @@ The TUI pattern: **screen-based state machine** where `Update()` dispatches key 
 
 ## Web UI
 
-**`backend/web_ui.go`** (~1,340 lines) and **`backend/web_ops.go`** (~1,290 lines) implement a local web UI for browser-based operations.
+**`backend/web_ui.go`** (~1,350 lines) and **`backend/web_ops.go`** (~1,380 lines) implement a local web UI for browser-based operations.
 
 ### Server lifecycle
-- `runUI()` (`web_ui.go` line 35): Starts a loopback HTTP server (default `127.0.0.1:0` = random port), generates a random URL token for authentication, opens a browser, and blocks until shutdown.
-- `webServer` struct (line 128): Holds `ProfileStore`, `webRunManager`, auth tokens (session + CSRF), draft state, and a `done` channel.
-- `routes()` (line 160): `http.ServeMux` with routes for `/ui` (home/command center), `/setup` (setup start panel), `/setup/*` (start, intent, profile-values, repository, review, run, cancel, retry, credentials), `/ops/profiles` + `/ops/profiles/` (delegated to `web_ops.go`), `/ops/cloud/provision`, `/events/runs/` (SSE), and `/shutdown`. Three shell renderers — `renderShell` (setup), `renderOpsShell` (ops), and `renderAppShell` (shared base) — carry the active section and selected profile across navigation.
-- **Authentication** (line 182): `withAuth()` middleware checks the session cookie and CSRF token for POST requests.
+- `runUI()` (`web_ui.go` line 43): Starts a loopback HTTP server (default `127.0.0.1:0` = random port), generates a random URL token for authentication, opens a browser, and blocks until shutdown.
+- `webServer` struct (line 136): Holds `ProfileStore`, `webRunManager`, auth tokens (session + CSRF), draft state, and a `done` channel.
+- `routes()` (line 168): `http.ServeMux` with routes for `/assets/` (embedded static files), `/ui` (home/command center), `/setup` (setup start panel), `/setup/*` (start, intent, profile-values, repository, review, run, cancel, retry, credentials), `/ops/profiles` + `/ops/profiles/` (delegated to `web_ops.go`), `/ops/cloud/provision`, `/events/runs/` (SSE), and `/shutdown`. Three shell renderers — `renderShell` (setup), `renderOpsShell` (ops), and `renderAppShell` (shared base) — carry the active section and selected profile across navigation.
+- **Authentication** (line 190): `withAuth()` middleware checks the session cookie and CSRF token for POST requests.
 
 ### Real-time updates
-- `webRunManager` (line 1009): Manages async setup runs. `Start()` (line 1030) launches a goroutine, `Cancel()` (line 1058) cancels, `Retry()` (line 1070) retries.
-- `webEventBroker` (line 1233): Pub/sub broker implementing `TaskReporter`. Receives `TaskEvent`s from task execution and forwards them as `webEvent`s to SSE subscribers. `Subscribe()` (line 1291) returns a channel for a specific run ID.
+- `webRunManager` (line 1018): Manages async setup runs. `Start()` (line 1039) launches a goroutine, `Cancel()` (line 1067) cancels, `Retry()` (line 1079) retries.
+- `webEventBroker` (line 1242): Pub/sub broker implementing `TaskReporter`. Receives `TaskEvent`s from task execution and forwards them as `webEvent`s to SSE subscribers. `Subscribe()` (line 1300) returns a channel for a specific run ID.
 
 ### Ops panel — `web_ops.go`
 Handlers for profile management, stack CRUD, GitOps (commit/review/sync), run history/detail, access management (Pangolin credentials, GitHub tokens), and cloud actions (restart/destroy/provision). Route dispatch uses URL path splitting — `handleOpsProfile` (line 34) splits path segments and dispatches to sub-handlers.

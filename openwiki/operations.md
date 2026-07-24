@@ -51,7 +51,7 @@ Runs `googleapis/release-please-action@v5.0.0` with `release-please-config.json`
 
 **Triggers**: Daily cron (08:00 UTC), manual.
 
-Checks out the repo (Node.js 22), installs `openwiki` globally via npm, and runs `openwiki code --update --print` with an OpenRouter-backed model (`z-ai/glm-5.2`). Creates a pull request via `peter-evans/create-pull-request@v7` that includes `openwiki/`, `AGENTS.md`, `CLAUDE.md`, and the workflow file itself. LangSmith tracing is enabled.
+Checks out the repo (Node.js 24), installs `openwiki` globally via npm, and runs `openwiki code --update --print` with a Fireworks-backed model (`accounts/fireworks/models/glm-5p2`). Creates a pull request via `peter-evans/create-pull-request@v8` that includes `openwiki/` and `AGENTS.md`. LangSmith tracing is enabled.
 
 ### renovate.yml — Dependency Updates
 
@@ -88,10 +88,10 @@ Per `AGENTS.md`, always run `golangci-lint` after making changes, in addition to
 
 **Config files**:
 - `release-please-config.json`: Go release type, package "servestead", changelog at `CHANGELOG.md`
-- `.release-please-manifest.json`: Current version `0.2.1`
+- `.release-please-manifest.json`: Current version `0.4.0`
 - `.goreleaser.yaml`: Build config, archive templates, checksums, SBOMs
 
-**Current version**: 0.2.1 (from `CHANGELOG.md`)
+**Current version**: 0.4.0 (from `CHANGELOG.md`)
 
 ## Renovate Configuration
 
@@ -117,8 +117,8 @@ Per `AGENTS.md`, always run `golangci-lint` after making changes, in addition to
 
 **Structure** (`docs/src/content/docs/`):
 - `getting-started/` — overview, prerequisites, build, existing-VPS, provision-VPS
-- `guides/` — guided setup, DNS & proxy, observability, add stack
-- `reference/` — commands, security model
+- `guides/` — guided setup, DNS & proxy, observability, add stack, access & secrets, command center, GitOps, profiles & diagnostics
+- `reference/` — commands, security model, terminal UI
 - `troubleshooting/` — common issues
 
 **Config** (`docs/astro.config.mjs`):

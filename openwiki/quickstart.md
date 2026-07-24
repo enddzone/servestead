@@ -7,7 +7,7 @@ tags: [servestead, quickstart, cli, vps, docker, pangolin]
 
 # Servestead — OpenWiki Quickstart
 
-Servestead is a local Go CLI for turning a raw Ubuntu VPS into a hardened, Git-backed platform for running private application stacks. It handles the full server lifecycle — cloud provisioning, admin-user bootstrap, OS hardening, Docker/UFW networking, Pangolin-backed ingress, observability, and application stack management — all orchestrated over SSH from a single binary. No local Ansible, OpenSSH, or `ssh-keygen` binaries are required.
+Servestead is a local Go CLI and control plane for turning a raw Ubuntu VPS into a hardened, Git-backed platform for running private application stacks. It handles the full server lifecycle — cloud provisioning, admin-user bootstrap, OS hardening, Docker/UFW networking, Pangolin-backed ingress, observability, and application stack management — all orchestrated over SSH from a single binary. The recommended interface is the local web UI (`servestead ui`); a full-screen terminal UI and direct commands remain available for automation and guided provisioning. No local Ansible, OpenSSH, or `ssh-keygen` binaries are required.
 
 ## What Servestead Does
 
@@ -21,12 +21,12 @@ Servestead is a local Go CLI for turning a raw Ubuntu VPS into a hardened, Git-b
 | **Observability** | Deploys Beszel (metrics), Dozzle (logs), and Dockhand (container management) behind Pangolin SSO. |
 | **Application stacks** | Imports Docker Compose files, generates Pangolin route labels, manages SOPS/age-encrypted secrets, deploys via Dockhand. |
 | **Config repository** | Git-backed configuration per profile — local, existing checkout, or GitHub clone. Observability Compose and stack definitions are consumer-owned and committed. |
-| **TUI & Web UI** | Full-screen Bubble Tea terminal UI for interactive setup and stack management; local web UI (templ + htmx) for browser-based operations. |
+| **TUI & Web UI** | Local web UI (templ + htmx) is the recommended interface for setup, profiles, GitOps, access, and cloud operations. A full-screen Bubble Tea terminal UI provides guided DigitalOcean provisioning and keyboard-driven stack management. |
 
 ## Build & Install
 
 ```sh
-go build -o bin/servestead .
+go build -o bin/servestead ./backend
 ```
 
 Requires Go 1.26.5+. The binary entry point is `backend/main.go`; GoReleaser builds for linux/darwin/windows × amd64/arm64.
@@ -34,9 +34,10 @@ Requires Go 1.26.5+. The binary entry point is `backend/main.go`; GoReleaser bui
 ### From source (development)
 
 ```sh
-go build -o bin/servestead .
-bin/servestead doctor          # preflight check
-bin/servestead setup           # interactive TUI
+go build -o bin/servestead ./backend
+bin/servestead ui                        # local web UI (recommended)
+bin/servestead doctor                    # preflight check
+bin/servestead setup                     # interactive TUI
 bin/servestead setup --ip 203.0.113.10   # guided setup on existing VPS
 ```
 
@@ -61,8 +62,8 @@ cd docs && npm run build                 # static build for GitHub Pages
 
 | Command | Purpose |
 |---|---|
-| `setup` | Interactive TUI or `--ip` guided setup — the recommended entry point |
-| `ui` | Local web UI (loopback HTTP server with browser auto-open) |
+| `ui` | Local web UI (loopback HTTP server with browser auto-open) — recommended entry point |
+| `setup` | Interactive TUI or `--ip` guided setup |
 | `provision` | Create a DigitalOcean Droplet directly (billable) |
 | `keygen` | Generate an ED25519 keypair for provider login |
 | `bootstrap` | Create the admin user on a raw VPS |
