@@ -15,7 +15,7 @@ jobs:
     if: github.repository == 'enddzone/servestead'
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Require Renovate token
         env:
@@ -23,7 +23,7 @@ jobs:
         run: test -n "$RENOVATE_TOKEN"
 
       - name: Run Renovate
-        uses: renovatebot/github-action@v46.1.19
+        uses: renovatebot/github-action@v46.1.20
         with:
           configurationFile: renovate.json
           token: ${{ secrets.RENOVATE_TOKEN }}
