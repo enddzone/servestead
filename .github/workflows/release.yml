@@ -19,7 +19,7 @@ permissions:
 
 env:
   GORELEASER_VERSION: v2.17.0
-  SYFT_VERSION: v1.48.0
+  SYFT_VERSION: v1.49.0
   TRIVY_VERSION: v0.72.0
 
 jobs:
