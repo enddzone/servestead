@@ -75,7 +75,7 @@ Per `AGENTS.md`, always run `golangci-lint` after making changes:
 
 ```sh
 golangci-lint fmt        # format check
-golangci-lint lint       # lint check
+golangci-lint run        # lint check
 go vet ./backend/...     # go vet
 ```
 
