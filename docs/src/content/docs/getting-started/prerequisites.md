@@ -6,7 +6,7 @@ description: Prepare the local machine, Ubuntu server, SSH key, domain, and prov
 Complete this checklist before starting a reviewed setup run.
 
 <ul class="checklist">
-  <li>A local machine with Go 1.26.5 or newer when building from source.</li>
+  <li>A local machine with Go 1.26.8 or newer when building from source.</li>
   <li>A fresh Ubuntu 22.04 or newer VPS. Ubuntu 24.04 is the default DigitalOcean image.</li>
   <li>The server's public IPv4 address or hostname.</li>
   <li>An ED25519 SSH key pair with access to the server.</li>

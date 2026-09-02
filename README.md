@@ -4,7 +4,7 @@ Servestead, the Server Homestead, is a terminal application for turning a raw Ub
 
 ## Prerequisites
 
-- Go 1.26.5 or newer to build the CLI
+- Go 1.26.8 or newer to build the CLI
 - A DigitalOcean API token when provisioning from Servestead
 - A local ED25519 key pair for administrative access
 
