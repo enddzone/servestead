@@ -17,6 +17,7 @@ import (
 
 	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 )
 
@@ -28,6 +29,7 @@ const (
 	showCursor        = "\x1b[?25h"
 	ptyFilterHelper   = "SERVESTEAD_PTY_FILTER_HELPER"
 	ptyFilterCtrlC    = "SERVESTEAD_PTY_FILTER_CTRL_C"
+	ptyFilterQuery    = "z"
 	ptyRunResult      = "SERVESTEAD_PTY_RUN_RESULT"
 	ptyCloudCancel    = "SERVESTEAD_PTY_CLOUD_CANCEL"
 )
@@ -292,15 +294,7 @@ func TestProvisionFilterNavigationPTY(t *testing.T) {
 	waited := false
 	t.Cleanup(func() { cleanupPTYSession(command, terminal, cancel, readerDone, waited) })
 
-	if !capture.waitFor("Choose a region", 5*time.Second) {
-		t.Fatalf("provision region list did not render:\n%q", capture.String())
-	}
-	if _, err := terminal.WriteString("/ny"); err != nil {
-		t.Fatalf("type provisioning filter: %v", err)
-	}
-	if !capture.waitFor("Filter: ny", 5*time.Second) {
-		t.Fatalf("real PTY did not decode filter input:\n%q", capture.String())
-	}
+	enterPTYProvisionFilter(t, terminal, capture)
 	if _, err := terminal.Write([]byte{27}); err != nil {
 		t.Fatalf("clear provisioning filter: %v", err)
 	}
@@ -338,9 +332,19 @@ func TestProvisionFilterNavigationPTYHelper(t *testing.T) {
 		provisionListItem{index: 0, title: "New York", description: "nyc3"},
 		provisionListItem{index: 1, title: "Amsterdam", description: "ams3"},
 	})
-	finalModel, err := tea.NewProgram(model, tea.WithWindowSize(80, 24)).Run()
+	filterObserved := false
+	observeFilter := tea.WithFilter(func(current tea.Model, msg tea.Msg) tea.Msg {
+		if current, ok := current.(digitalOceanProvisionModel); ok && current.regionList.FilterState() == list.Filtering && current.regionList.FilterValue() == ptyFilterQuery {
+			filterObserved = true
+		}
+		return msg
+	})
+	finalModel, err := tea.NewProgram(model, tea.WithWindowSize(80, 24), observeFilter).Run()
 	if err != nil {
 		t.Fatalf("run provisioning PTY helper: %v", err)
+	}
+	if !filterObserved {
+		t.Fatal("real PTY did not decode the exact filter value before Esc cleared it")
 	}
 	result, ok := finalModel.(digitalOceanProvisionModel)
 	if !ok || !result.returnToSetup || result.cancelled || result.screen != provisionScreenInput || result.regionList.FilterState() == list.Filtering {
@@ -370,15 +374,7 @@ func TestProvisionFilterCtrlCPTY(t *testing.T) {
 	waited := false
 	t.Cleanup(func() { cleanupPTYSession(command, terminal, cancel, readerDone, waited) })
 
-	if !capture.waitFor("Choose a region", 5*time.Second) {
-		t.Fatalf("provision region list did not render:\n%q", capture.String())
-	}
-	if _, err := terminal.WriteString("/ny"); err != nil {
-		t.Fatalf("type provisioning filter: %v", err)
-	}
-	if !capture.waitFor("Filter: ny", 5*time.Second) {
-		t.Fatalf("real PTY did not decode filter input:\n%q", capture.String())
-	}
+	enterPTYProvisionFilter(t, terminal, capture)
 	if _, err := terminal.Write([]byte{3}); err != nil {
 		t.Fatalf("cancel provisioning while filtering: %v", err)
 	}
@@ -411,8 +407,31 @@ func TestProvisionFilterCtrlCPTYHelper(t *testing.T) {
 		t.Fatalf("run provisioning filter PTY helper: %v", err)
 	}
 	result, ok := finalModel.(digitalOceanProvisionModel)
-	if !ok || !result.cancelled || result.screen != provisionScreenRegion {
+	if !ok || !result.cancelled || result.screen != provisionScreenRegion || result.regionList.FilterValue() != ptyFilterQuery {
 		t.Fatalf("unexpected provisioning filter helper result: %#v", finalModel)
+	}
+}
+
+func enterPTYProvisionFilter(t *testing.T, terminal *os.File, capture *ptyCapture) {
+	t.Helper()
+	if !capture.waitFor("Choose a region", 5*time.Second) {
+		t.Fatalf("provision region list did not render:\n%q", capture.String())
+	}
+	offset := capture.Len()
+	if _, err := terminal.WriteString("/"); err != nil {
+		t.Fatalf("activate provisioning filter: %v", err)
+	}
+	if !capture.waitForAfter("Filter:", offset, 5*time.Second) {
+		t.Fatalf("provision filter prompt did not render:\n%q", capture.String())
+	}
+	// The renderer can paint the prompt and input separately. Use one character
+	// absent from the region fixtures so a list redraw cannot satisfy this wait.
+	offset = capture.Len()
+	if _, err := terminal.WriteString(ptyFilterQuery); err != nil {
+		t.Fatalf("type provisioning filter: %v", err)
+	}
+	if !capture.waitForAfter(ptyFilterQuery, offset, 5*time.Second) {
+		t.Fatalf("real PTY did not render filter input:\n%q", capture.String())
 	}
 }
 
@@ -463,10 +482,14 @@ func assertPTYStoreEmpty(t *testing.T, configRoot string) {
 func buildServesteadPTYBinary(t *testing.T) string {
 	t.Helper()
 	binary := filepath.Join(t.TempDir(), "servestead")
-	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	// A race-enabled test run may not have cached the normal, trimpath build.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
 	command := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", binary, ".")
 	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("build real servestead binary timed out: %v\n%s", ctx.Err(), output)
+	}
 	if err != nil {
 		t.Fatalf("build real servestead binary: %v\n%s", err, output)
 	}
@@ -786,7 +809,7 @@ func (capture *ptyCapture) waitForAfter(expected string, offset int, timeout tim
 		if offset < 0 {
 			offset = 0
 		}
-		if offset <= len(output) && strings.Contains(output[offset:], expected) {
+		if offset <= len(output) && strings.Contains(ansi.Strip(output[offset:]), expected) {
 			return true
 		}
 		select {
@@ -794,5 +817,34 @@ func (capture *ptyCapture) waitForAfter(expected string, offset int, timeout tim
 		case <-timer.C:
 			return false
 		}
+	}
+}
+
+func TestPTYCaptureWaitForStyledText(t *testing.T) {
+	capture := newPTYCapture()
+	const output = "\x1b[37mFilter: \x1b[mny\x1b[37;7m \x1b[m"
+	_, _ = capture.Write([]byte(output))
+	if !capture.waitFor("Filter: ny", time.Second) {
+		t.Fatalf("text wait did not ignore terminal styling: %q", capture.String())
+	}
+	if capture.String() != output {
+		t.Fatal("text wait changed the raw output used for terminal lifecycle assertions")
+	}
+}
+
+func TestPTYCaptureWaitForAfterUsesRawOffset(t *testing.T) {
+	capture := newPTYCapture()
+	_, _ = capture.Write([]byte("\x1b[37mFilter: \x1b[mny\n"))
+	offset := capture.Len()
+	_, _ = capture.Write([]byte("\x1b[37mChoose a region\x1b[m\n"))
+	if capture.waitForAfter("Filter: ny", offset, 10*time.Millisecond) {
+		t.Fatal("text wait matched output from before the raw capture offset")
+	}
+	_, _ = capture.Write([]byte("\x1b[37mFilter: \x1b["))
+	go func() {
+		_, _ = capture.Write([]byte("mny\x1b[m"))
+	}()
+	if !capture.waitForAfter("Filter: ny", offset, time.Second) {
+		t.Fatalf("text wait did not match styled output split across writes: %q", capture.String())
 	}
 }
