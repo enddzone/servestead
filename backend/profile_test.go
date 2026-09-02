@@ -15,6 +15,27 @@ import (
 
 const profileTestHost = "203.0.113.10"
 
+func TestDefaultProfileStoreUsesServesteadConfigDir(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(servesteadConfigDirEnv, root)
+
+	store, err := newDefaultProfileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileStore, ok := store.(*fileProfileStore)
+	if !ok {
+		t.Fatalf("unexpected profile store type: %T", store)
+	}
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileStore.root != absoluteRoot || !fileStore.defaultRoot {
+		t.Fatalf("unexpected default profile root: %+v", fileStore)
+	}
+}
+
 func TestProfileStoreCreatesPrivateProfileFiles(t *testing.T) {
 	store := newFileProfileStore(t.TempDir())
 	profile := createTestProfileWithSecrets(t, store)

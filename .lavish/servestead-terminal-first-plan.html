@@ -1,0 +1,1045 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Servestead terminal-first reversal plan</title>
+  <style>
+    :root {
+      --crust: #11111b;
+      --mantle: #181825;
+      --base: #1e1e2e;
+      --surface-0: #313244;
+      --surface-1: #45475a;
+      --surface-2: #585b70;
+      --overlay-0: #6c7086;
+      --subtext-0: #a6adc8;
+      --subtext-1: #bac2de;
+      --text: #cdd6f4;
+      --rosewater: #f5e0dc;
+      --mauve: #cba6f7;
+      --lavender: #b4befe;
+      --blue: #89b4fa;
+      --sky: #89dceb;
+      --teal: #94e2d5;
+      --green: #a6e3a1;
+      --yellow: #f9e2af;
+      --peach: #fab387;
+      --red: #f38ba8;
+      --border: rgba(205, 214, 244, 0.14);
+      --border-strong: rgba(205, 214, 244, 0.28);
+      --shadow: 0 20px 70px rgba(0, 0, 0, 0.34);
+      color-scheme: dark;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 12% 0%, rgba(203, 166, 247, 0.16), transparent 32rem),
+        radial-gradient(circle at 92% 18%, rgba(137, 220, 235, 0.10), transparent 28rem),
+        linear-gradient(180deg, var(--crust) 0%, var(--mantle) 48%, var(--crust) 100%);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    :where(main, section, article, nav, header, footer, div, table, pre, code) { min-width: 0; }
+    :where(p, li, dd, td, th, h1, h2, h3, h4, code, .badge) { overflow-wrap: anywhere; }
+    a { color: var(--sky); }
+    code, pre, .mono {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }
+    code {
+      border: 1px solid rgba(205, 214, 244, 0.11);
+      border-radius: 0.42rem;
+      background: rgba(17, 17, 27, 0.78);
+      color: var(--rosewater);
+      padding: 0.08rem 0.35rem;
+      font-size: 0.88em;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 17rem minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    .rail {
+      position: sticky;
+      top: 0;
+      align-self: start;
+      height: 100vh;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      background: rgba(24, 24, 37, 0.88);
+      backdrop-filter: blur(18px);
+      padding: 1.35rem 1rem;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.8rem;
+      margin-bottom: 1.45rem;
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 900;
+      letter-spacing: -0.02em;
+    }
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 2.45rem;
+      height: 2.45rem;
+      flex: 0 0 auto;
+      border-radius: 0.75rem;
+      background: linear-gradient(135deg, var(--mauve), #f5c2e7);
+      color: var(--crust);
+      box-shadow: 0 10px 26px rgba(203, 166, 247, 0.24);
+      font-weight: 950;
+    }
+    .rail-meta {
+      margin: -0.75rem 0 1.15rem 3.25rem;
+      color: var(--overlay-0);
+      font-size: 0.75rem;
+    }
+    .rail nav { display: grid; gap: 0.35rem; }
+    .rail nav a {
+      display: block;
+      border: 1px solid transparent;
+      border-radius: 0.7rem;
+      padding: 0.58rem 0.68rem;
+      color: var(--subtext-1);
+      text-decoration: none;
+      font-size: 0.88rem;
+    }
+    .rail nav a:hover,
+    .rail nav a:focus-visible {
+      border-color: var(--border);
+      background: rgba(69, 71, 90, 0.48);
+      color: var(--text);
+      outline: none;
+    }
+    .rail-note {
+      margin-top: 1.4rem;
+      border: 1px solid rgba(166, 227, 161, 0.26);
+      border-radius: 0.8rem;
+      background: rgba(166, 227, 161, 0.08);
+      padding: 0.8rem;
+      color: var(--subtext-1);
+      font-size: 0.78rem;
+    }
+
+    main {
+      width: 100%;
+      max-width: 92rem;
+      margin: 0 auto;
+      padding: clamp(1.1rem, 3vw, 2.6rem);
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid rgba(203, 166, 247, 0.28);
+      border-radius: 1.3rem;
+      background: linear-gradient(145deg, rgba(49, 50, 68, 0.85), rgba(30, 30, 46, 0.93));
+      box-shadow: var(--shadow);
+      padding: clamp(1.4rem, 4vw, 3.1rem);
+    }
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto 0 0 auto;
+      width: 25rem;
+      height: 25rem;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(137, 220, 235, 0.13), transparent 68%);
+      pointer-events: none;
+    }
+    .eyebrow {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.55rem;
+      margin: 0 0 1rem;
+      color: var(--lavender);
+      font-size: 0.78rem;
+      font-weight: 850;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      max-width: 100%;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      background: rgba(17, 17, 27, 0.6);
+      padding: 0.22rem 0.56rem;
+      color: var(--subtext-1);
+      font-size: 0.7rem;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+    }
+    .badge.green { border-color: rgba(166, 227, 161, 0.34); color: var(--green); }
+    .badge.yellow { border-color: rgba(249, 226, 175, 0.34); color: var(--yellow); }
+    .badge.red { border-color: rgba(243, 139, 168, 0.38); color: var(--red); }
+    .badge.blue { border-color: rgba(137, 180, 250, 0.38); color: var(--blue); }
+    .badge.mauve { border-color: rgba(203, 166, 247, 0.4); color: var(--mauve); }
+
+    h1, h2, h3, h4 { line-height: 1.15; letter-spacing: -0.025em; }
+    h1 {
+      max-width: 18ch;
+      margin: 0;
+      color: var(--rosewater);
+      font-size: clamp(2.25rem, 6vw, 5rem);
+    }
+    .hero .lede {
+      max-width: 70rem;
+      margin: 1.15rem 0 0;
+      color: var(--subtext-1);
+      font-size: clamp(1rem, 2vw, 1.25rem);
+    }
+    .decision {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(16rem, 0.7fr);
+      gap: 1rem;
+      margin-top: 1.45rem;
+    }
+    .decision > * { min-width: 0; }
+    .decision-copy,
+    .commitment {
+      border: 1px solid var(--border);
+      border-radius: 0.95rem;
+      background: rgba(17, 17, 27, 0.5);
+      padding: 1rem;
+    }
+    .decision-copy strong { color: var(--green); }
+    .commitment { color: var(--subtext-1); }
+    .commitment span { display: block; color: var(--mauve); font-weight: 850; margin-bottom: 0.25rem; }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.75rem;
+      margin-top: 1.25rem;
+    }
+    .stat {
+      border: 1px solid var(--border);
+      border-radius: 0.85rem;
+      background: rgba(30, 30, 46, 0.66);
+      padding: 0.85rem;
+    }
+    .stat b { display: block; color: var(--sky); font-size: 1.25rem; }
+    .stat span { color: var(--overlay-0); font-size: 0.76rem; }
+
+    section { scroll-margin-top: 1rem; margin-top: 2.15rem; }
+    .section-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: end;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 0.95rem;
+    }
+    .section-head h2 { margin: 0; color: var(--rosewater); font-size: clamp(1.45rem, 3vw, 2.15rem); }
+    .section-head p { max-width: 64rem; margin: 0.3rem 0 0; color: var(--subtext-0); }
+
+    .panel,
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      background: rgba(30, 30, 46, 0.82);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.17);
+    }
+    .panel { padding: clamp(1rem, 2vw, 1.35rem); }
+    .card { padding: 1rem; }
+
+    .comparison {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.9rem;
+    }
+    .comparison .card h3 { margin: 0 0 0.6rem; }
+    .comparison .today { border-color: rgba(243, 139, 168, 0.25); }
+    .comparison .target { border-color: rgba(166, 227, 161, 0.28); }
+    .comparison ul { margin: 0; padding-left: 1.2rem; color: var(--subtext-1); }
+    .comparison li + li { margin-top: 0.45rem; }
+
+    .diagram-wrap {
+      overflow-x: auto;
+      border-radius: 0.9rem;
+      background: rgba(17, 17, 27, 0.52);
+      padding: 1rem;
+    }
+    .mermaid { min-width: 44rem; }
+
+    .table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 0.95rem;
+      background: rgba(30, 30, 46, 0.8);
+    }
+    table { width: 100%; border-collapse: collapse; min-width: 48rem; }
+    th, td { padding: 0.78rem 0.82rem; border-bottom: 1px solid var(--border); vertical-align: top; text-align: left; }
+    th {
+      position: sticky;
+      top: 0;
+      background: var(--surface-0);
+      color: var(--lavender);
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: rgba(69, 71, 90, 0.22); }
+    td { color: var(--subtext-1); }
+    td:first-child { color: var(--text); font-weight: 750; }
+
+    .alert {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 0.9rem;
+      border: 1px solid rgba(243, 139, 168, 0.35);
+      border-radius: 1rem;
+      background: rgba(243, 139, 168, 0.08);
+      padding: 1.05rem;
+    }
+    .alert-mark {
+      display: grid;
+      place-items: center;
+      width: 2.1rem;
+      height: 2.1rem;
+      border-radius: 0.65rem;
+      background: rgba(243, 139, 168, 0.16);
+      color: var(--red);
+      font-weight: 950;
+    }
+    .alert h3 { margin: 0 0 0.5rem; color: var(--red); }
+    .alert p { margin: 0; color: var(--subtext-1); }
+    .risk-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.7rem;
+      margin-top: 0.9rem;
+    }
+    .risk {
+      border-left: 3px solid var(--red);
+      border-radius: 0.3rem 0.7rem 0.7rem 0.3rem;
+      background: rgba(17, 17, 27, 0.46);
+      padding: 0.75rem 0.85rem;
+    }
+    .risk strong { display: block; color: var(--rosewater); margin-bottom: 0.2rem; }
+    .risk span { color: var(--subtext-0); font-size: 0.88rem; }
+
+    .phases { display: grid; gap: 0.85rem; }
+    .phase {
+      display: grid;
+      grid-template-columns: 3.6rem minmax(0, 1.05fr) minmax(16rem, 0.78fr);
+      gap: 1rem;
+      align-items: start;
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      background: rgba(30, 30, 46, 0.82);
+      padding: 1rem;
+    }
+    .phase-number {
+      display: grid;
+      place-items: center;
+      width: 3.25rem;
+      height: 3.25rem;
+      border: 1px solid rgba(203, 166, 247, 0.38);
+      border-radius: 0.9rem;
+      background: rgba(203, 166, 247, 0.11);
+      color: var(--mauve);
+      font-size: 1.2rem;
+      font-weight: 950;
+    }
+    .phase h3 { margin: 0.1rem 0 0.35rem; color: var(--text); font-size: 1.12rem; }
+    .phase p { margin: 0; color: var(--subtext-0); }
+    .phase ul { margin: 0.7rem 0 0; padding-left: 1.18rem; color: var(--subtext-1); }
+    .phase li + li { margin-top: 0.3rem; }
+    .verify {
+      border: 1px solid rgba(166, 227, 161, 0.22);
+      border-radius: 0.8rem;
+      background: rgba(166, 227, 161, 0.06);
+      padding: 0.8rem;
+      color: var(--subtext-1);
+      font-size: 0.88rem;
+    }
+    .verify strong { display: block; margin-bottom: 0.32rem; color: var(--green); }
+
+    .polish-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.8rem;
+    }
+    .polish-grid .card h3 { margin: 0.1rem 0 0.45rem; color: var(--lavender); }
+    .polish-grid .card p { margin: 0; color: var(--subtext-0); }
+    .polish-grid .card ul { margin: 0.65rem 0 0; padding-left: 1.15rem; color: var(--subtext-1); }
+
+    .test-lanes {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.8rem;
+    }
+    .test-lane { border-top: 3px solid var(--blue); }
+    .test-lane:nth-child(2) { border-top-color: var(--yellow); }
+    .test-lane:nth-child(3) { border-top-color: var(--red); }
+    .test-lane h3 { margin: 0.05rem 0 0.5rem; }
+    .test-lane p { margin: 0; color: var(--subtext-0); }
+    .test-lane ul { margin: 0.65rem 0 0; padding-left: 1.15rem; color: var(--subtext-1); }
+
+    pre {
+      margin: 0;
+      max-width: 100%;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 0.9rem;
+      background: #0d0d15;
+      color: var(--text);
+      padding: 1rem;
+      font-size: 0.78rem;
+      line-height: 1.6;
+      white-space: pre;
+    }
+    pre .prompt { color: var(--green); }
+    pre .comment { color: var(--overlay-0); }
+
+    .checklist {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.6rem;
+    }
+    .check {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 0.65rem;
+      align-items: start;
+      border: 1px solid var(--border);
+      border-radius: 0.8rem;
+      background: rgba(30, 30, 46, 0.7);
+      padding: 0.78rem;
+      color: var(--subtext-1);
+    }
+    .check-mark { color: var(--green); font-weight: 950; }
+
+    details {
+      border: 1px solid var(--border);
+      border-radius: 0.85rem;
+      background: rgba(30, 30, 46, 0.66);
+      padding: 0.85rem 1rem;
+    }
+    details + details { margin-top: 0.65rem; }
+    summary { cursor: pointer; color: var(--lavender); font-weight: 800; }
+    details p, details ul { color: var(--subtext-1); }
+
+    footer {
+      margin: 2.2rem 0 0;
+      border-top: 1px solid var(--border);
+      padding: 1.2rem 0 0;
+      color: var(--overlay-0);
+      font-size: 0.82rem;
+    }
+
+    @media (max-width: 72rem) {
+      .shell { grid-template-columns: 1fr; }
+      .rail {
+        position: static;
+        width: 100%;
+        height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+      }
+      .rail nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .rail-note, .rail-meta { display: none; }
+      .phase { grid-template-columns: 3.6rem minmax(0, 1fr); }
+      .phase .verify { grid-column: 2; }
+      .test-lanes { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 48rem) {
+      main { padding: 0.8rem; }
+      .rail nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .decision,
+      .comparison,
+      .risk-grid,
+      .polish-grid,
+      .checklist { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .phase { grid-template-columns: 1fr; }
+      .phase .verify { grid-column: 1; }
+      .mermaid { min-width: 38rem; }
+    }
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({
+      startOnLoad: true,
+      securityLevel: "strict",
+      theme: "base",
+      themeVariables: {
+        background: "#181825",
+        primaryColor: "#313244",
+        primaryTextColor: "#cdd6f4",
+        primaryBorderColor: "#cba6f7",
+        secondaryColor: "#1e1e2e",
+        secondaryTextColor: "#cdd6f4",
+        secondaryBorderColor: "#89dceb",
+        tertiaryColor: "#11111b",
+        tertiaryTextColor: "#bac2de",
+        tertiaryBorderColor: "#585b70",
+        lineColor: "#6c7086",
+        fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
+      }
+    });
+  </script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail">
+      <a class="brand" href="#top">
+        <span class="brand-mark">S</span>
+        <span>Servestead</span>
+      </a>
+      <div class="rail-meta mono">terminal-first plan</div>
+      <nav aria-label="Plan sections">
+        <a href="#decision">Decision</a>
+        <a href="#architecture">Target shape</a>
+        <a href="#scope">Disposition</a>
+        <a href="#safety">Safety first</a>
+        <a href="#phases">Implementation</a>
+        <a href="#polish">TUI polish</a>
+        <a href="#testing">Test run</a>
+        <a href="#done">Done means</a>
+      </nav>
+      <div class="rail-note">
+        This is a review artifact. No application code has been removed. Annotate a phase or file row in Lavish to change the plan before implementation.
+      </div>
+    </aside>
+
+    <main id="top">
+      <header class="hero">
+        <div class="eyebrow">
+          <span>Reversal plan</span>
+          <span class="badge green">upstream synced</span>
+          <span class="badge blue mono">origin/main @ 4dbd064</span>
+          <span class="badge mauve">v0.4.0</span>
+        </div>
+        <h1>Make the terminal the product again.</h1>
+        <p class="lede">
+          Retire Servestead's local browser interface, keep the CLI and shared server logic, repair the TUI's unsafe edges, preserve persisted run history in the terminal, then run a real terminal test at several sizes. Live VPS and DigitalOcean actions remain separate approval gates.
+        </p>
+        <div class="decision">
+          <div class="decision-copy">
+            <strong>Recommended course:</strong> protect the TUI first, port the one browser-only capability worth keeping, delete the web adapter, then polish and verify. The browser code is isolated enough that we do not need a blanket Git revert.
+          </div>
+          <div class="commitment">
+            <span>Plan status</span>
+            No implementation changes yet. The only new workspace file is this Lavish plan.
+          </div>
+        </div>
+        <div class="stats" aria-label="Audit summary">
+          <div class="stat"><b>16.7k</b><span>approximate browser Go, templ, CSS, and JS lines to retire</span></div>
+          <div class="stat"><b>1.37 MB</b><span>binary reduction measured in a disposable removal experiment</span></div>
+          <div class="stat"><b>22 + 9</b><span>profile/setup and provisioning TUI screens already present</span></div>
+          <div class="stat"><b>0</b><span>PTY or black-box terminal tests in the current repository</span></div>
+        </div>
+      </header>
+
+      <section id="decision">
+        <div class="section-head">
+          <div>
+            <h2>The course change</h2>
+            <p>The TUI already covers the important workflows. The local browser mostly duplicates them and adds build, security, documentation, and maintenance work.</p>
+          </div>
+        </div>
+        <div class="comparison">
+          <article class="card today">
+            <span class="badge red">Today</span>
+            <h3>Two local interfaces</h3>
+            <ul>
+              <li><code>servestead ui</code> runs HTTP, auth, CSRF, htmx, SSE, and browser launch code.</li>
+              <li><code>servestead setup</code> already handles setup, stacks, Git actions, secrets, cloud actions, progress, and retries.</li>
+              <li>Docs call the browser the default even though provisioning is safer and richer in the terminal.</li>
+              <li>TUI tests drive models directly, but no test runs a full Bubble Tea program or a real terminal.</li>
+            </ul>
+          </article>
+          <article class="card target">
+            <span class="badge green">Target</span>
+            <h3>One interactive interface</h3>
+            <ul>
+              <li><code>servestead setup</code> is the primary interactive command.</li>
+              <li>Direct CLI commands remain available for scripts and recovery.</li>
+              <li>The Astro site remains documentation only. Pangolin, Beszel, Dozzle, and Dockhand remain managed remote services.</li>
+              <li>Program tests, view checks, and one PTY smoke test cover the terminal behavior before live infrastructure is touched.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section id="architecture">
+        <div class="section-head">
+          <div>
+            <h2>Target shape</h2>
+            <p>The change removes the local browser adapter. It does not replace or rewrite the server lifecycle.</p>
+          </div>
+        </div>
+        <div class="panel diagram-wrap">
+          <pre class="mermaid">
+flowchart TD
+  User["Operator"] --> Setup["servestead setup"]
+  User --> Direct["Direct CLI commands"]
+  Setup --> TUI["Bubble Tea terminal UI"]
+  TUI --> Core["Shared setup and operations code"]
+  Direct --> Core
+  Core --> Store["Profiles, secrets, state, JSONL logs"]
+  Core --> Cloud["DigitalOcean provider"]
+  Core --> Remote["SSH tasks, GitOps, stacks"]
+  Docs["Astro documentation site"] -. "documents" .-> Setup
+  Browser["Retire: ui command, HTTP, templ, htmx, SSE"] -. "currently wraps" .-> Core
+
+  classDef primary fill:#313244,stroke:#cba6f7,color:#cdd6f4,stroke-width:2px;
+  classDef keep fill:#1e1e2e,stroke:#89dceb,color:#cdd6f4;
+  classDef retired fill:#2b1d2a,stroke:#f38ba8,color:#f5e0dc,stroke-dasharray:5 4;
+  class Setup,TUI primary;
+  class Core,Store,Cloud,Remote,Direct,Docs keep;
+  class Browser retired;
+          </pre>
+        </div>
+      </section>
+
+      <section id="scope">
+        <div class="section-head">
+          <div>
+            <h2>Keep, port, remove, rewrite</h2>
+            <p>A disposable copy passed <code>go test ./...</code> after the browser files were deleted, one CLI assertion was updated, and modules were tidied. The boundary is clean.</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Disposition</th><th>Exact pieces</th><th>Reason and acceptance</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="badge green">Keep</span></td>
+                <td><code>backend/setup.go</code>, <code>tasks.go</code>, <code>profile.go</code>, <code>stack.go</code>, <code>profile_cloud.go</code>, provider code, SSH code, resources, secret commands</td>
+                <td>These are the shared product and TUI paths. Profile formats, run state, remote tasks, stack behavior, and direct commands must remain compatible.</td>
+              </tr>
+              <tr>
+                <td><span class="badge yellow">Port first</span></td>
+                <td>Persisted run list, JSONL parsing, log detail, and secret masking now buried in <code>backend/web_ops.go</code></td>
+                <td>Move the generic pieces to neutral Go code, add a <code>ProfileStore</code> read method, and give the TUI a compact history/detail screen before deleting the browser implementation.</td>
+              </tr>
+              <tr>
+                <td><span class="badge red">Remove</span></td>
+                <td><code>backend/web_ui.go</code>, <code>backend/web_ops.go</code>, <code>backend/web_ui_test.go</code>, all of <code>frontend/</code>, and the <code>ui</code> command</td>
+                <td>No HTTP server, token auth, CSRF, SSE broker, templ generation, htmx assets, or browser launcher remains in Servestead source.</td>
+              </tr>
+              <tr>
+                <td><span class="badge red">Remove artifacts</span></td>
+                <td>Old web Lavish plan, browser mockup pack, dashboard mockup PNG, and five browser screenshots in <code>docs/</code></td>
+                <td>Git already preserves their history. Replace only the documentation images that still help with captured terminal screens.</td>
+              </tr>
+              <tr>
+                <td><span class="badge blue">Simplify</span></td>
+                <td><code>go.mod</code>, CI, CodeQL, release workflow, security workflow, GoReleaser, release Dockerfile, Sonar exclusions</td>
+                <td>Remove templ and frontend steps. <code>github.com/pkg/browser</code> may remain indirect through SOPS after <code>go mod tidy</code>; the goal is no direct browser code or launcher.</td>
+              </tr>
+              <tr>
+                <td><span class="badge mauve">Rewrite</span></td>
+                <td><code>README.md</code>, docs sidebar, getting-started pages, setup and dashboard guides, command and security references, troubleshooting</td>
+                <td>Make <code>servestead setup</code> the default. Keep useful page slugs to avoid broken inbound links. Do not hand-edit generated <code>openwiki/</code> pages.</td>
+              </tr>
+              <tr>
+                <td><span class="badge">Defer</span></td>
+                <td>A full breakup of the 6,698-line <code>setup.go</code>, browser-style health summaries, and a live billable provisioning test</td>
+                <td>Those changes make this reversal harder to review or require new authority. Extract only the small neutral files needed for history, keymaps, styling, and tests.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="safety">
+        <div class="section-head">
+          <div>
+            <h2>Safety work comes before deletion</h2>
+            <p>The current TUI has real operational hazards. Color and spacing can wait until these are fixed.</p>
+          </div>
+        </div>
+        <div class="alert">
+          <div class="alert-mark">!</div>
+          <div>
+            <h3>Four blockers for a trustworthy terminal test</h3>
+            <p>Each item gets a fake-backed regression test before implementation changes proceed.</p>
+            <div class="risk-grid">
+              <div class="risk">
+                <strong>Cancel does not cancel cloud work</strong>
+                <span>Ctrl+C quits the interface, while provisioning keeps its original context and profile cloud actions use <code>context.Background()</code>.</span>
+              </div>
+              <div class="risk">
+                <strong>A save failure can create a second Droplet</strong>
+                <span>If DigitalOcean creation succeeds but local profile persistence fails, the UI returns to Review. Pressing Enter calls create again.</span>
+              </div>
+              <div class="risk">
+                <strong>Local deletions are too easy</strong>
+                <span>Stack and profile deletion accept one <code>y</code>. They should require the exact name, show the path and effect, block active runs, and keep errors inside the TUI.</span>
+              </div>
+              <div class="risk">
+                <strong>The current macOS test path reads real profiles</strong>
+                <span><code>os.UserConfigDir()</code> ignored temporary <code>XDG_CONFIG_HOME</code> during inspection. Add one Servestead config-root override used by profile and repository defaults.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="phases">
+        <div class="section-head">
+          <div>
+            <h2>Implementation order</h2>
+            <p>Each phase ends with a behavior check and can be reviewed as a focused commit. Web removal waits only for safety guards and run-history preservation.</p>
+          </div>
+        </div>
+        <div class="phases">
+          <article class="phase">
+            <div class="phase-number">0</div>
+            <div>
+              <span class="badge blue">Guardrails</span>
+              <h3>Isolate test data and record the baseline</h3>
+              <p>Make it impossible for program and PTY tests to load real profiles or create real repositories.</p>
+              <ul>
+                <li>Add <code>SERVESTEAD_CONFIG_DIR</code> as the explicit Servestead root. Use the same resolver for profile and default repository paths.</li>
+                <li>Inject <code>ProfileStore</code>, fake providers, and recording remote clients into program-level tests.</li>
+                <li>Add fixed-size view checks and a Unix PTY helper process. Normalize ANSI, paths, IDs, and timestamps.</li>
+                <li>Treat <code>q</code> from navigation as a clean exit, with exit code 0 and no <code>error: setup cancelled</code>.</li>
+              </ul>
+            </div>
+            <div class="verify"><strong>Phase check</strong>A temporary config root starts empty on macOS. Startup, resize, <code>q</code>, Esc, and Ctrl+C restore the alternate screen and cursor without a hang. Existing real profiles never appear.</div>
+          </article>
+
+          <article class="phase">
+            <div class="phase-number">1</div>
+            <div>
+              <span class="badge red">P0 safety</span>
+              <h3>Make asynchronous and destructive actions honest</h3>
+              <p>The UI must do exactly what its status and help text claim.</p>
+              <ul>
+                <li>Give provisioning, cloud actions, Git work, and run commands cancellable child contexts.</li>
+                <li>Keep a Cancelling state visible until the command acknowledges cancellation. Persist <code>cancelled</code>, not <code>failed</code>.</li>
+                <li>Carry the created Droplet ID and IP through a local save failure. Retry persistence only. Never call provider Create twice.</li>
+                <li>Require typed stack and profile names for deletion. Show the exact local path and remote effect. Block profile deletion while a run is active.</li>
+              </ul>
+            </div>
+            <div class="verify"><strong>Phase check</strong>Delayed fakes observe context cancellation. Provider call counts stay at one across save retry. Failed local deletion leaves the user in place with an actionable error.</div>
+          </article>
+
+          <article class="phase">
+            <div class="phase-number">2</div>
+            <div>
+              <span class="badge yellow">Parity</span>
+              <h3>Move persisted run history into the TUI</h3>
+              <p>This is the one meaningful browser-only capability that should survive.</p>
+              <ul>
+                <li>Extract JSONL parsing, secret masking, and run-log loading into neutral backend code.</li>
+                <li>Add a read method to <code>ProfileStore</code>. Do not downcast to <code>*fileProfileStore</code>.</li>
+                <li>Add a compact runs list and detail viewport to the profile TUI. Show status, timestamps, stage error, redacted log text, and the underlying log path.</li>
+                <li>Port only the generic parser and masking tests from the web test file.</li>
+              </ul>
+            </div>
+            <div class="verify"><strong>Phase check</strong>Seeded secrets never appear in frames, terminal output, or history detail. Malformed JSONL lines fail clearly. Existing profile logs remain readable without migration.</div>
+          </article>
+
+          <article class="phase">
+            <div class="phase-number">3</div>
+            <div>
+              <span class="badge red">Removal</span>
+              <h3>Delete the local web interface and its toolchain</h3>
+              <p>Remove the isolated adapter, not the shared product code.</p>
+              <ul>
+                <li>Delete the three backend web files and all of <code>frontend/</code>.</li>
+                <li>Remove <code>servestead ui</code> from usage, dispatch, and CLI tests.</li>
+                <li>Run <code>go mod tidy</code>. Remove the direct templ dependency and tool directive.</li>
+                <li>Remove templ generation, generated diff, and frontend asset checks from CI, CodeQL, release, security, GoReleaser, and the release Dockerfile.</li>
+                <li>Remove old web plans and mockups. Browser documentation screenshots move in Phase 5.</li>
+              </ul>
+            </div>
+            <div class="verify"><strong>Phase check</strong><code>rg</code> finds no imports of <code>servestead/frontend</code>, web symbols, templ commands, or direct browser launcher code. <code>go test ./...</code> and a release build pass.</div>
+          </article>
+
+          <article class="phase">
+            <div class="phase-number">4</div>
+            <div>
+              <span class="badge mauve">Polish</span>
+              <h3>Make the TUI consistent, responsive, and calm under work</h3>
+              <p>Fix interaction and state flow before applying the final visual treatment.</p>
+              <ul>
+                <li>Use one keymap for handling and help. Focused text fields and filter inputs receive printable keys first.</li>
+                <li>Show one footer, with <code>?</code> for expanded help. Remove the nested list help duplication.</li>
+                <li>Move blocking Git and repository work out of <code>Update</code> into typed commands with visible busy states.</li>
+                <li>Make layout dimensions terminal-driven. Keep errors and primary actions visible and add a clear minimum-size screen.</li>
+                <li>Stop forcing logs to the bottom while the user scrolls. Resume follow-tail on End and report queued new lines.</li>
+                <li>Use semantic styles for selected, muted, warning, error, success, and progress states. Keep text labels so color is never the only signal.</li>
+              </ul>
+            </div>
+            <div class="verify"><strong>Phase check</strong>View checks pass at 40x12, 80x24, and 120x40. Printable token characters work. Review help matches behavior. Complete, Failed, and Cancelled runs show the right final state.</div>
+          </article>
+
+          <article class="phase">
+            <div class="phase-number">5</div>
+            <div>
+              <span class="badge blue">Docs and release</span>
+              <h3>Make the terminal workflow the documented default</h3>
+              <p>Keep the docs site. Remove only its browser-first product story.</p>
+              <ul>
+                <li>Rewrite the README, Start Here pages, setup/dashboard guides, command reference, security model, and troubleshooting.</li>
+                <li>Rename the Servestead Web sidebar group to Terminal workflow. Preserve useful slugs and rewrite their content.</li>
+                <li>Replace browser screenshots with polished TUI captures where an image adds value.</li>
+                <li>Add the breaking <code>ui</code> removal to the next changelog entry. Do not rewrite historical releases.</li>
+                <li>Let the scheduled OpenWiki workflow regenerate generated pages after the source lands.</li>
+              </ul>
+            </div>
+            <div class="verify"><strong>Phase check</strong><code>npm ci</code> and <code>npm run build</code> pass in <code>docs/</code>. Source docs contain no instructions to launch <code>servestead ui</code>. Links to remote managed dashboards remain intact.</div>
+          </article>
+
+          <article class="phase">
+            <div class="phase-number">6</div>
+            <div>
+              <span class="badge green">Release gate</span>
+              <h3>Run the complete local TUI and build checks</h3>
+              <p>Run fake-backed automation first, then use the binary in a real terminal with scrubbed credentials and the temporary Servestead config root.</p>
+              <ul>
+                <li>Run format, lint, vet, race, shuffled tests, coverage, build, Compose validation, release Docker, and docs build.</li>
+                <li>Run the PTY test and the manual terminal matrix across startup, profile, setup review, stacks, cloud cancellation, run states, history, resize, and clean exit.</li>
+                <li>Review the final diff for unexpected shared-code removal and run a stale-reference search.</li>
+              </ul>
+            </div>
+            <div class="verify"><strong>Phase check</strong>Every local gate passes, no seeded secret appears, terminal state restores, the worktree contains no browser runtime, and no external provider or SSH endpoint was contacted.</div>
+          </article>
+        </div>
+      </section>
+
+      <section id="polish">
+        <div class="section-head">
+          <div>
+            <h2>What polish means here</h2>
+            <p>This is behavior work with a visual finish, not a theme-only pass.</p>
+          </div>
+        </div>
+        <div class="polish-grid">
+          <article class="card">
+            <span class="badge red">Interaction</span>
+            <h3>Keys and focus</h3>
+            <p>GitHub token fields currently swallow printable <code>e</code>, <code>x</code>, and <code>d</code>. Provisioning lists intercept filter keys. Review claims <code>q</code> quits when it does not.</p>
+            <ul>
+              <li>Component-first input routing</li>
+              <li>Canonical key bindings shared by Update and help</li>
+              <li>Clean quit distinct from operational cancellation</li>
+            </ul>
+          </article>
+          <article class="card">
+            <span class="badge yellow">Layout</span>
+            <h3>Real terminal sizes</h3>
+            <p>Several tables force 78 columns, inputs force 72, and errors can land below the visible body.</p>
+            <ul>
+              <li>Responsive columns and display-width truncation</li>
+              <li>Viewport-backed long screens</li>
+              <li>Minimum-size message below the supported layout</li>
+            </ul>
+          </article>
+          <article class="card">
+            <span class="badge blue">Busy states</span>
+            <h3>No frozen interface</h3>
+            <p>Diff, stage, commit, push, save, repository refresh, preflight, and repository preparation can block before a useful status appears.</p>
+            <ul>
+              <li>Typed command result messages</li>
+              <li>Spinner, operation name, and duplicate-action lock</li>
+              <li>One run timeline beginning before remote SSH</li>
+            </ul>
+          </article>
+          <article class="card">
+            <span class="badge green">Run view</span>
+            <h3>Logs that can be read</h3>
+            <p>New lines currently force the viewport to the bottom, so scrolling cannot hold while output continues.</p>
+            <ul>
+              <li>Follow-tail state with End to resume</li>
+              <li>Queued-line count while paused</li>
+              <li>Current task cleared on terminal states</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section id="testing">
+        <div class="section-head">
+          <div>
+            <h2>The full TUI test run</h2>
+            <p>A full test has three distinct lanes. The first two are mandatory. The live infrastructure lane requires fresh authority and a disposable target.</p>
+          </div>
+        </div>
+        <div class="test-lanes">
+          <article class="card test-lane">
+            <span class="badge blue">Mandatory</span>
+            <h3>Program and model tests</h3>
+            <p>Fast, deterministic, no network.</p>
+            <ul>
+              <li>Existing 74 setup and 17 provisioning tests</li>
+              <li>Full Bubble Tea program input/output tests</li>
+              <li>Fake cloud and recording SSH clients</li>
+              <li>View checks at three terminal sizes</li>
+              <li>Cancellation and duplicate-create regressions</li>
+            </ul>
+          </article>
+          <article class="card test-lane">
+            <span class="badge yellow">Mandatory</span>
+            <h3>Real terminal smoke</h3>
+            <p>Actual key decoding and renderer lifecycle, still no network.</p>
+            <ul>
+              <li>Unix PTY helper process</li>
+              <li>Alternate-screen and cursor restoration</li>
+              <li>Resize, filter, Esc, <code>q</code>, Ctrl+C</li>
+              <li>Temporary <code>SERVESTEAD_CONFIG_DIR</code></li>
+              <li>Provider credentials removed from the environment</li>
+            </ul>
+          </article>
+          <article class="card test-lane">
+            <span class="badge red">Separate approval</span>
+            <h3>Disposable VPS acceptance</h3>
+            <p>Real SSH, Docker, firewall, DNS, and remote services.</p>
+            <ul>
+              <li>Existing disposable Ubuntu 22.04+ VPS preferred</li>
+              <li>ED25519 key plus apex and wildcard DNS</li>
+              <li>Bootstrap, Harden, Platform, rerun, and QA stack</li>
+              <li>DigitalOcean create/restart/destroy is a second explicit gate</li>
+            </ul>
+          </article>
+        </div>
+
+        <div class="section-head" style="margin-top:1.35rem">
+          <div>
+            <h2 style="font-size:1.35rem">Exact local gate</h2>
+            <p>Use the repository-pinned golangci-lint 2.11.4 for parity. The current workstation has 2.12.2, so do not treat a newer local pass as the only lint result.</p>
+          </div>
+        </div>
+        <pre><span class="comment"># Formatting, analysis, and build</span>
+<span class="prompt">$</span> golangci-lint fmt --diff
+<span class="prompt">$</span> golangci-lint run ./...
+<span class="prompt">$</span> gofmt -l .
+<span class="prompt">$</span> go vet ./...
+<span class="prompt">$</span> go build -trimpath -o bin/servestead ./backend
+
+<span class="comment"># Compose model checks must run, not skip</span>
+<span class="prompt">$</span> docker compose version
+<span class="prompt">$</span> go test -count=1 -v ./backend \
+    -run '^(TestRenderedComposeFilesPassDockerComposeValidation|TestGeneratedStackOverridePassesDockerComposeMerge)$'
+
+<span class="comment"># Scrub credentials before all non-live TUI and Go tests</span>
+<span class="prompt">$</span> env -u DIGITALOCEAN_ACCESS_TOKEN \
+    -u DIGITALOCEAN_TOKEN \
+    -u SERVESTEAD_GITHUB_TOKEN \
+    -u PANGOLIN_ADMIN_PASSWORD \
+    -u SERVESTEAD_VERIFY_IMAGE_MANIFESTS \
+    go test -race -shuffle=on -count=1 ./...
+
+<span class="prompt">$</span> go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+<span class="prompt">$</span> go tool cover -func=coverage.out
+
+<span class="comment"># Packaging and documentation changed by the removal</span>
+<span class="prompt">$</span> docker build -f Dockerfile.release .
+<span class="prompt">$</span> cd docs &amp;&amp; npm ci &amp;&amp; npm run build</pre>
+
+        <div class="section-head" style="margin-top:1.35rem">
+          <div>
+            <h2 style="font-size:1.35rem">Manual terminal matrix</h2>
+            <p>Every row uses fake or non-confirmed operations unless the live lane has been approved.</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Path</th><th>What to exercise</th><th>Pass condition</th></tr></thead>
+            <tbody>
+              <tr><td>First launch</td><td>Empty temporary config, picker, help, <code>q</code></td><td>No real profile appears. One help footer. Exit 0. Terminal restored.</td></tr>
+              <tr><td>Saved profile</td><td>Dashboard, edit, advanced, credentials, history</td><td>Keys match help. Address behavior is explicit. Secrets stay masked.</td></tr>
+              <tr><td>Setup review</td><td>New profile values, repository choices, plan review, cancel before run</td><td>No repository or SSH work occurs before confirmation. Cancel leaves no partial profile surprises.</td></tr>
+              <tr><td>Provisioning</td><td>Fake catalog, filter, review, cancellation, create plus save failure</td><td>Typed confirmation required. Cancel reaches fake context. Save retry does not create again.</td></tr>
+              <tr><td>Stacks and Git</td><td>Add, routes, secrets, diff, stage, commit, push, sync, typed delete</td><td>No UI freeze. Busy state names the action. Deletion wording matches local and remote effects.</td></tr>
+              <tr><td>Cloud actions</td><td>Fake restart and destroy, invalid phrase, cancel during delay</td><td>Exact confirmation and one provider call. Context cancellation observed.</td></tr>
+              <tr><td>Run view</td><td>Progress, log scroll, pause follow-tail, cancel, fail, complete</td><td>Final state and persisted run status agree. Current task clears. End resumes follow-tail.</td></tr>
+              <tr><td>Resize</td><td>40x12, 80x24, 120x40, long paths, Unicode</td><td>No horizontal overflow. Tiny size shows a clear guard. Errors and actions remain visible.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <details>
+          <summary>Live disposable VPS acceptance, only after approval</summary>
+          <ul>
+            <li>Use an existing disposable VPS to avoid testing billable provisioning in the same run.</li>
+            <li>Run Bootstrap, Harden, and Platform through the TUI and verify live progress and logs.</li>
+            <li>Reopen Servestead and confirm persisted completion. Rerun the full plan and confirm completed stages skip.</li>
+            <li>Verify Docker, CrowdSec, the firewall bouncer, Pangolin, Gerbil, Traefik, Newt, Beszel, Beszel Agent, Dozzle, Dockhand, and both socket proxies.</li>
+            <li>Verify valid TLS and non-5xx responses for Pangolin, Beszel, Dozzle, and Dockhand hostnames.</li>
+            <li>Add, commit, deploy, and remove one minimal QA stack through the TUI, then confirm sync removes its remote resources.</li>
+          </ul>
+        </details>
+      </section>
+
+      <section id="done">
+        <div class="section-head">
+          <div>
+            <h2>Done means all of this</h2>
+            <p>The reversal is complete only when the product, build, docs, and terminal behavior agree.</p>
+          </div>
+        </div>
+        <div class="checklist">
+          <div class="check"><span class="check-mark">✓</span><span><code>servestead ui</code>, the backend HTTP code, and <code>frontend/</code> are gone.</span></div>
+          <div class="check"><span class="check-mark">✓</span><span>Profiles, secrets, run state, JSONL logs, direct CLI commands, and remote task behavior remain compatible.</span></div>
+          <div class="check"><span class="check-mark">✓</span><span>Persisted run history and redacted logs are available from the TUI.</span></div>
+          <div class="check"><span class="check-mark">✓</span><span>Cancel reaches cloud and background work. A save retry cannot create a second Droplet.</span></div>
+          <div class="check"><span class="check-mark">✓</span><span>Stack and profile deletion require typed confirmation and refuse unsafe states.</span></div>
+          <div class="check"><span class="check-mark">✓</span><span>Navigation quit is clean, text fields accept printable characters, and help matches behavior.</span></div>
+          <div class="check"><span class="check-mark">✓</span><span>Terminal layouts pass at 40x12, 80x24, and 120x40 with no horizontal overflow.</span></div>
+          <div class="check"><span class="check-mark">✓</span><span>CI, release, Docker, security, Sonar, README, and docs contain no stale local-web steps.</span></div>
+          <div class="check"><span class="check-mark">✓</span><span>The complete non-live test gate passes with credentials scrubbed and a temporary Servestead config root.</span></div>
+          <div class="check"><span class="check-mark">✓</span><span>Any live VPS or provider lifecycle test is reported separately with its authorization and cleanup result.</span></div>
+        </div>
+
+        <div class="section-head" style="margin-top:1.35rem">
+          <div>
+            <h2 style="font-size:1.35rem">Review boundaries</h2>
+          </div>
+        </div>
+        <div class="comparison">
+          <article class="card">
+            <span class="badge green">In this reversal</span>
+            <ul>
+              <li>TUI safety, run history, interaction, layout, async feedback, and terminal tests</li>
+              <li>Browser runtime deletion and build cleanup</li>
+              <li>Terminal-first docs and replacement screenshots</li>
+            </ul>
+          </article>
+          <article class="card">
+            <span class="badge">Not folded into this reversal</span>
+            <ul>
+              <li>No blanket revert of the web-era commits</li>
+              <li>No removal of remote browser services managed by Servestead</li>
+              <li>No profile schema migration and no broad <code>setup.go</code> file breakup</li>
+              <li>No live billable or destructive provider test without fresh approval</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <footer>
+        Evidence source: repository at <code>origin/main</code> commit <code>4dbd064</code>, OpenWiki architecture and testing notes, direct code inspection, a disposable browser-removal build experiment, and a read-only first-screen TUI inspection. Plan generated for Lavish review.
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

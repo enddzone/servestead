@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -156,9 +157,6 @@ func TestPrepareEditableStackDestinationHandlesExistingDirectories(t *testing.T)
 	}
 	if _, err := prepareEditableStackDestination(stacksDirectory, "", "site"); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("existing stack directory was accepted: %v", err)
-	}
-	if stackDirectoryContainsOnlySecretFile(filepath.Join(stacksDirectory, "missing")) {
-		t.Fatal("missing stack directory looked secret-only")
 	}
 	secretOnly := filepath.Join(stacksDirectory, "secret-only")
 	if err := os.MkdirAll(secretOnly, 0700); err != nil {
@@ -479,6 +477,7 @@ func TestStackAddInputsRejectsInvalidInputs(t *testing.T) {
 		{name: "invalid publication", args: []string{"--profile", "profile-1", "--compose", composePath, "--publish", "web:not-a-port:site"}, want: "invalid port"},
 		{name: "missing env file", args: []string{"--profile", "profile-1", "--compose", composePath, "--env-file", filepath.Join(directory, "missing.env")}, want: "read environment file"},
 		{name: "invalid name", args: []string{"--profile", "profile-1", "--compose", composePath, "--name", "Bad_Name"}, want: "stack name"},
+		{name: "reserved name", args: []string{"--profile", "profile-1", "--compose", composePath, "--name", reservedObservabilityStackName}, want: "reserved"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -487,6 +486,32 @@ func TestStackAddInputsRejectsInvalidInputs(t *testing.T) {
 				t.Fatalf("expected %q error, got %v", tc.want, err)
 			}
 		})
+	}
+}
+
+func TestStackImportsRejectOversizedComposeAndEnvironmentFiles(t *testing.T) {
+	composePath := filepath.Join(t.TempDir(), stackComposeFilename)
+	if err := os.WriteFile(composePath, bytes.Repeat([]byte("x"), int(stackComposeMaxBytes+1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, _, _, err := stackAddInputs([]string{"--profile", "profile-1", "--compose", composePath}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), formatByteLimit(stackComposeMaxBytes)) {
+		t.Fatalf("oversized Compose import returned %v", err)
+	}
+
+	validCompose := filepath.Join(t.TempDir(), stackComposeFilename)
+	if err := os.WriteFile(validCompose, []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	environmentPath := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(environmentPath, bytes.Repeat([]byte("x"), int(stackEnvironmentMaxBytes+1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, _, _, err = stackAddInputs([]string{
+		"--profile", "profile-1", "--compose", validCompose, "--env-file", environmentPath,
+	}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), formatByteLimit(stackEnvironmentMaxBytes)) {
+		t.Fatalf("oversized environment import returned %v", err)
 	}
 }
 
@@ -574,6 +599,68 @@ func TestWriteStackAddFilesHandlesInPlaceComposeAndExistingFiles(t *testing.T) {
 	}, stackMetadata{Version: 1}, "", nil, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "already has") {
 		t.Fatalf("existing compose returned unexpected error: %v", err)
+	}
+}
+
+func TestWriteStackAddFilesRejectsSymlinkedManagedParents(t *testing.T) {
+	for _, parent := range []string{"stacks", "stack"} {
+		t.Run(parent, func(t *testing.T) {
+			assertStackAddRejectsSymlinkedParent(t, parent)
+		})
+	}
+}
+
+func assertStackAddRejectsSymlinkedParent(t *testing.T, parent string) {
+	t.Helper()
+	repository := t.TempDir()
+	external := t.TempDir()
+	marker := filepath.Join(external, "keep-me")
+	if err := os.WriteFile(marker, []byte("outside repository\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if parent == "stacks" {
+		if err := os.Symlink(external, filepath.Join(repository, "stacks")); err != nil {
+			t.Skipf("cannot create stacks symlink: %v", err)
+		}
+	} else {
+		if err := os.Mkdir(filepath.Join(repository, "stacks"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(external, filepath.Join(repository, "stacks", "site")); err != nil {
+			t.Skipf("cannot create stack symlink: %v", err)
+		}
+	}
+	source := filepath.Join(t.TempDir(), stackComposeFilename)
+	if err := os.WriteFile(source, []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := writeStackAddFiles(context.Background(), repository, stackAddOptions{Name: "site", Compose: source}, stackMetadata{Version: 1}, "", nil, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("symlinked %s parent returned %v", parent, err)
+	}
+	assertFileContent(t, marker, []byte("outside repository\n"), "stack add changed content outside the repository")
+}
+
+func TestWriteStackAddFilesRejectsManagedFileSymlinks(t *testing.T) {
+	for _, managedFile := range []string{stackComposeFilename, stackMetadataFilename} {
+		t.Run(managedFile, func(t *testing.T) {
+			repository, stackDirectory := newManagedStackFilesTestRepository(t)
+			if managedFile == stackComposeFilename {
+				if err := os.Remove(filepath.Join(stackDirectory, stackMetadataFilename)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			target := replaceManagedFileWithSymlink(t, stackDirectory, managedFile, []byte("outside repository\n"))
+			source := filepath.Join(t.TempDir(), stackComposeFilename)
+			if err := os.WriteFile(source, []byte(testApplicationCompose), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := writeStackAddFiles(context.Background(), repository, stackAddOptions{Name: "site", Compose: source}, stackMetadata{Version: 1}, "", nil, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+				t.Fatalf("symlinked %s returned %v", managedFile, err)
+			}
+			assertFileContent(t, target, []byte("outside repository\n"), "stack add followed the managed-file symlink")
+		})
 	}
 }
 
@@ -931,6 +1018,25 @@ func TestStackEnvironmentSaveRemove(t *testing.T) {
 	assertStackEnvironmentRemoved(t, fixture)
 }
 
+func TestStackEnvironmentSetRejectsManagedFileSymlinks(t *testing.T) {
+	for _, managedFile := range []string{stackComposeFilename, stackMetadataFilename} {
+		t.Run(managedFile, func(t *testing.T) {
+			fixture := newStackEnvironmentSaveFixture(t)
+			targetData := []byte("version: 1\n")
+			if managedFile == stackComposeFilename {
+				targetData = []byte(testApplicationCompose)
+			}
+			target := replaceManagedFileWithSymlink(t, fixture.stackDirectory, managedFile, targetData)
+
+			err := setStackEnvironment(context.Background(), fixture.store, fixture.profileID, "site", fixture.environmentPath, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "symbolic link") || !strings.Contains(err.Error(), managedFile) {
+				t.Fatalf("expected %s symlink rejection, got %v", managedFile, err)
+			}
+			assertFileContent(t, target, targetData, "stack env set followed the managed symlink")
+		})
+	}
+}
+
 func TestRunStackEnvironmentDispatchesSetAndRemove(t *testing.T) {
 	fixture := newDefaultStackEnvironmentSaveFixture(t)
 	if err := runStackEnvironment(context.Background(), []string{"set", "--profile", fixture.profileID, "--stack", "site", "--file", fixture.environmentPath}, &fixture.output, io.Discard); err != nil {
@@ -948,6 +1054,7 @@ type stackEnvironmentSaveFixture struct {
 	provider        *recordingSecretProvider
 	store           ProfileStore
 	profileID       string
+	repository      string
 	stackDirectory  string
 	environmentPath string
 	output          bytes.Buffer
@@ -978,7 +1085,7 @@ func newStackEnvironmentSaveFixture(t *testing.T) stackEnvironmentSaveFixture {
 	}
 	return stackEnvironmentSaveFixture{
 		provider: provider, store: store, profileID: profile.ID,
-		stackDirectory: stackDirectory, environmentPath: environmentPath,
+		repository: repository, stackDirectory: stackDirectory, environmentPath: environmentPath,
 	}
 }
 
@@ -1013,7 +1120,7 @@ func newDefaultStackEnvironmentSaveFixture(t *testing.T) stackEnvironmentSaveFix
 	}
 	return stackEnvironmentSaveFixture{
 		provider: provider, store: store, profileID: profile.ID,
-		stackDirectory: stackDirectory, environmentPath: environmentPath,
+		repository: repository, stackDirectory: stackDirectory, environmentPath: environmentPath,
 	}
 }
 
@@ -1029,7 +1136,7 @@ func assertStackEnvironmentSaved(t *testing.T, fixture stackEnvironmentSaveFixtu
 	if err := setStackEnvironment(context.Background(), fixture.store, fixture.profileID, "site", fixture.environmentPath, &fixture.output); err != nil {
 		t.Fatal(err)
 	}
-	metadata, err := readStackMetadataFile(filepath.Join(fixture.stackDirectory, stackMetadataFilename))
+	metadata, err := readManagedStackMetadata(fixture.repository, "site")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1049,7 +1156,7 @@ func assertStackEnvironmentRemoved(t *testing.T, fixture stackEnvironmentSaveFix
 	if err := removeStackEnvironment(context.Background(), fixture.store, fixture.profileID, "site", "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	metadata, err := readStackMetadataFile(filepath.Join(fixture.stackDirectory, stackMetadataFilename))
+	metadata, err := readManagedStackMetadata(fixture.repository, "site")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1250,6 +1357,293 @@ func TestEditableStackLifecycle(t *testing.T) {
 	}
 }
 
+func TestLoadEditableStacksRejectsManagedFileSymlinks(t *testing.T) {
+	for _, managedFile := range []string{stackComposeFilename, stackMetadataFilename} {
+		t.Run(managedFile, func(t *testing.T) {
+			assertEditableStackLoadRejectsSymlink(t, managedFile)
+		})
+	}
+}
+
+func TestLoadEditableStacksRejectsOversizedManagedFiles(t *testing.T) {
+	for _, managedFile := range []string{stackComposeFilename, stackMetadataFilename} {
+		t.Run(managedFile, func(t *testing.T) {
+			repository, stackDirectory := newManagedStackFilesTestRepository(t)
+			limit := stackMetadataMaxBytes
+			if managedFile == stackComposeFilename {
+				limit = stackComposeMaxBytes
+			}
+			if err := os.WriteFile(filepath.Join(stackDirectory, managedFile), bytes.Repeat([]byte("x"), int(limit+1)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := loadEditableStacks(repository)
+			if err == nil || !strings.Contains(err.Error(), formatByteLimit(limit)) {
+				t.Fatalf("oversized %s returned %v", managedFile, err)
+			}
+		})
+	}
+}
+
+func TestLoadEditableStacksBoundsStackCount(t *testing.T) {
+	repository := t.TempDir()
+	for index := 0; index <= stackRepositoryMaxStacks; index++ {
+		name := fmt.Sprintf("stack-%d", index)
+		if err := os.MkdirAll(filepath.Join(repository, "stacks", name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := loadEditableStacks(repository)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprint(stackRepositoryMaxStacks)) {
+		t.Fatalf("excessive stack count returned %v", err)
+	}
+}
+
+func TestLoadEditableStacksBoundsDirectoryEntries(t *testing.T) {
+	repository := t.TempDir()
+	stacksDirectory := filepath.Join(repository, "stacks")
+	if err := os.MkdirAll(stacksDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index <= stackRepositoryMaxEntries; index++ {
+		name := filepath.Join(stacksDirectory, fmt.Sprintf("note-%04d.txt", index))
+		if err := os.WriteFile(name, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := loadEditableStacks(repository)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprint(stackRepositoryMaxEntries)) {
+		t.Fatalf("excessive managed directory entries returned %v", err)
+	}
+}
+
+func TestLoadEditableStacksBoundsAggregateBytes(t *testing.T) {
+	repository := t.TempDir()
+	composeSize := int(stackRepositoryTotalBytes/5) + 1
+	compose := []byte("services:\n  web:\n    image: nginx\n")
+	compose = append(compose, bytes.Repeat([]byte("# padding\n"), (composeSize-len(compose))/10+1)...)
+	compose = compose[:composeSize]
+	for index := 0; index < 5; index++ {
+		directory := filepath.Join(repository, "stacks", fmt.Sprintf("stack-%d", index))
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, stackComposeFilename), compose, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := loadEditableStacks(repository)
+	if err == nil || !strings.Contains(err.Error(), "total limit") {
+		t.Fatalf("aggregate stack bytes returned %v", err)
+	}
+}
+
+func TestLoadEditableStacksContextCancelsBetweenManagedFiles(t *testing.T) {
+	repository, _ := newManagedStackFilesTestRepository(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	originalReader := readEditableStackManagedFile
+	metadataReads := 0
+	readEditableStackManagedFile = func(root *os.Root, name, label string, limit int64) ([]byte, error) {
+		data, err := readManagedFile(root, name, label, limit)
+		if name == stackComposeFilename {
+			cancel()
+		}
+		if name == stackMetadataFilename {
+			metadataReads++
+		}
+		return data, err
+	}
+	t.Cleanup(func() { readEditableStackManagedFile = originalReader })
+
+	_, err := loadEditableStacksContext(ctx, repository)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled stack refresh returned %v", err)
+	}
+	if metadataReads != 0 {
+		t.Fatalf("stack refresh read %d metadata files after cancellation", metadataReads)
+	}
+}
+
+func assertEditableStackLoadRejectsSymlink(t *testing.T, managedFile string) {
+	t.Helper()
+	repository, stackDirectory := newManagedStackFilesTestRepository(t)
+	targetData := []byte("version: 1\n")
+	if managedFile == stackComposeFilename {
+		targetData = []byte(testApplicationCompose)
+	}
+	target := replaceManagedFileWithSymlink(t, stackDirectory, managedFile, targetData)
+
+	_, err := loadEditableStacks(repository)
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") || !strings.Contains(err.Error(), managedFile) {
+		t.Fatalf("expected %s symlink rejection, got %v", managedFile, err)
+	}
+	assertFileContent(t, target, targetData, "loading followed "+managedFile+" outside the stack")
+}
+
+func TestWriteEditableStackRejectsManagedFileSymlinks(t *testing.T) {
+	for _, managedFile := range []string{stackComposeFilename, stackMetadataFilename, stackSecretFilename} {
+		t.Run(managedFile, func(t *testing.T) {
+			assertEditableStackSaveRejectsSymlink(t, managedFile)
+		})
+	}
+}
+
+func assertEditableStackSaveRejectsSymlink(t *testing.T, managedFile string) {
+	t.Helper()
+	repository, stackDirectory := newManagedStackFilesTestRepository(t)
+	originalCompose := []byte(testApplicationCompose)
+	targetData := []byte("outside repository\n")
+	if managedFile == stackSecretFilename {
+		if err := os.WriteFile(filepath.Join(stackDirectory, stackSecretFilename), []byte("encrypted\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := replaceManagedFileWithSymlink(t, stackDirectory, managedFile, targetData)
+
+	updatedCompose := []byte(strings.Replace(testApplicationCompose, "nginx:alpine", "nginx:stable", 1))
+	err := writeEditableStack(repository, "site", stackAddOptions{Name: "site"}, updatedCompose)
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") || !strings.Contains(err.Error(), managedFile) {
+		t.Fatalf("expected %s symlink rejection, got %v", managedFile, err)
+	}
+	assertFileContent(t, target, targetData, "saving followed "+managedFile+" outside the stack")
+	if managedFile == stackMetadataFilename {
+		assertFileContent(t, filepath.Join(stackDirectory, stackComposeFilename), originalCompose, "compose.yaml changed before the metadata symlink was rejected")
+	}
+}
+
+func newManagedStackFilesTestRepository(t *testing.T) (string, string) {
+	t.Helper()
+	repository := t.TempDir()
+	stackDirectory := filepath.Join(repository, "stacks", "site")
+	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackMetadataFilename), []byte("version: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return repository, stackDirectory
+}
+
+func replaceManagedFileWithSymlink(t *testing.T, directory, name string, targetData []byte) string {
+	t.Helper()
+	target := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(target, targetData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	managedPath := filepath.Join(directory, name)
+	if err := os.Remove(managedPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, managedPath); err != nil {
+		t.Skipf("cannot create managed-file symlink: %v", err)
+	}
+	return target
+}
+
+func assertFileContent(t *testing.T, path string, expected []byte, message string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, expected) {
+		t.Fatal(message)
+	}
+}
+
+func TestWriteEditableStackRejectsReservedObservabilityName(t *testing.T) {
+	repository := t.TempDir()
+	composePath := filepath.Join(repository, filepath.FromSlash(observabilityComposeRepositoryPath))
+	if err := os.MkdirAll(filepath.Dir(composePath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte("managed observability scaffold\n")
+	if err := os.WriteFile(composePath, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := writeEditableStack(repository, "", stackAddOptions{Name: reservedObservabilityStackName}, []byte(testApplicationCompose))
+	if err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("expected reserved stack-name rejection, got %v", err)
+	}
+	unchanged, readErr := os.ReadFile(composePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(unchanged, original) {
+		t.Fatal("reserved stack add overwrote the managed observability scaffold")
+	}
+}
+
+func TestRemoveEditableStackRejectsSymlinkedStacksDirectory(t *testing.T) {
+	repository := t.TempDir()
+	externalStacks := t.TempDir()
+	externalStack := filepath.Join(externalStacks, "site")
+	if err := os.MkdirAll(externalStack, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(externalStack, stackMetadataFilename), []byte("version: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(externalStack, "keep-me")
+	if err := os.WriteFile(marker, []byte("outside repository\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalStacks, filepath.Join(repository, "stacks")); err != nil {
+		t.Skipf("cannot create directory symlink: %v", err)
+	}
+
+	err := removeEditableStack(repository, "site")
+	if err == nil || !strings.Contains(err.Error(), "stacks directory is a symbolic link") {
+		t.Fatalf("expected symlinked stacks directory rejection, got %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("stack deletion touched content outside the repository: %v", err)
+	}
+}
+
+func TestRemoveEditableStackRejectsSymlinkedTarget(t *testing.T) {
+	repository := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repository, "stacks"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	externalStack := t.TempDir()
+	if err := os.WriteFile(filepath.Join(externalStack, stackMetadataFilename), []byte("version: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(externalStack, "keep-me")
+	if err := os.WriteFile(marker, []byte("outside repository\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalStack, filepath.Join(repository, "stacks", "site")); err != nil {
+		t.Skipf("cannot create directory symlink: %v", err)
+	}
+
+	err := removeEditableStack(repository, "site")
+	if err == nil || !strings.Contains(err.Error(), "stack directory is a symbolic link") {
+		t.Fatalf("expected symlinked stack directory rejection, got %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("stack deletion touched content outside the repository: %v", err)
+	}
+}
+
+func TestRemoveEditableStackRejectsMetadataSymlink(t *testing.T) {
+	repository, stackDirectory := newManagedStackFilesTestRepository(t)
+	target := replaceManagedFileWithSymlink(t, stackDirectory, stackMetadataFilename, []byte("version: 1\n"))
+
+	err := removeEditableStack(repository, "site")
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("expected metadata symlink rejection, got %v", err)
+	}
+	assertFileContent(t, target, []byte("version: 1\n"), "stack deletion followed the metadata symlink")
+	if _, err := os.Stat(stackDirectory); err != nil {
+		t.Fatalf("stack deletion removed a directory with unsafe metadata: %v", err)
+	}
+}
+
 func TestEditableStackDiscoveryGuidesManualStackLayout(t *testing.T) {
 	repository := t.TempDir()
 	stacksDirectory := filepath.Join(repository, "stacks")
@@ -1339,6 +1733,31 @@ func TestStackRepositoryDiffStageAndCommit(t *testing.T) {
 	}
 	if strings.TrimSpace(log) != "Add site stack" {
 		t.Fatalf("unexpected commit: %q", log)
+	}
+}
+
+func TestStackRepositoryDiffBoundsUntrackedOutput(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init")
+	directory := filepath.Join(repository, "stacks", "site")
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	large := bytes.Repeat([]byte("x"), int(stackRepositoryDiffMaxBytes+1024))
+	if err := os.WriteFile(filepath.Join(directory, "large.conf"), large, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	diff, err := stackRepositoryDiff(context.Background(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diff, "Additional diff output was omitted") {
+		t.Fatalf("bounded diff omitted no notice: %d bytes", len(diff))
+	}
+	if len(diff) > int(stackRepositoryDiffMaxBytes) {
+		t.Fatalf("bounded diff returned %d bytes", len(diff))
 	}
 }
 

@@ -26,10 +26,11 @@ const (
 	runStatusFailed    = "failed"
 	runStatusCancelled = "cancelled"
 
-	stageStatusPending  = "pending"
-	stageStatusRunning  = "running"
-	stageStatusComplete = "complete"
-	stageStatusFailed   = "failed"
+	stageStatusPending   = "pending"
+	stageStatusRunning   = "running"
+	stageStatusComplete  = "complete"
+	stageStatusFailed    = "failed"
+	stageStatusCancelled = "cancelled"
 )
 
 var storePathComponentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
@@ -265,6 +266,8 @@ type ProfileStore interface {
 	LoadSecrets(id string) (ProfileSecrets, error)
 	SaveSecrets(id string, secrets ProfileSecrets) error
 	AppendRunEvent(profileID string, runID string, event TaskEvent) error
+	LoadRunEvents(profileID string, runID string) ([]TaskEvent, error)
+	RunLogPath(profileID string, runID string) (string, error)
 }
 
 type fileProfileStore struct {
@@ -272,7 +275,26 @@ type fileProfileStore struct {
 	defaultRoot bool
 }
 
+const servesteadConfigDirEnv = "SERVESTEAD_CONFIG_DIR"
+
+func servesteadConfigDirOverride() (string, bool, error) {
+	configured := strings.TrimSpace(os.Getenv(servesteadConfigDirEnv))
+	if configured == "" {
+		return "", false, nil
+	}
+	absolute, err := filepath.Abs(expandUserPath(configured))
+	if err != nil {
+		return "", false, fmt.Errorf("resolve %s: %w", servesteadConfigDirEnv, err)
+	}
+	return absolute, true, nil
+}
+
 func newDefaultProfileStore() (ProfileStore, error) {
+	if root, configured, err := servesteadConfigDirOverride(); err != nil {
+		return nil, err
+	} else if configured {
+		return &fileProfileStore{root: root, defaultRoot: true}, nil
+	}
 	configDirectory, err := os.UserConfigDir()
 	if err != nil {
 		return nil, fmt.Errorf("resolve user config directory: %w", err)
@@ -514,6 +536,10 @@ func (store *fileProfileStore) profileDirectory(id string) (string, error) {
 		return "", errors.New("profile ID must not contain path separators")
 	}
 	return filepath.Join(store.profilesDirectory(), id), nil
+}
+
+func (store *fileProfileStore) ProfileDirectory(id string) (string, error) {
+	return store.profileDirectory(id)
 }
 
 func (store *fileProfileStore) profilePath(id string) (string, error) {

@@ -1,58 +1,54 @@
 ---
-title: Profiles and Diagnostics
-description: Inspect saved environments, recent runs, stack state, GitOps, credentials, cloud metadata, and recovery details.
+title: Profiles and run history
+description: Inspect saved environments, persisted task output, stack state, credentials, cloud metadata, and local files.
 ---
 
-import UiScreenshot from '../../../components/UiScreenshot.astro';
-import profileWorkspace from '../../../assets/screenshots/profile-workspace.jpg';
+A profile is Servestead's local record for one server. The startup list shows each saved profile with its address and latest run status. Select one to open its dashboard.
 
-A profile is Servestead's local record of one environment. The Profiles workspace puts its setup state, repository, run history, credentials, and cloud metadata behind one selection.
+## Profile state
 
-<UiScreenshot
-  src={profileWorkspace}
-  alt="Servestead Profiles workspace showing a completed profile, clean GitOps state, management actions, and recent runs"
-  caption="Select a profile on the left; its current state, next action, management areas, and recent runs appear in one workspace."
-/>
+The dashboard combines the profile's current values with setup and operation state:
 
-## Select and Read a Profile
+- Bootstrap, Harden, and Platform completion.
+- Configuration repository path and GitHub token source.
+- Pangolin registration and saved access status.
+- DigitalOcean resource metadata and destroyed state when present.
+- Application stacks found in the configuration repository.
 
-Open **Profiles** and choose a row. The status strip shows:
+Use `e` for normal values and `a` for advanced connection or Pangolin fields. On a saved profile, `ctrl+s` writes the edit without starting a run.
 
-- **Setup** — the latest setup result.
-- **Activity** — whether a run is idle, active, completed, failed, or cancelled.
-- **GitOps** — the current repository state.
+## Run history
 
-The **Next** line gives the most relevant follow-up. Expand **Profile metadata** when you need the server address, domain, certificate email, cloud state, update time, or repository path.
+Press `h` from the profile dashboard. Newest runs appear first with status and timestamps. Open a run to inspect:
 
-## Manage the Environment
+- Overall status and start or finish time.
+- Stage status and the recorded stage error.
+- Task event output loaded from the profile's JSONL log.
+- The local log path used for the detail view.
 
-The compact operation bar opens focused controls without leaving the profile:
+Known profile secrets are replaced before log text is shown. Live output, individual saved lines, and total saved output are bounded; visible markers identify omitted output. Detail loads asynchronously and reads a bounded tail: at most the latest 500 saved events are displayed. The view says when earlier, oversized, or incomplete records were omitted, while retaining valid events around them.
 
-- **Stacks** inventories editable application stacks, public resources, and deployment eligibility.
-- **GitOps** shows working-tree state, the current commit, push status, repository actions, and diffs.
-- **Access** shows masked credential status and controlled reveal/update actions.
-- **Cloud** shows provider metadata plus guarded restart and destroy controls.
+Use the scrolling keys shown in the footer, then press `esc` to return to the run list or dashboard.
 
-## Use Diagnostics
+## Local file layout
 
-Select **Diagnostics** to open a side panel that connects three common investigations:
+Servestead uses the operating system's user configuration directory unless `SERVESTEAD_CONFIG_DIR` sets another root. Each profile stores:
 
-1. **Runs** lists recent outcomes and links to persisted logs.
-2. **GitOps** shows repository status, the current commit, and whether a push is pending.
-3. **Cloud** shows provider, resource, image, region, size, address, and active/destroyed state.
+| File | Contents |
+| --- | --- |
+| `profile.json` | Address, users, domain, repository, and cloud metadata. |
+| `state.json` | Active run, setup stages, stack commit, and run summaries. |
+| `secrets.json` | Generated platform credentials, GitHub token, and stack age identity. |
+| `logs/<run-id>.jsonl` | Structured task events for one run. |
 
-Start with the failed run, then compare repository or cloud state only when the failure points there.
+Profile directories and sensitive files use owner-only permissions.
 
-## Review Run History
+## Delete a local profile
 
-Select **View history** to search runs and logs. Open a run to see the stored JSONL events with known profile secrets masked. The newest runs appear first.
+Press `x` on the dashboard and read the displayed path and effect. Deletion removes local metadata, secrets, state, and logs. It does not change the remote server, cloud resource, or configuration repository. Servestead refuses the deletion while a run is active.
 
-## Delete a Local Profile
+Enter `delete <profile-name>` exactly as shown to proceed. Back up the profile's age identity first when any encrypted stack values still matter.
 
-Expand **Profile settings** and read the impact carefully. Deleting removes local profile metadata, credentials, encryption keys, state, and logs. It does not change the remote server, cloud resource, or configuration repository.
+### Expected result
 
-Export any age identity needed to recover encrypted stack secrets before deletion. The form requires the displayed `delete <profile-name>` phrase, and deletion is blocked while a run is active.
-
-### Expected Result
-
-You can explain the profile's current setup, activity, and GitOps state, identify its next action, and open the exact run or subsystem that needs attention.
+You can identify the latest run outcome, open the exact failed stage and log, and distinguish local profile state from the server, provider, and Git repository before taking corrective action.

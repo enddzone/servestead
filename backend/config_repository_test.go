@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,7 @@ const (
 )
 
 func TestDefaultConfigRepositoryPathUsesXDGConfigHome(t *testing.T) {
+	t.Setenv(servesteadConfigDirEnv, "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	path, err := defaultConfigRepositoryPath(configRepositoryTestProfileID)
 	if err != nil {
@@ -26,6 +28,21 @@ func TestDefaultConfigRepositoryPathUsesXDGConfigHome(t *testing.T) {
 	}
 	if !strings.HasSuffix(path, filepath.Join("servestead", "repositories", configRepositoryTestProfileID)) {
 		t.Fatalf("unexpected repository path: %s", path)
+	}
+}
+
+func TestDefaultConfigRepositoryPathUsesServesteadConfigDir(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(servesteadConfigDirEnv, root)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	path, err := defaultConfigRepositoryPath(configRepositoryTestProfileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, "repositories", configRepositoryTestProfileID)
+	if path != want {
+		t.Fatalf("unexpected repository path: got %s want %s", path, want)
 	}
 }
 
@@ -216,6 +233,63 @@ func TestEnsureConfigRepositoryScaffoldIsIdempotent(t *testing.T) {
 	}
 	if string(data) != scaffold {
 		t.Fatal("repository scaffold content changed")
+	}
+}
+
+func TestEnsureConfigRepositoryScaffoldRejectsManagedFileSymlinks(t *testing.T) {
+	for _, targetExists := range []bool{true, false} {
+		name := "dangling"
+		if targetExists {
+			name = "existing"
+		}
+		t.Run(name, func(t *testing.T) {
+			assertScaffoldSymlinkRejected(t, targetExists)
+		})
+	}
+}
+
+func assertScaffoldSymlinkRejected(t *testing.T, targetExists bool) {
+	t.Helper()
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init", "-b", "main")
+	composePath := filepath.Join(repository, filepath.FromSlash(observabilityComposeRepositoryPath))
+	if err := os.MkdirAll(filepath.Dir(composePath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), stackComposeFilename)
+	original := []byte(legacyManagedObservabilityCompose())
+	if targetExists {
+		if err := os.WriteFile(target, original, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(target, composePath); err != nil {
+		t.Skipf("cannot create scaffold symlink: %v", err)
+	}
+
+	scaffold := observabilityComposeFile(observabilityConfig{BaseDomain: configRepositoryTestDomain, AdminEmail: configRepositoryTestAdminEmail})
+	created, err := ensureConfigRepositoryScaffold(context.Background(), repository, scaffold)
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("expected scaffold symlink rejection, got created=%v err=%v", created, err)
+	}
+	assertScaffoldSymlinkTargetUnchanged(t, target, original, targetExists)
+}
+
+func assertScaffoldSymlinkTargetUnchanged(t *testing.T, target string, original []byte, targetExists bool) {
+	t.Helper()
+	data, err := os.ReadFile(target)
+	if !targetExists {
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("scaffold creation followed the dangling symlink: %v", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != string(original) {
+		t.Fatal("scaffold refresh followed the symlink outside the repository")
 	}
 }
 
@@ -425,6 +499,64 @@ public_resources:
 	if !strings.Contains(stack.MetadataContent, "subdomain: site") {
 		t.Fatalf("metadata content was not loaded: %q", stack.MetadataContent)
 	}
+}
+
+func TestLoadCommittedStackFilesRejectsOversizedExtraFile(t *testing.T) {
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init", "-b", "main")
+	commitConfigRepositoryFile(t, repository, "stacks/site/compose.yaml", testApplicationCompose, "Add compose")
+	commitConfigRepositoryFile(t, repository, "stacks/site/servestead.yaml", "version: 1\n", "Add metadata")
+	large := strings.Repeat("x", int(stackRepositoryFileMaxBytes+1))
+	commitConfigRepositoryFile(t, repository, "stacks/site/large.conf", large, "Add large file")
+
+	_, err := loadCommittedStackFiles(context.Background(), repository, "stacks/site/")
+	if err == nil || !strings.Contains(err.Error(), formatByteLimit(stackRepositoryFileMaxBytes)) {
+		t.Fatalf("oversized committed file returned %v", err)
+	}
+}
+
+func TestLoadCommittedStacksBoundsCountAndAggregateBytes(t *testing.T) {
+	t.Run("stack count", func(t *testing.T) {
+		repository := newCommittedStackLimitRepository(t, stackRepositoryMaxStacks+1, "marker\n")
+		_, err := loadCommittedStacks(context.Background(), repository)
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprint(stackRepositoryMaxStacks)) {
+			t.Fatalf("excessive committed stack count returned %v", err)
+		}
+	})
+
+	t.Run("aggregate bytes", func(t *testing.T) {
+		composeSize := int(stackRepositoryTotalBytes/6) + 1
+		compose := "services:\n  web:\n    image: nginx\n" + strings.Repeat("# padding\n", composeSize/10+1)
+		compose = compose[:composeSize]
+		repository := newCommittedStackLimitRepository(t, 3, compose)
+		_, err := loadCommittedStacks(context.Background(), repository)
+		if err == nil || !strings.Contains(err.Error(), "total limit") {
+			t.Fatalf("aggregate committed stack bytes returned %v", err)
+		}
+	})
+}
+
+func newCommittedStackLimitRepository(t *testing.T, count int, compose string) string {
+	t.Helper()
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init", "-b", "main")
+	for index := 0; index < count; index++ {
+		directory := filepath.Join(repository, "stacks", fmt.Sprintf("stack-%d", index))
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, stackComposeFilename), []byte(compose), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, stackMetadataFilename), []byte("version: 1\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGitCommand(t, repository, "add", "stacks")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email="+configRepositoryTestGitEmail, "commit", "-m", "Add stacks")
+	return repository
 }
 
 func TestLoadCommittedStackRejectsInvalidNameAndMissingCompose(t *testing.T) {

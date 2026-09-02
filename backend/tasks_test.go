@@ -93,3 +93,27 @@ func TestRunTasksWithReporterEmitsStructuredEvents(t *testing.T) {
 		}
 	}
 }
+
+func TestRunTasksReportsCancellationWithoutFailureEvent(t *testing.T) {
+	client := &recordingRemoteClient{err: context.Canceled}
+	var events []TaskEvent
+	err := runTasksWithReporter(context.Background(), client, "root", taskRunOptions{
+		runID: "run-cancelled",
+		stage: "harden",
+		tasks: []Task{{Name: "Apply firewall", Apply: "true"}},
+		reporter: TaskReporterFunc(func(event TaskEvent) {
+			events = append(events, event)
+		}),
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error = %v", err)
+	}
+	if len(events) != 3 || events[2].Type != TaskCancelled || events[2].Error != "" {
+		t.Fatalf("cancellation events = %+v", events)
+	}
+	for _, event := range events {
+		if event.Type == TaskFailed {
+			t.Fatalf("cancellation emitted a failure event: %+v", events)
+		}
+	}
+}

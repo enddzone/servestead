@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -154,7 +155,11 @@ func (provider *digitalOceanProvider) Create(ctx context.Context, config provisi
 	if droplet == nil || droplet.ID == 0 {
 		return server{}, errors.New("API response did not include a droplet ID")
 	}
-	return provider.waitForIPv4(ctx, droplet)
+	ready, err := provider.waitForIPv4(ctx, droplet)
+	if err != nil {
+		return ready, err
+	}
+	return ready, nil
 }
 
 func (provider *digitalOceanProvider) CreateSSHKey(ctx context.Context, name, publicKey string) (cloudSSHKey, error) {
@@ -183,7 +188,27 @@ func (provider *digitalOceanProvider) Destroy(ctx context.Context, id string) er
 		return fmt.Errorf("invalid DigitalOcean droplet ID %q", id)
 	}
 	_, err = provider.droplets.Delete(ctx, dropletID)
+	if cloudResourceNotFound(err) {
+		return nil
+	}
 	return err
+}
+
+func cloudResourceNotFound(err error) bool {
+	var responseError *godo.ErrorResponse
+	return errors.As(err, &responseError) && responseError.Response != nil && responseError.Response.StatusCode == http.StatusNotFound
+}
+
+func cloudMutationOutcomeUnknown(err error) bool {
+	if err == nil {
+		return false
+	}
+	var responseError *godo.ErrorResponse
+	if !errors.As(err, &responseError) || responseError.Response == nil {
+		return true
+	}
+	status := responseError.Response.StatusCode
+	return status < http.StatusBadRequest || status >= http.StatusInternalServerError
 }
 
 func (provider *digitalOceanProvider) waitForIPv4(ctx context.Context, created *godo.Droplet) (server, error) {
@@ -195,17 +220,28 @@ func (provider *digitalOceanProvider) waitForIPv4(ctx context.Context, created *
 			}
 		}
 		if err := wait(ctx, provider.pollInterval); err != nil {
-			return server{}, fmt.Errorf("wait for droplet %d: %w", created.ID, err)
+			return serverFromDigitalOceanDroplet(created, publicIPv4OrEmpty(created)), fmt.Errorf("wait for droplet %d: %w", created.ID, err)
 		}
 		next, _, err := provider.droplets.Get(ctx, created.ID)
 		if err != nil {
-			return server{}, err
+			return serverFromDigitalOceanDroplet(created, publicIPv4OrEmpty(created)), err
 		}
 		if next == nil {
-			return server{}, fmt.Errorf("API response did not include droplet %d", created.ID)
+			return serverFromDigitalOceanDroplet(created, publicIPv4OrEmpty(created)), fmt.Errorf("API response did not include droplet %d", created.ID)
 		}
 		created = next
 	}
+}
+
+func publicIPv4OrEmpty(droplet *godo.Droplet) string {
+	if droplet == nil {
+		return ""
+	}
+	ipv4, err := droplet.PublicIPv4()
+	if err != nil {
+		return ""
+	}
+	return ipv4
 }
 
 func (provider *digitalOceanProvider) listRegions(ctx context.Context) ([]cloudRegion, error) {

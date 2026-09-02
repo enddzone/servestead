@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -58,6 +59,25 @@ func TestDigitalOceanCreate(t *testing.T) {
 	}
 	if createBody["region"] != "nyc3" || createBody["size"] != cloudTestSize || createBody["image"] != cloudTestImage {
 		t.Fatalf("unexpected create body: %#v", createBody)
+	}
+}
+
+func TestDigitalOceanWaitForIPv4PreservesCreatedDropletOnCancellation(t *testing.T) {
+	provider := &digitalOceanProvider{pollInterval: time.Hour}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	created, err := provider.waitForIPv4(ctx, &godo.Droplet{
+		ID:      84,
+		Name:    "aegis-02",
+		Status:  "new",
+		Created: "2026-06-30T12:00:00Z",
+	})
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForIPv4 cancellation error = %v", err)
+	}
+	if created.ID != "84" || created.Name != "aegis-02" || created.IPv4 != "" {
+		t.Fatalf("waitForIPv4 lost the created Droplet identity: %+v", created)
 	}
 }
 
@@ -187,6 +207,38 @@ func TestDigitalOceanAPIErrorMessage(t *testing.T) {
 	_, err := provider.Create(context.Background(), provisionConfig{})
 	if err == nil || !strings.Contains(err.Error(), "token rejected") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCloudMutationOutcomeClassification(t *testing.T) {
+	if !cloudMutationOutcomeUnknown(context.DeadlineExceeded) {
+		t.Fatal("deadline after a mutation request must be treated as unknown")
+	}
+	if !cloudMutationOutcomeUnknown(&godo.ErrorResponse{Response: &http.Response{StatusCode: http.StatusBadGateway}}) {
+		t.Fatal("provider 5xx response must be treated as unknown")
+	}
+	if cloudMutationOutcomeUnknown(&godo.ErrorResponse{Response: &http.Response{StatusCode: http.StatusUnprocessableEntity}}) {
+		t.Fatal("provider 4xx response is a definitive rejection")
+	}
+	if cloudMutationOutcomeUnknown(nil) {
+		t.Fatal("nil error cannot have an unknown outcome")
+	}
+}
+
+func TestDigitalOceanDestroyTreatsMissingDropletAsDestroyed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodDelete || request.URL.Path != "/v2/droplets/84" {
+			http.NotFound(response, request)
+			return
+		}
+		response.WriteHeader(http.StatusNotFound)
+		writeJSON(t, response, `{"message":"not found"}`)
+	}))
+	defer server.Close()
+
+	provider := newTestDigitalOceanProvider(t, server)
+	if err := provider.Destroy(context.Background(), "84"); err != nil {
+		t.Fatalf("idempotent destroy returned %v", err)
 	}
 }
 

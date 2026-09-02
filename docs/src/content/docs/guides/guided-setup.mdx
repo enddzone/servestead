@@ -1,75 +1,63 @@
 ---
-title: Setup Workbench
-description: Understand the five browser steps, their safety boundaries, and how to resume or recover a run.
+title: Guided setup
+description: Use the profile-first terminal flow, understand its execution boundary, and resume or recover a run.
 ---
 
-import UiScreenshot from '../../../components/UiScreenshot.astro';
-import setupWorkbench from '../../../assets/screenshots/setup-workbench.jpg';
+`servestead setup` keeps profile intake, repository choice, plan review, and task execution in one terminal workflow. The current footer shows the keys that apply to each screen.
 
-The Setup Workbench keeps one profile, one repository decision, and one reviewed run in a visible five-step sequence.
+## Choose a starting point
 
-<UiScreenshot
-  src={setupWorkbench}
-  alt="Servestead Setup Workbench with Start, Profile, GitOps, Review, and Run steps"
-  caption="Start, Profile, GitOps, Review, and Run stay visible so you always know what has and has not happened."
-/>
+The opening list includes saved profiles and three actions:
 
-## Step 1: Start
+- **Provision a new DigitalOcean VPS** opens the live provider catalog. Provisioning saves a profile but does not configure the server.
+- **Set up a new server profile** starts with an address for a fresh VPS you already own.
+- **Advanced legacy setup paths** exposes the one-off guided key generation, hardening, network, proxy, and doctor flows.
 
-Choose **Connect existing VPS** for a new server you already own, or **Resume a saved profile** to continue prior work.
+Select a saved profile to resume work from its dashboard.
 
-The DigitalOcean card currently routes guided provisioning to the Terminal UI. A concise provisioning form is also available under **Profiles → New DigitalOcean profile**; see [Provision with DigitalOcean](../../getting-started/provision-vps/).
+## Enter profile values
 
-## Step 2: Profile
+A new profile needs a server address, private key path, base domain, and Let's Encrypt email. Its optional name defaults to the server address. Servestead collects these values before it performs remote work.
 
-Provide the values required for remote work:
+Press `ctrl+a` for advanced fields only when you need to set the profile name or change the initial SSH user, administrative user, or Pangolin administrator. Repository selection follows the profile fields. On a saved profile, `ctrl+s` saves edited values without starting a run.
 
-- Local profile name.
-- Server IP address or hostname.
-- Private key path on the machine running Servestead.
-- Base domain and Let's Encrypt email.
+## Choose a repository
 
-Connection users and Pangolin credentials live behind **Connection and credential overrides**. Leave them collapsed when the defaults are correct.
+Servestead offers three repository modes:
 
-## Step 3: GitOps
+- Create a local repository at the profile's default repository path.
+- Use an existing local Git checkout.
+- Clone a GitHub HTTPS repository. Private repositories require a personal access token.
 
-Choose how Servestead should prepare the configuration repository:
+The choice appears on the review screen. Repository creation or cloning waits until after confirmation.
 
-- Create the profile's local repository.
-- Use an existing local checkout.
-- Clone a GitHub HTTPS repository.
+## Review before execution
 
-Private GitHub repositories require a PAT. The submitted value is stored in the owner-only local profile secrets and is not rendered back to the browser.
+The review screen is the execution boundary. It names the profile, target stages, and repository action. At this point Servestead has not prepared the repository or opened an SSH connection.
 
-## Step 4: Review
+Press `r` to proceed. Servestead runs local preflight, prepares the repository, then begins SSH tasks. Use `e`, `a`, or `c` to correct the profile, advanced values, or repository choice before the run.
 
-**Review and confirm** is the execution boundary. Verify the full plan, run target, and repository action. At this point Servestead has not prepared the repository or opened an SSH connection.
+## Follow and cancel a run
 
-After you select **Run after review**, Servestead performs local preflight and repository preparation first. Remote stages begin only after those checks succeed.
+The run screen shows the stage, task count, progress, and live output. Press `ctrl+c` to request cancellation. Servestead shows a cancelling state until the active operation acknowledges it. Cancellation during local preparation starts no SSH work and creates no run record. After SSH work starts, the active remote task may already be partially applied; the cancelled run is persisted, and you should inspect its log and the remote state before retrying.
 
-## Step 5: Run
+Completed stages remain in profile state. A later full run can skip them. From the dashboard, select a stage and press `r` when you intentionally want to run it again.
 
-The run view keeps status, progress, and live logs together.
+## Resume and inspect
 
-- **Cancel safely** requests cancellation and preserves the run outcome.
-- Recoverable credential or repository problems appear with inline guidance.
-- **Retry** starts a new run from the saved profile state.
+Select the saved profile at startup. Press `h` from its dashboard to open run history, then open a run for timestamps, stage errors, and redacted log output.
 
-Completed stages are persisted. A later full run can skip work already marked complete.
+## Where local state lives
 
-## Resume a Profile
+Servestead uses the operating system's user configuration directory by default. Set `SERVESTEAD_CONFIG_DIR` to choose a separate Servestead root, which is useful for tests or an isolated operator environment.
 
-Return to **Setup**, choose the profile in **Resume a saved profile**, and select **Resume**. Review the loaded values before continuing. Deleting a local profile does not change the server or cloud resource.
-
-## Where Local State Lives
-
-Servestead stores profiles below the operating system's user configuration directory in a `servestead` subdirectory.
+Each profile directory contains:
 
 | File | Purpose |
 | --- | --- |
 | `profile.json` | Server, domain, user, cloud, and repository metadata. |
 | `state.json` | Completed stages and run state. |
 | `secrets.json` | Owner-only generated credentials and profile tokens. |
-| `logs/*.jsonl` | Structured events for run history and diagnostics. |
+| `logs/*.jsonl` | Structured events used by run history. |
 
-Use [Profiles and diagnostics](../profiles-and-diagnostics/) to inspect that state through the interface. Use the [Terminal UI](../../reference/terminal-ui/) only when you need its keyboard workflow or guided provider catalog.
+Continue with [Profile dashboard](../command-center/) for day-to-day keys and [Profiles and run history](../profiles-and-diagnostics/) for saved state and deletion boundaries.

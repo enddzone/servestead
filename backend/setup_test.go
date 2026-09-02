@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 const (
@@ -33,6 +37,28 @@ const (
 	setupTestComposeFilename         = "compose.yaml"
 	setupTestAPIKeyEnvironment       = "API_KEY=secret\n"
 )
+
+func TestTruncateForTableUsesDisplayWidthAndPreservesUnicode(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		width int
+		want  string
+	}{
+		{name: "accented", value: "éclair", width: 4, want: "écl."},
+		{name: "cjk", value: "東京大阪", width: 5, want: "東京."},
+		{name: "emoji", value: "🙂🙂🙂", width: 5, want: "🙂🙂."},
+		{name: "zero", value: "value", width: 0, want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := truncateForTable(test.value, test.width)
+			if got != test.want || !utf8.ValidString(got) || lipgloss.Width(got) > test.width {
+				t.Fatalf("truncateForTable(%q, %d) = %q (width %d), want %q", test.value, test.width, got, lipgloss.Width(got), test.want)
+			}
+		})
+	}
+}
 
 func TestRunPreflightPassesWithRequiredKeys(t *testing.T) {
 	directory := t.TempDir()
@@ -103,6 +129,10 @@ func TestSetupRequestFromResultHandlesTerminalStates(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "cancelled") {
 		t.Fatalf("cancelled setup returned unexpected error: %v", err)
 	}
+	_, _, _, err = setupRequestFromResult(context.Background(), store, io.Discard, profileSetupModel{quit: true})
+	if !errors.Is(err, errSetupQuit) {
+		t.Fatalf("quit setup returned unexpected error: %v", err)
+	}
 
 	_, _, repeat, err := setupRequestFromResult(context.Background(), store, io.Discard, profileSetupModel{deleteProfileID: profile.ID})
 	if err != nil || !repeat {
@@ -169,6 +199,9 @@ func TestLegacySetupModelNavigationAndConfirmation(t *testing.T) {
 	if model.step != setupStepInput || model.mode != setupModeBootstrapHarden || len(model.inputs) == 0 {
 		t.Fatalf("enter did not open bootstrap input step: %+v", model)
 	}
+	if width := model.inputs[0].Width(); width != 86 {
+		t.Fatalf("input width = %d after a 120-column resize, want 86", width)
+	}
 	if !strings.Contains(model.View().Content, "Set up an existing Ubuntu VPS") {
 		t.Fatalf("input view missing selected mode:\n%s", model.View().Content)
 	}
@@ -196,6 +229,100 @@ func TestLegacySetupModelNavigationAndConfirmation(t *testing.T) {
 	}
 	if !strings.Contains(model.View().Content, "Review plan") {
 		t.Fatalf("confirm view missing review:\n%s", model.View().Content)
+	}
+}
+
+func TestLegacySetupMinimumSizeBlocksRun(t *testing.T) {
+	model := newSetupModel()
+	model.step = setupStepConfirm
+	model.mode = setupModeDoctor
+	model.config = setupConfig{Mode: setupModeDoctor}
+
+	updated, command := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	model = updated.(setupModel)
+	if command != nil {
+		t.Fatalf("resize returned an unexpected command: %v", command)
+	}
+	view := model.View().Content
+	for _, expected := range []string{"Terminal too small", "Resize to at least 80 x 24.", "Current size: 40 x 12."} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("minimum-size view missing %q:\n%s", expected, view)
+		}
+	}
+	if strings.Contains(view, "Review plan") {
+		t.Fatalf("minimum-size view exposed the confirmation action:\n%s", view)
+	}
+
+	updated, command = model.Update(keyRunes("r"))
+	model = updated.(setupModel)
+	if command != nil || model.done || model.step != setupStepConfirm {
+		t.Fatalf("run key bypassed the minimum-size guard: %+v", model)
+	}
+}
+
+func TestLegacySetupInputOwnsQ(t *testing.T) {
+	model := newSetupModel()
+	model.mode = setupModeBootstrapHarden
+	model.step = setupStepInput
+	model.inputs = setupInputs(model.mode)
+	model.inputs[0].Focus()
+
+	if view := model.View().Content; strings.Contains(view, "q quits") {
+		t.Fatalf("input help claims q quits:\n%s", view)
+	}
+	updated, _ := model.Update(keyRunes("q"))
+	model = updated.(setupModel)
+	if model.quit || model.cancelled || model.inputs[0].Value() != "q" {
+		t.Fatalf("input did not retain ownership of q: %+v", model)
+	}
+}
+
+func TestFullRunMinimumSizeBlocksInputAndSanitizesHost(t *testing.T) {
+	model := newFullRunModel(setupConfig{
+		Host:               "203.0.113.10\x1b[31m\u202eowned",
+		PrivateKeyPath:     setupTestPrivateKey,
+		BaseDomain:         setupTestDomain,
+		LetsEncryptEmail:   setupTestEmail,
+		InitialSSHUser:     "root",
+		AdminUser:          "servestead",
+		PangolinAdminEmail: setupTestEmail,
+	})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	model = updated.(fullRunModel)
+	if view := model.View().Content; !strings.Contains(view, "Terminal too small") || strings.Contains(view, "Profile target") {
+		t.Fatalf("full-run minimum-size view exposed intake actions:\n%s", view)
+	}
+
+	updated, command := model.Update(keyCode(tea.KeyEnter))
+	model = updated.(fullRunModel)
+	if command != nil || model.done || model.focus != 0 {
+		t.Fatalf("enter bypassed the full-run minimum-size guard: %+v", model)
+	}
+
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	view := updated.(fullRunModel).View().Content
+	if strings.Contains(view, "\x1b[31m") || strings.Contains(view, "\u202e") || !strings.Contains(view, "Profile target: 203.0.113.10owned") {
+		t.Fatalf("full-run host was not safely rendered:\n%s", view)
+	}
+}
+
+func TestSetupTextInputsRemoveUnicodeFormatCharacters(t *testing.T) {
+	input := newSetupInputs([]setupInputField{{label: "Visible", value: "ab\u202ecd"}})[0]
+	if input.Value() != "abcd" || input.Position() != 4 {
+		t.Fatalf("initial visible input was not sanitized: value=%q cursor=%d", input.Value(), input.Position())
+	}
+
+	input.Focus()
+	input.SetCursor(2)
+	input, _ = updateSetupTextInput(input, keyRunes("\u2066X"))
+	if input.Value() != "abXcd" || input.Position() != 3 || strings.Contains(input.View(), "\u2066") {
+		t.Fatalf("edited visible input was not safely sanitized: value=%q cursor=%d view=%q", input.Value(), input.Position(), input.View())
+	}
+
+	const secretValue = "secret\u2066value"
+	secret := newSetupInputs([]setupInputField{{label: "Secret", value: secretValue, secret: true}})[0]
+	if secret.Value() != secretValue || strings.Contains(secret.View(), "\u2066") {
+		t.Fatalf("secret input was changed or exposed: value=%q view=%q", secret.Value(), secret.View())
 	}
 }
 
@@ -237,8 +364,8 @@ func TestLegacySetupModelEditDoctorAndCancel(t *testing.T) {
 
 	updated, command := model.Update(keyRunes("q"))
 	model = updated.(setupModel)
-	if command == nil || !model.cancelled {
-		t.Fatalf("q from mode should cancel setup: %+v", model)
+	if command == nil || !model.quit || model.cancelled {
+		t.Fatalf("q from mode should quit cleanly: %+v", model)
 	}
 }
 
@@ -302,6 +429,35 @@ func TestSetupPlanSummaryGivesGuidance(t *testing.T) {
 	}
 	if strings.Contains(summary, "Phase") {
 		t.Fatalf("summary leaks implementation phase language: %q", summary)
+	}
+}
+
+func TestSetupReviewFlattensUntrustedSingleLineFields(t *testing.T) {
+	summary := setupPlanSummary(setupConfig{
+		Mode:                 setupModeFullRun,
+		ProfileID:            "prod\ninjected",
+		Host:                 "203.0.113.10\x1b[31m\nowned",
+		InitialSSHUser:       "root\tuser",
+		AdminUser:            "serv\u202eestead",
+		BaseDomain:           "example.com\nspoofed",
+		ConfigRepositoryPath: "/tmp/repo\nsecond-line",
+	})
+	if strings.ContainsAny(summary, "\x1b\t") || strings.Contains(summary, "\u202e") {
+		t.Fatalf("setup plan retained terminal controls: %q", summary)
+	}
+	for _, expected := range []string{"prod injected", "203.0.113.10 owned", "root user", "servestead", "/tmp/repo second-line"} {
+		if !strings.Contains(summary, expected) {
+			t.Fatalf("setup plan missing flattened value %q: %q", expected, summary)
+		}
+	}
+
+	model := newProfileSetupModel(nil)
+	model.repositoryMode = "github"
+	model.repositoryInputs[0].SetValue("/tmp/checkout\nspoofed")
+	model.repositoryInputs[1].SetValue("https://example.test/repo.git\x1b]0;owned\a")
+	line := model.repositoryReviewLine()
+	if strings.ContainsAny(line, "\n\t\x1b\a") || !strings.Contains(line, "/tmp/checkout spoofed") {
+		t.Fatalf("repository review retained multiline or terminal controls: %q", line)
 	}
 }
 
@@ -636,7 +792,7 @@ func TestProfileSetupGitHubTokenScreenManagesProfileSecret(t *testing.T) {
 	}
 
 	t.Setenv("SERVESTEAD_GITHUB_TOKEN", "")
-	updated, _ = result.updateGitHubToken(keyRunes("e"))
+	updated, _ = result.updateGitHubToken(keyCtrl('e'))
 	result = updated.(profileSetupModel)
 	if !strings.Contains(result.err, "SERVESTEAD_GITHUB_TOKEN") {
 		t.Fatalf("empty environment token should show a validation error: %q", result.err)
@@ -655,7 +811,7 @@ func TestProfileSetupGitHubTokenScreenManagesProfileSecret(t *testing.T) {
 	assertGitHubTokenScreenStatus(t, result, "github_pat_profile_secret", "Profile token: configured", "Effective source: profile")
 
 	t.Setenv("SERVESTEAD_GITHUB_TOKEN", "github_pat_env_secret")
-	updated, _ = result.updateGitHubToken(keyRunes("e"))
+	updated, _ = result.updateGitHubToken(keyCtrl('e'))
 	result = updated.(profileSetupModel)
 	secrets, err = store.LoadSecrets(profile.ID)
 	if err != nil {
@@ -666,7 +822,7 @@ func TestProfileSetupGitHubTokenScreenManagesProfileSecret(t *testing.T) {
 	}
 	assertGitHubTokenScreenStatus(t, result, "github_pat_env_secret", "Environment token: configured", "Effective source: environment")
 
-	updated, _ = result.updateGitHubToken(keyRunes("x"))
+	updated, _ = result.updateGitHubToken(keyCtrl('x'))
 	result = updated.(profileSetupModel)
 	secrets, err = store.LoadSecrets(profile.ID)
 	if err != nil {
@@ -699,8 +855,14 @@ func TestProfileSetupGitHubTokenScreenReportsSaveFailures(t *testing.T) {
 		t.Fatalf("missing store remove error = %q", result.err)
 	}
 
+	baseStore := newFileProfileStore(t.TempDir())
+	profile, err := baseStore.Create(Profile{ID: setupTestProfileID, IP: setupTestHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.profiles[0].Profile = profile
 	model.profileStore = failingSaveSecretsProfileStore{
-		ProfileStore: newFileProfileStore(t.TempDir()),
+		ProfileStore: baseStore,
 		err:          errors.New("save failed"),
 	}
 	result = model.saveSelectedGitHubToken("github_pat_profile_secret")
@@ -736,6 +898,24 @@ func openGitHubTokenScreen(t *testing.T) (ProfileStore, Profile, profileSetupMod
 		t.Fatal("GitHub token input is not masked")
 	}
 	return store, profile, result
+}
+
+func TestGitHubTokenScreenAcceptsPrintableShortcutLetters(t *testing.T) {
+	store, profile, model := openGitHubTokenScreen(t)
+	updated, _ := model.updateGitHubToken(keyRunes("e"))
+	result := updated.(profileSetupModel)
+	updated, _ = result.updateGitHubToken(keyRunes("x"))
+	result = updated.(profileSetupModel)
+	if result.githubTokenInput.Value() != "ex" {
+		t.Fatalf("printable token input = %q, want %q", result.githubTokenInput.Value(), "ex")
+	}
+	secrets, err := store.LoadSecrets(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secrets.GitHubToken != "" {
+		t.Fatalf("printable shortcut letters changed stored token: %q", secrets.GitHubToken)
+	}
 }
 
 func assertGitHubTokenScreenStatus(t *testing.T, model profileSetupModel, forbidden string, expected ...string) {
@@ -991,20 +1171,15 @@ func TestFailedStackSyncRetryCollectsPangolinCredentials(t *testing.T) {
 			Stages: map[string]SetupStageStatus{"stacks": {Status: stageStatusFailed}},
 		}},
 	}
-	model := newProfileSetupModel([]profileChoice{{
-		Profile: Profile{
-			ID: setupTestProfileID, IP: setupTestHost, BaseDomain: setupTestDomain,
-			LetsEncryptEmail: setupTestEmail, PangolinAdminEmail: setupTestEmail,
-		},
-		State:   state,
-		Secrets: ProfileSecrets{PangolinAdminPassword: setupTestOldPassword},
-	}})
-	model.selectedIndex = 0
+	model := newCleanStackManagerModel(t)
+	model.profiles[0].State = state
+	model.profiles[0].Profile.LetsEncryptEmail = setupTestEmail
+	model.profiles[0].Profile.PangolinAdminEmail = setupTestEmail
+	model.profiles[0].Secrets.PangolinAdminPassword = setupTestOldPassword
 	model.setInputsFromChoice(false)
 	model.screen = profileSetupScreenStacks
-	model.stackGitStatus = "clean"
 	updated, command := model.updateStacks(keyRunes("y"))
-	result := updated.(profileSetupModel)
+	result, command := settleProfileStackOperation(t, updated.(profileSetupModel), command)
 	if command != nil || result.done || result.screen != profileSetupScreenAdvanced || result.singleStage != "stacks" {
 		t.Fatalf("failed stack sync retry did not request credentials: screen=%d stage=%q done=%v", result.screen, result.singleStage, result.done)
 	}
@@ -1123,8 +1298,8 @@ func TestProfileDashboardStartsGuidedStackAdd(t *testing.T) {
 	result = addGuidedStackRoute(t, result, 1)
 	result = selectAdjacentStackEnvironment(t, result)
 	result.stackInputs[0].SetValue("site")
-	updated, _ := result.updateStackReview(keyCode(tea.KeyEnter))
-	result = updated.(profileSetupModel)
+	updated, command := result.updateStackReview(keyCode(tea.KeyEnter))
+	result, _ = settleProfileStackOperation(t, updated.(profileSetupModel), command)
 	if result.screen != profileSetupScreenStacks || len(result.stacks) != 1 || result.stacks[0].Name != "site" {
 		t.Fatalf("stack review did not save in-session: %+v", result)
 	}
@@ -1169,10 +1344,16 @@ func newGuidedStackAddModel(t *testing.T) (profileSetupModel, string, string) {
 	if err := os.WriteFile(filepath.Join(directory, ".env"), []byte(setupTestAPIKeyEnvironment), 0600); err != nil {
 		t.Fatal(err)
 	}
+	store := newFileProfileStore(filepath.Join(directory, "profile-store"))
+	profile, err := store.Create(Profile{ID: setupTestProfileID, IP: setupTestHost, ConfigRepositoryPath: repository})
+	if err != nil {
+		t.Fatal(err)
+	}
 	model := newProfileSetupModel([]profileChoice{{
-		Profile: Profile{ID: setupTestProfileID, IP: setupTestHost, ConfigRepositoryPath: repository},
+		Profile: profile,
 		State:   ProfileState{Runs: map[string]SetupRun{}},
 	}})
+	model.profileStore = store
 	model.selectedIndex = 0
 	model.screen = profileSetupScreenDashboard
 	return model, repository, composePath
@@ -1180,8 +1361,8 @@ func newGuidedStackAddModel(t *testing.T) (profileSetupModel, string, string) {
 
 func openGuidedStackAddCompose(t *testing.T, model profileSetupModel, composePath string) profileSetupModel {
 	t.Helper()
-	updated, _ := model.updateProfileDashboard(keyRunes("s"))
-	result := updated.(profileSetupModel)
+	updated, command := model.updateProfileDashboard(keyRunes("s"))
+	result, _ := settleProfileStackOperation(t, updated.(profileSetupModel), command)
 	if result.screen != profileSetupScreenStacks {
 		t.Fatalf("stack shortcut did not open stack manager: %v (%s)", result.screen, result.err)
 	}
@@ -1312,11 +1493,113 @@ func TestStackFilePickersSelectComposeAndShowHiddenEnvironmentFiles(t *testing.T
 	}
 }
 
+func TestStackFilePickersPauseBeforeRenderingUnsafeNames(t *testing.T) {
+	directory := t.TempDir()
+	unsafeName := "bad\x1b[31m.yaml"
+	if err := os.WriteFile(filepath.Join(directory, unsafeName), []byte("services: {}\n"), 0600); err != nil {
+		t.Skipf("filesystem does not permit control characters in filenames: %v", err)
+	}
+	warning := stackFilePickerDirectoryError(directory)
+	if !strings.Contains(warning, "filename with terminal control characters") {
+		t.Fatalf("unsafe directory warning = %q", warning)
+	}
+
+	model := newProfileSetupModel(nil)
+	model.screen = profileSetupScreenStackCompose
+	model.stackComposePicker = newStackFilePicker(directory, []string{".yaml", ".yml"}, false)
+	model.stackComposeBrowserError = warning
+	model.err = warning
+	view := model.View().Content
+	if !strings.Contains(view, "File browser paused") || strings.Contains(view, unsafeName) {
+		t.Fatalf("unsafe Compose browser view was not contained:\n%s", view)
+	}
+	updated, command := model.updateStackCompose(keyCode(tea.KeyEnter))
+	blocked := updated.(profileSetupModel)
+	if command != nil || blocked.stackComposePath != "" || blocked.screen != profileSetupScreenStackCompose {
+		t.Fatalf("unsafe Compose browser accepted input: %+v", blocked)
+	}
+	updated, command = blocked.updateStackCompose(keyRunes("/"))
+	manual := updated.(profileSetupModel)
+	if command == nil || !manual.stackComposeManual {
+		t.Fatalf("unsafe Compose browser did not retain manual fallback: %+v", manual)
+	}
+
+	environment := newProfileSetupModel(nil)
+	environment.screen = profileSetupScreenStackEnvironment
+	environment.stackEnvironmentMode = stackEnvironmentBrowse
+	environment.stackEnvironmentPicker = newStackFilePicker(directory, nil, true)
+	environment.stackEnvironmentBrowserError = warning
+	view = environment.View().Content
+	if !strings.Contains(view, "File browser paused") || strings.Contains(view, unsafeName) {
+		t.Fatalf("unsafe environment browser view was not contained:\n%s", view)
+	}
+}
+
+func TestStackFilePickerRejectsUnsafeCurrentDirectoryAndSymlinkTarget(t *testing.T) {
+	if terminalSingleLineSafe("safe/\x1b[31m") {
+		t.Fatal("terminal control sequence was accepted as a safe directory")
+	}
+	directory := t.TempDir()
+	targetDirectory := filepath.Join(t.TempDir(), "target\x1b[31m")
+	if err := os.Mkdir(targetDirectory, 0700); err != nil {
+		t.Skipf("filesystem does not permit control characters in paths: %v", err)
+	}
+	if err := os.Symlink(targetDirectory, filepath.Join(directory, "safe-link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if warning := stackFilePickerDirectoryError(directory); !strings.Contains(warning, "symlink target with terminal control characters") {
+		t.Fatalf("unsafe symlink warning = %q", warning)
+	}
+}
+
+func TestStackEditorRejectsOversizedComposeImport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), setupTestComposeFilename)
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), int(stackComposeMaxBytes+1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel(nil)
+	updated, command := model.loadStackCompose(path)
+	result := updated.(profileSetupModel)
+	if command != nil || !strings.Contains(result.err, formatByteLimit(stackComposeMaxBytes)) {
+		t.Fatalf("oversized editor Compose import returned command=%v err=%q", command, result.err)
+	}
+}
+
+func TestStackEditorRejectsOversizedEnvironmentImport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), int(stackEnvironmentMaxBytes+1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel(nil)
+	updated, command := model.loadStackEnvironment(path)
+	result := updated.(profileSetupModel)
+	if command != nil || !strings.Contains(result.err, formatByteLimit(stackEnvironmentMaxBytes)) {
+		t.Fatalf("oversized editor environment import returned command=%v err=%q", command, result.err)
+	}
+}
+
 func TestStackEditorManagesMultipleResourcesAndRuntimeEnvironment(t *testing.T) {
 	model, provider, repository := newMultiResourceStackEditorModel(t)
 	model = editFirstStackResourceSubdomain(t, model)
 	model = saveStackEditorRuntimeEnvironment(t, model)
 	assertStackEditorSavedRuntimeEnvironment(t, model, provider, repository)
+}
+
+func TestStackEditorRejectsReservedObservabilityName(t *testing.T) {
+	model, _, repository := newMultiResourceStackEditorModel(t)
+	model.stackInputs[0].SetValue(reservedObservabilityStackName)
+
+	updated, command := model.updateStackEditor(keyCtrl('s'))
+	finished, _ := settleProfileStackOperation(t, updated.(profileSetupModel), command)
+	if !strings.Contains(finished.err, "reserved") {
+		t.Fatalf("stack editor did not reject the managed observability name: %q", finished.err)
+	}
+	if _, err := os.Stat(filepath.Join(repository, "stacks", "suite", stackComposeFilename)); err != nil {
+		t.Fatalf("reserved rename removed the original stack: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repository, "stacks", reservedObservabilityStackName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reserved rename created an observability application stack: %v", err)
+	}
 }
 
 func newMultiResourceStackEditorModel(t *testing.T) (profileSetupModel, *recordingSecretProvider, string) {
@@ -1394,8 +1677,8 @@ func saveStackEditorRuntimeEnvironment(t *testing.T, model profileSetupModel) pr
 	model.stackEnvironmentInput.SetValue(environmentPath)
 	updated, _ = model.updateStackEnvironment(keyCode(tea.KeyEnter))
 	model = updated.(profileSetupModel)
-	updated, _ = model.updateStackEditor(keyCtrl('s'))
-	model = updated.(profileSetupModel)
+	updated, command := model.updateStackEditor(keyCtrl('s'))
+	model, _ = settleProfileStackOperation(t, updated.(profileSetupModel), command)
 	if model.screen != profileSetupScreenStacks || model.err != "" {
 		t.Fatalf("stack editor did not save: %v %s", model.screen, model.err)
 	}
@@ -1422,8 +1705,8 @@ func assertStackEditorSavedRuntimeEnvironment(t *testing.T, model profileSetupMo
 	}
 	model.openStackEditor(reloaded[0])
 	model.stackInputs[0].SetValue("suite-renamed")
-	updated, _ := model.updateStackEditor(keyCtrl('s'))
-	model = updated.(profileSetupModel)
+	updated, command := model.updateStackEditor(keyCtrl('s'))
+	model, _ = settleProfileStackOperation(t, updated.(profileSetupModel), command)
 	if model.screen != profileSetupScreenStacks || model.err != "" {
 		t.Fatalf("stack editor did not rename with secrets: %v %s", model.screen, model.err)
 	}
@@ -1469,6 +1752,8 @@ public_resources:
 	}})
 	model.selectedIndex = 0
 	model.screen = profileSetupScreenDashboard
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	model = updated.(profileSetupModel)
 	model.refreshDashboard()
 	if model.err != "" {
 		t.Fatal(model.err)
@@ -1488,7 +1773,7 @@ public_resources:
 	}
 
 	updated, command = model.updateStacks(keyRunes("y"))
-	blocked = updated.(profileSetupModel)
+	blocked, command = settleProfileStackOperation(t, updated.(profileSetupModel), command)
 	if command != nil || blocked.done || !strings.Contains(blocked.err, "uncommitted") {
 		t.Fatalf("dirty repository sync was not blocked: %+v", blocked)
 	}
@@ -1500,7 +1785,7 @@ public_resources:
 		t.Fatalf("committed repository drift not detected: %q", model.stackSyncStatus)
 	}
 	updated, command = model.updateStacks(keyRunes("y"))
-	syncing := updated.(profileSetupModel)
+	syncing, command := settleProfileStackOperation(t, updated.(profileSetupModel), command)
 	if command == nil || !syncing.done || syncing.singleStage != "stacks" {
 		t.Fatalf("clean repository did not start synchronization: %+v", syncing)
 	}
@@ -1530,14 +1815,23 @@ func newComposeOnlyStackManagerModel(t *testing.T) (profileSetupModel, string) {
 	if err := os.WriteFile(filepath.Join(stackDirectory, setupTestComposeFilename), []byte(testApplicationCompose), 0600); err != nil {
 		t.Fatal(err)
 	}
-	state := ProfileState{Runs: map[string]SetupRun{}}
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		ID: setupTestProfileID, IP: setupTestHost, BaseDomain: setupTestDomain,
+		ConfigRepositoryPath: repository,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, state, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	model := newProfileSetupModel([]profileChoice{{
-		Profile: Profile{
-			ID: setupTestProfileID, IP: setupTestHost, BaseDomain: setupTestDomain,
-			ConfigRepositoryPath: repository,
-		},
-		State: state,
+		Profile: profile,
+		State:   state,
 	}})
+	model.profileStore = store
 	model.selectedIndex = 0
 	model.screen = profileSetupScreenStacks
 	model.refreshStacks()
@@ -1571,7 +1865,7 @@ func reviewAndSaveComposeOnlyStack(t *testing.T, model profileSetupModel) profil
 		t.Fatalf("draft stack did not open for review: %+v", reviewing)
 	}
 	updated, command = reviewing.updateStackEditor(keyCtrl('s'))
-	saved := updated.(profileSetupModel)
+	saved, command := settleProfileStackOperation(t, updated.(profileSetupModel), command)
 	if command != nil || saved.screen != profileSetupScreenStacks || saved.err != "" {
 		t.Fatalf("draft stack did not save: %+v", saved)
 	}
@@ -1590,10 +1884,97 @@ func TestProfileSetupUsesAvailableTerminalHeight(t *testing.T) {
 	}
 }
 
+func TestProfileSetupShowsMinimumTerminalSizeGuard(t *testing.T) {
+	model := newProfileSetupModel(nil)
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	result := updated.(profileSetupModel)
+	view := result.View().Content
+	if !strings.Contains(view, "Terminal too small: 40x12") || !strings.Contains(view, "80x24") {
+		t.Fatalf("small terminal guard missing:\n%s", view)
+	}
+	updated, _ = result.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	if view = updated.(profileSetupModel).View().Content; strings.Contains(view, "Terminal too small") {
+		t.Fatalf("normal terminal still shows size guard:\n%s", view)
+	}
+}
+
+func TestProfileSetupMinimumSizeGuardBlocksHiddenDeleteConfirmation(t *testing.T) {
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{ID: setupTestProfileID, Name: "production", IP: setupTestHost},
+		State:   ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenDeleteConfirm
+	model.deleteProfileInput.SetValue("delete production")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	result := updated.(profileSetupModel)
+
+	updated, command := result.Update(keyCode(tea.KeyEnter))
+	result = updated.(profileSetupModel)
+	if command != nil || result.deleteProfilePending || result.screen != profileSetupScreenDeleteConfirm {
+		t.Fatalf("small-terminal Enter triggered hidden profile deletion: %+v", result)
+	}
+}
+
+func TestProfileSetupViewsFitSupportedTerminalWidths(t *testing.T) {
+	choice := profileChoice{
+		Profile: Profile{ID: setupTestProfileID, Name: "production", IP: setupTestHost},
+		State:   ProfileState{Runs: map[string]SetupRun{}},
+	}
+	for _, size := range []tea.WindowSizeMsg{{Width: 80, Height: 24}, {Width: 120, Height: 40}} {
+		model := newProfileSetupModel([]profileChoice{choice})
+		model.selectedIndex = 0
+		model.screen = profileSetupScreenDashboard
+		model.refreshDashboard()
+		updated, _ := model.Update(size)
+		view := updated.(profileSetupModel).View().Content
+		for lineNumber, line := range strings.Split(view, "\n") {
+			if width := lipgloss.Width(line); width > size.Width {
+				t.Fatalf("%dx%d view line %d is %d columns wide:\n%s", size.Width, size.Height, lineNumber+1, width, line)
+			}
+		}
+	}
+}
+
+func TestProfileSetupQuestionMarkTogglesExpandedHelp(t *testing.T) {
+	model := newProfileSetupModel(nil)
+	updated, command := model.Update(keyRunes("?"))
+	result := updated.(profileSetupModel)
+	if command != nil || !result.help.ShowAll {
+		t.Fatalf("first ? did not expand help: expanded=%v command=%v", result.help.ShowAll, command)
+	}
+	if view := result.View().Content; !strings.Contains(view, "less") {
+		t.Fatalf("expanded help does not show close binding:\n%s", view)
+	}
+	updated, command = result.Update(keyRunes("?"))
+	result = updated.(profileSetupModel)
+	if command != nil || result.help.ShowAll {
+		t.Fatalf("second ? did not collapse help: expanded=%v command=%v", result.help.ShowAll, command)
+	}
+}
+
+func TestProfileSetupQuitIsDistinctFromCancel(t *testing.T) {
+	model := newProfileSetupModel(nil)
+	updated, command := model.Update(keyRunes("q"))
+	result := updated.(profileSetupModel)
+	if command == nil || !result.quit || result.cancelled {
+		t.Fatalf("q state = quit:%v cancelled:%v command:%v", result.quit, result.cancelled, command)
+	}
+
+	model = newProfileSetupModel(nil)
+	updated, command = model.Update(keyCtrl('c'))
+	result = updated.(profileSetupModel)
+	if command == nil || result.quit || !result.cancelled {
+		t.Fatalf("ctrl+c state = quit:%v cancelled:%v command:%v", result.quit, result.cancelled, command)
+	}
+}
+
 func TestProfileSetupHelpCoversAllScreens(t *testing.T) {
 	helpMaps := []profileSetupHelp{
 		{screen: profileSetupScreenPicker},
 		{screen: profileSetupScreenDashboard, hasProfile: true, hasPangolinAccess: true, hasCloud: true},
+		{screen: profileSetupScreenRunHistory},
+		{screen: profileSetupScreenRunDetail},
 		{screen: profileSetupScreenIntake},
 		{screen: profileSetupScreenAdvanced},
 		{screen: profileSetupScreenRepository},
@@ -1629,6 +2010,11 @@ func TestProfileSetupHelpCoversAllScreens(t *testing.T) {
 	if bindings := (profileSetupHelp{screen: profileSetupScreen(-1)}).ShortHelp(); bindings != nil {
 		t.Fatalf("unknown screen returned bindings: %+v", bindings)
 	}
+}
+
+type profileSetupViewExpectation struct {
+	screen profileSetupScreen
+	want   string
 }
 
 func TestProfileSetupModelViewsRenderPopulatedScreens(t *testing.T) {
@@ -1726,13 +2112,14 @@ func TestProfileSetupModelViewsRenderPopulatedScreens(t *testing.T) {
 	model.repositoryInputs[1].SetValue("https://github.com/enddzone/servestead-config.git")
 	model.screen = profileSetupScreenReview
 	model.refreshPlanPreview()
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model = updated.(profileSetupModel)
 
-	cases := []struct {
-		screen profileSetupScreen
-		want   string
-	}{
+	cases := []profileSetupViewExpectation{
 		{profileSetupScreenPicker, "Servestead profiles"},
 		{profileSetupScreenDashboard, "Dashboard for production"},
+		{profileSetupScreenRunHistory, "Run history for production"},
+		{profileSetupScreenRunDetail, "No setup run selected"},
 		{profileSetupScreenIntake, "Upfront setup intake"},
 		{profileSetupScreenAdvanced, "Advanced values"},
 		{profileSetupScreenRepository, "Observability configuration repository"},
@@ -1753,13 +2140,105 @@ func TestProfileSetupModelViewsRenderPopulatedScreens(t *testing.T) {
 		{profileSetupScreenReview, "Review full setup plan"},
 		{profileSetupScreenDeleteConfirm, "Delete saved profile"},
 	}
-	for _, tc := range cases {
-		model.screen = tc.screen
-		if view := model.View().Content; !strings.Contains(view, tc.want) {
-			t.Fatalf("screen %d missing %q:\n%s", tc.screen, tc.want, view)
+	assertProfileSetupViews(t, model, cases)
+	assertLongProfileStackViewsScroll(t, model)
+	assertProfileSetupAlternateInputViews(t, model)
+}
+
+func TestPangolinCredentialRevealEscapesTerminalControls(t *testing.T) {
+	choice := profileChoice{
+		Profile: Profile{
+			BaseDomain:         "example.com\x1b]0;owned\a",
+			PangolinAdminEmail: "admin@example.com\nspoofed",
+		},
+		Secrets: ProfileSecrets{
+			PangolinAdminPassword: "Aa1!pass\x1b[31mword",
+			PangolinSetupToken:    "token\u202evalue",
+		},
+	}
+	model := newProfileSetupModel([]profileChoice{choice})
+	model.selectedIndex = 0
+	model.showPangolinAccess = true
+	model.pangolinStatus = pangolinRegistrationComplete
+	admin := model.pangolinRegistrationAccessText(choice)
+	model.pangolinStatus = pangolinRegistrationIncomplete
+	setup := model.pangolinRegistrationAccessText(choice)
+	for name, rendered := range map[string]string{"admin": admin, "setup": setup} {
+		if strings.ContainsAny(rendered, "\x1b\a") || strings.Contains(rendered, "\u202e") {
+			t.Fatalf("%s credential reveal retained terminal controls: %q", name, rendered)
+		}
+		if !strings.Contains(rendered, "escaped; use pangolin-credentials for exact bytes") {
+			t.Fatalf("%s unsafe credential was not shown as escaped: %q", name, rendered)
 		}
 	}
+}
 
+func assertProfileSetupViews(t *testing.T, model profileSetupModel, cases []profileSetupViewExpectation) {
+	t.Helper()
+	boundedScreens := map[profileSetupScreen]bool{
+		profileSetupScreenDashboard:   true,
+		profileSetupScreenStackEditor: true,
+		profileSetupScreenStackReview: true,
+	}
+	for _, tc := range cases {
+		model.screen = tc.screen
+		view := model.View().Content
+		if !strings.Contains(view, tc.want) {
+			t.Fatalf("screen %d missing %q:\n%s", tc.screen, tc.want, view)
+		}
+		assertProfileSetupViewWidth(t, model, tc.screen, view)
+		if boundedScreens[tc.screen] && strings.Count(view, "\n")+1 > model.height {
+			t.Fatalf("screen %d exceeded %d rows:\n%s", tc.screen, model.height, view)
+		}
+	}
+}
+
+func assertProfileSetupViewWidth(t *testing.T, model profileSetupModel, screen profileSetupScreen, view string) {
+	t.Helper()
+	for lineNumber, line := range strings.Split(view, "\n") {
+		if width := lipgloss.Width(line); width > model.width {
+			t.Fatalf("screen %d line %d is %d columns wide at %d columns:\n%s", screen, lineNumber+1, width, model.width, line)
+		}
+	}
+}
+
+func assertLongProfileStackViewsScroll(t *testing.T, model profileSetupModel) {
+	t.Helper()
+	model.stackServices = nil
+	model.stackResources = nil
+	for index := range 24 {
+		name := fmt.Sprintf("service-%02d", index)
+		model.stackServices = append(model.stackServices, composeServiceSummary{Name: name, ContainerPorts: []int{8080 + index}})
+		model.stackResources = append(model.stackResources, stackPublicResource{
+			ID: fmt.Sprintf("route-%02d", index), Service: name, Subdomain: name, Port: 8080 + index,
+		})
+	}
+	model.stackResourceTable = newStackResourceTable(model.stackResources)
+	for _, screen := range []profileSetupScreen{profileSetupScreenStackEditor, profileSetupScreenStackReview} {
+		model.screen = screen
+		if screen == profileSetupScreenStackEditor {
+			model.stackEditorViewport.GotoTop()
+		} else {
+			model.stackReviewViewport.GotoTop()
+		}
+		view := model.View().Content
+		if lineCount := strings.Count(view, "\n") + 1; lineCount > model.height {
+			t.Fatalf("long screen %d used %d rows at %dx%d:\n%s", screen, lineCount, model.width, model.height, view)
+		}
+		updated, _ := model.Update(keyCode(tea.KeyPgDown))
+		model = updated.(profileSetupModel)
+		offset := model.stackEditorViewport.YOffset()
+		if screen == profileSetupScreenStackReview {
+			offset = model.stackReviewViewport.YOffset()
+		}
+		if offset == 0 {
+			t.Fatalf("long screen %d did not scroll", screen)
+		}
+	}
+}
+
+func assertProfileSetupAlternateInputViews(t *testing.T, model profileSetupModel) {
+	t.Helper()
 	model.screen = profileSetupScreenStackCompose
 	model.stackComposeManual = true
 	if view := model.View().Content; !strings.Contains(view, "Docker Compose file") {
@@ -1791,15 +2270,21 @@ func TestStackDeleteRemovesSelectedStack(t *testing.T) {
 	runGitCommand(t, repository, "add", ".")
 	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Add site")
 
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		ID:                   setupTestProfileID,
+		IP:                   setupTestHost,
+		BaseDomain:           setupTestDomain,
+		ConfigRepositoryPath: repository,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	model := newProfileSetupModel([]profileChoice{{
-		Profile: Profile{
-			ID:                   setupTestProfileID,
-			IP:                   setupTestHost,
-			BaseDomain:           setupTestDomain,
-			ConfigRepositoryPath: repository,
-		},
-		State: ProfileState{Runs: map[string]SetupRun{}},
+		Profile: profile,
+		State:   ProfileState{Runs: map[string]SetupRun{}},
 	}})
+	model.profileStore = store
 	model.selectedIndex = 0
 	model.screen = profileSetupScreenStacks
 	model.stacks = []editableStack{{Name: "site"}}
@@ -1807,12 +2292,13 @@ func TestStackDeleteRemovesSelectedStack(t *testing.T) {
 
 	updated, command := model.confirmSelectedStackDelete()
 	model = updated.(profileSetupModel)
-	if command != nil || model.screen != profileSetupScreenStackDeleteConfirm || model.err != "" {
+	if command == nil || model.screen != profileSetupScreenStackDeleteConfirm || model.err != "" {
 		t.Fatalf("selected stack did not open delete confirmation: %+v", model)
 	}
 
-	updated, command = model.deleteSelectedStack()
-	model = updated.(profileSetupModel)
+	model.stackDeleteInput.SetValue("delete site")
+	updated, command = model.updateStackDeleteConfirm(keyCode(tea.KeyEnter))
+	model, command = settleProfileStackOperation(t, updated.(profileSetupModel), command)
 	if command != nil || model.screen != profileSetupScreenStacks || model.err != "" {
 		t.Fatalf("selected stack was not deleted cleanly: %+v", model)
 	}
@@ -1824,13 +2310,16 @@ func TestStackDeleteRemovesSelectedStack(t *testing.T) {
 func TestProfileStackManagerReviewsStagesAndCommitsCleanStack(t *testing.T) {
 	model := newCleanStackManagerModel(t)
 	updated, command := model.updateStacks(keyRunes("v"))
-	withDiff := updated.(profileSetupModel)
+	withDiff, command := settleProfileStackOperation(t, updated.(profileSetupModel), command)
 	if command != nil || withDiff.screen != profileSetupScreenStackDiff || withDiff.err != "" {
 		t.Fatalf("diff action failed: %+v", withDiff)
 	}
 
-	updated, _ = model.updateStacks(keyRunes("g"))
-	staged := updated.(profileSetupModel)
+	updated, command = model.updateStacks(keyRunes("g"))
+	staged, command := settleProfileStackOperation(t, updated.(profileSetupModel), command)
+	if command != nil {
+		t.Fatalf("stage action left an unexpected command: %v", command)
+	}
 	if staged.err != "" || !strings.Contains(staged.stackNotice, "staged") {
 		t.Fatalf("stage action failed: %+v", staged)
 	}
@@ -1851,13 +2340,13 @@ func TestProfileStackManagerRunsSyncsAndReportsPushFailure(t *testing.T) {
 	}
 
 	updated, command = model.updateStacks(keyRunes("y"))
-	syncing := updated.(profileSetupModel)
+	syncing, command := settleProfileStackOperation(t, updated.(profileSetupModel), command)
 	if command == nil || !syncing.done || syncing.singleStage != "stacks" {
 		t.Fatalf("stack sync action failed: %+v", syncing)
 	}
 
 	updated, command = model.updateStacks(keyRunes("p"))
-	pushing := updated.(profileSetupModel)
+	pushing, command := settleProfileStackOperation(t, updated.(profileSetupModel), command)
 	if command != nil || pushing.err == "" {
 		t.Fatalf("push action without origin should report an error: %+v", pushing)
 	}
@@ -1881,15 +2370,22 @@ func newCleanStackManagerModel(t *testing.T) profileSetupModel {
 	runGitCommand(t, repository, "add", ".")
 	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Add site")
 
-	model := newProfileSetupModel([]profileChoice{{
-		Profile: Profile{
-			ID:                   setupTestProfileID,
-			IP:                   setupTestHost,
-			BaseDomain:           setupTestDomain,
-			ConfigRepositoryPath: repository,
-		},
-		State: ProfileState{Runs: map[string]SetupRun{}},
-	}})
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		ID:                   setupTestProfileID,
+		IP:                   setupTestHost,
+		BaseDomain:           setupTestDomain,
+		ConfigRepositoryPath: repository,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, state, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel([]profileChoice{{Profile: profile, State: state}})
+	model.profileStore = store
 	model.selectedIndex = 0
 	model.screen = profileSetupScreenStacks
 	model.refreshStacks()
@@ -2027,7 +2523,8 @@ func TestProfileSetupRepositoryFlowDefaultsToCreateBeforeSSH(t *testing.T) {
 		"Create a new local repository",
 		"Use an existing local checkout",
 		"Clone a GitHub repository",
-		"after plan confirmation and before any SSH commands run",
+		"after plan confirmation and before any",
+		"SSH commands run",
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("repository choice view missing %q:\n%s", expected, view)
@@ -2171,26 +2668,418 @@ func TestProfileSetupModelFreshUsesAdminAsInitialUser(t *testing.T) {
 }
 
 func TestProfileSetupModelDeleteConfirmation(t *testing.T) {
-	choice := profileChoice{
-		Profile: Profile{
-			ID: setupTestProfileID,
-			IP: setupTestHost,
-		},
-		State: ProfileState{Runs: map[string]SetupRun{}},
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{
+		ID:   setupTestProfileID,
+		Name: "production",
+		IP:   setupTestHost,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	model := newProfileSetupModel([]profileChoice{choice})
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: profile,
+		State:   ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	model.profileStore = store
 	model.selectedIndex = 0
 	model.screen = profileSetupScreenDashboard
 
-	updatedModel, _ := model.updateProfileDashboard(keyRunes("x"))
+	updatedModel, command := model.updateProfileDashboard(keyRunes("x"))
 	result := updatedModel.(profileSetupModel)
-	if result.screen != profileSetupScreenDeleteConfirm {
+	if result.screen != profileSetupScreenDeleteConfirm || command == nil {
 		t.Fatalf("delete key did not open confirmation: %+v", result.screen)
 	}
-	updatedModel, _ = result.updateProfileDeleteConfirm(keyRunes("y"))
+	result.deleteProfileInput.SetValue("delete production")
+	updatedModel, command = result.updateProfileDeleteConfirm(keyCode(tea.KeyEnter))
 	result = updatedModel.(profileSetupModel)
-	if result.deleteProfileID != setupTestProfileID {
-		t.Fatalf("delete confirmation did not capture profile id: %+v", result)
+	if command == nil || !result.deleteProfilePending {
+		t.Fatalf("delete confirmation did not start local deletion")
+	}
+	updatedModel, _ = result.Update(command())
+	result = updatedModel.(profileSetupModel)
+	if result.screen != profileSetupScreenPicker || len(result.profiles) != 0 || result.deleteProfilePending {
+		t.Fatalf("successful deletion did not return to picker: screen=%d profiles=%d pending=%v", result.screen, len(result.profiles), result.deleteProfilePending)
+	}
+	if _, _, err := store.Load(setupTestProfileID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted profile still loads: %v", err)
+	}
+}
+
+type failingDeleteProfileStore struct {
+	ProfileStore
+	err error
+}
+
+func (store failingDeleteProfileStore) Delete(string) error {
+	return store.err
+}
+
+type profileDirectoryOverrideStore struct {
+	ProfileStore
+	path string
+}
+
+func (store profileDirectoryOverrideStore) ProfileDirectory(string) (string, error) {
+	return store.path, nil
+}
+
+func TestProfileSetupDeleteConfirmationsUseDisplayedSingleLineValues(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{ID: setupTestProfileID, Name: "prod\nowned\x1b[31m", IP: "203.0.113.10\nspoofed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileModel := newProfileSetupModel([]profileChoice{{Profile: profile, State: ProfileState{Runs: map[string]SetupRun{}}}})
+	profileModel.profileStore = profileDirectoryOverrideStore{ProfileStore: store, path: "/tmp/profile\nspoofed"}
+	profileModel.selectedIndex = 0
+	profileModel.screen = profileSetupScreenDeleteConfirm
+	profileView := profileModel.deleteConfirmView()
+	for _, expected := range []string{"Profile: prod owned", "IP:      203.0.113.10 spoofed", "Path:    /tmp/profile spoofed", `Type "delete prod owned"`} {
+		if !strings.Contains(profileView, expected) {
+			t.Fatalf("profile confirmation missing safe value %q:\n%s", expected, profileView)
+		}
+	}
+	profileModel.deleteProfileInput.SetValue("delete prod owned")
+	updated, command := profileModel.updateProfileDeleteConfirm(keyCode(tea.KeyEnter))
+	if command == nil || !updated.(profileSetupModel).deleteProfilePending {
+		t.Fatal("profile confirmation did not accept the exact displayed safe phrase")
+	}
+
+	stackModel := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{ID: setupTestProfileID, IP: setupTestHost, ConfigRepositoryPath: "/tmp/repository\nspoofed"},
+		State:   ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	stackModel.profileStore = store
+	stackModel.selectedIndex = 0
+	stackModel.screen = profileSetupScreenStackDeleteConfirm
+	stackModel.stacks = []editableStack{{Name: "site\nowned\x1b[31m"}}
+	stackModel.stackTable = newStackTable(stackModel.stacks, setupTestDomain, nil)
+	stackView := stackModel.stackDeleteConfirmView()
+	for _, expected := range []string{"Remove stack site owned?", "/tmp/repository spoofed/stacks/site owned", `Type "delete site owned"`} {
+		if !strings.Contains(stackView, expected) {
+			t.Fatalf("stack confirmation missing safe value %q:\n%s", expected, stackView)
+		}
+	}
+	stackModel.stackDeleteInput.SetValue("delete site owned")
+	updated, command = stackModel.updateStackDeleteConfirm(keyCode(tea.KeyEnter))
+	if command == nil || updated.(profileSetupModel).stackOperation != profileStackOperationDelete {
+		t.Fatal("stack confirmation did not accept the exact displayed safe phrase")
+	}
+
+	failedProfile := profileModel.applyProfileDeleted(profileDeletedMsg{err: errors.New("delete failed\nspoofed")})
+	if failedProfile.err != "delete failed spoofed" {
+		t.Fatalf("profile deletion error was not flattened: %q", failedProfile.err)
+	}
+	stackModel.stackOperation = profileStackOperationDelete
+	updated, _ = stackModel.applyProfileStackOperation(profileStackOperationMsg{
+		Kind: profileStackOperationDelete, Err: errors.New("remove failed\nspoofed"),
+	})
+	if got := updated.(profileSetupModel).err; got != "remove failed spoofed" {
+		t.Fatalf("stack deletion error was not flattened: %q", got)
+	}
+}
+
+func TestProfileSetupDeleteRequiresExactPhraseAndKeepsFailureVisible(t *testing.T) {
+	base := newFileProfileStore(t.TempDir())
+	profile, err := base.Create(Profile{ID: setupTestProfileID, Name: "production", IP: setupTestHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newProfileSetupModel([]profileChoice{{Profile: profile, State: ProfileState{Runs: map[string]SetupRun{}}}})
+	model.profileStore = failingDeleteProfileStore{ProfileStore: base, err: errors.New("delete failed")}
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenDeleteConfirm
+
+	model.deleteProfileInput.SetValue("production")
+	updated, command := model.updateProfileDeleteConfirm(keyCode(tea.KeyEnter))
+	result := updated.(profileSetupModel)
+	if command != nil || !strings.Contains(result.err, "type \"delete production\"") {
+		t.Fatalf("wrong phrase was not rejected: command=%v err=%q", command, result.err)
+	}
+
+	result.deleteProfileInput.SetValue("delete production")
+	updated, command = result.updateProfileDeleteConfirm(keyCode(tea.KeyEnter))
+	result = updated.(profileSetupModel)
+	if command == nil || !result.deleteProfilePending {
+		t.Fatal("exact phrase did not start deletion")
+	}
+	updated, _ = result.Update(command())
+	result = updated.(profileSetupModel)
+	if result.screen != profileSetupScreenDeleteConfirm || result.deleteProfilePending || result.err != "delete failed" {
+		t.Fatalf("delete failure left confirmation screen: screen=%d pending=%v err=%q", result.screen, result.deleteProfilePending, result.err)
+	}
+	if _, _, err := base.Load(profile.ID); err != nil {
+		t.Fatalf("failed deletion removed profile: %v", err)
+	}
+}
+
+func TestProfileSetupLiveRunLockBlocksDestructiveDeletion(t *testing.T) {
+	store, profile, state, stackDirectory := newLockedProfileDeletionTestFixture(t)
+	testProfileSetupLiveRunLockBlocksProfileDeletion(t, store, profile, state)
+	testProfileSetupLiveRunLockBlocksStackDeletion(t, store, profile, state, stackDirectory)
+}
+
+func newLockedProfileDeletionTestFixture(t *testing.T) (*fileProfileStore, Profile, ProfileState, string) {
+	t.Helper()
+	repository := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repository, ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	stackDirectory := filepath.Join(repository, "stacks", "site")
+	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackMetadataFilename), []byte("version: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	store := newFileProfileStore(root)
+	profile, err := store.Create(Profile{
+		ID: setupTestProfileID, Name: "production", IP: setupTestHost, ConfigRepositoryPath: repository,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{
+		ActiveRunID: "run-active",
+		Runs: map[string]SetupRun{
+			"run-active": {ID: "run-active", Status: runStatusRunning},
+		},
+	}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := newFileProfileStore(root).TryLockProfile(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { releaseProfileOperationLock(lock) })
+	return store, profile, state, stackDirectory
+}
+
+func testProfileSetupLiveRunLockBlocksProfileDeletion(t *testing.T, store ProfileStore, profile Profile, state ProfileState) {
+	t.Helper()
+	model := newProfileSetupModel([]profileChoice{{Profile: profile, State: state}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenDashboard
+	updated, command := model.updateProfileDashboard(keyRunes("x"))
+	result := updated.(profileSetupModel)
+	if command == nil || result.screen != profileSetupScreenDeleteConfirm {
+		t.Fatalf("delete confirmation did not open before the authoritative lock check: screen=%d", result.screen)
+	}
+	result.deleteProfileInput.SetValue("delete production")
+	updated, command = result.updateProfileDeleteConfirm(keyCode(tea.KeyEnter))
+	result = updated.(profileSetupModel)
+	if command == nil {
+		t.Fatal("profile deletion did not start its lock-backed check")
+	}
+	updated, _ = result.Update(command())
+	result = updated.(profileSetupModel)
+	if result.screen != profileSetupScreenDeleteConfirm || !strings.Contains(result.err, errProfileOperationLocked.Error()) {
+		t.Fatalf("live run lock did not block profile deletion: screen=%d err=%q", result.screen, result.err)
+	}
+}
+
+func testProfileSetupLiveRunLockBlocksStackDeletion(
+	t *testing.T,
+	store ProfileStore,
+	profile Profile,
+	state ProfileState,
+	stackDirectory string,
+) {
+	t.Helper()
+	model := newProfileSetupModel([]profileChoice{{Profile: profile, State: state}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenStacks
+	model.stacks = []editableStack{{Name: "site"}}
+	model.stackTable = newStackTable(model.stacks, setupTestDomain, &state)
+	updated, command := model.confirmSelectedStackDelete()
+	result := updated.(profileSetupModel)
+	if command == nil || result.screen != profileSetupScreenStackDeleteConfirm {
+		t.Fatalf("stack confirmation did not open before the authoritative lock check: screen=%d", result.screen)
+	}
+	result.stackDeleteInput.SetValue("delete site")
+	updated, command = result.updateStackDeleteConfirm(keyCode(tea.KeyEnter))
+	result = updated.(profileSetupModel)
+	if command == nil || result.stackOperation != profileStackOperationDelete {
+		t.Fatalf("stack deletion did not start its lock-backed worker: operation=%q", result.stackOperation)
+	}
+	result, _ = settleProfileStackOperation(t, result, command)
+	if result.screen != profileSetupScreenStackDeleteConfirm || !strings.Contains(result.err, errProfileOperationLocked.Error()) {
+		t.Fatalf("live run lock did not block stack deletion: screen=%d err=%q", result.screen, result.err)
+	}
+	if _, err := os.Stat(stackDirectory); err != nil {
+		t.Fatalf("blocked stack deletion changed the repository: %v", err)
+	}
+}
+
+func TestProfileSetupRecoversInterruptedRunBeforeDestructiveDeletion(t *testing.T) {
+	t.Run("profile", func(t *testing.T) {
+		testProfileSetupRecoversInterruptedRunBeforeProfileDeletion(t)
+	})
+
+	t.Run("stack", func(t *testing.T) {
+		testProfileSetupRecoversInterruptedRunBeforeStackDeletion(t)
+	})
+}
+
+func testProfileSetupRecoversInterruptedRunBeforeProfileDeletion(t *testing.T) {
+	t.Helper()
+	store := newFileProfileStore(t.TempDir())
+	profile, state := createInterruptedDeletionProfile(t, store, "")
+	model := newProfileSetupModel([]profileChoice{{Profile: profile, State: state}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenDashboard
+
+	updated, command := model.updateProfileDashboard(keyRunes("x"))
+	model = updated.(profileSetupModel)
+	if command == nil || model.screen != profileSetupScreenDeleteConfirm {
+		t.Fatalf("interrupted run blocked profile confirmation: screen=%d", model.screen)
+	}
+	model.deleteProfileInput.SetValue("delete production")
+	updated, command = model.updateProfileDeleteConfirm(keyCode(tea.KeyEnter))
+	model = updated.(profileSetupModel)
+	if command == nil {
+		t.Fatal("profile deletion did not start")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(profileSetupModel)
+	if model.screen != profileSetupScreenPicker || model.err != "" {
+		t.Fatalf("interrupted run blocked profile deletion: screen=%d err=%q", model.screen, model.err)
+	}
+	if _, _, err := store.Load(profile.ID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("profile was not deleted after interrupted-run recovery: %v", err)
+	}
+}
+
+func testProfileSetupRecoversInterruptedRunBeforeStackDeletion(t *testing.T) {
+	t.Helper()
+	requireGit(t)
+	repository := t.TempDir()
+	runGitCommand(t, repository, "init")
+	stackDirectory := filepath.Join(repository, "stacks", "site")
+	if err := os.MkdirAll(stackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stackDirectory, stackMetadataFilename), []byte("version: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repository, "add", "stacks")
+	runGitCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Add site")
+	store := newFileProfileStore(t.TempDir())
+	profile, state := createInterruptedDeletionProfile(t, store, repository)
+	model := newProfileSetupModel([]profileChoice{{Profile: profile, State: state}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenStacks
+	model.stacks = []editableStack{{Name: "site"}}
+	model.stackTable = newStackTable(model.stacks, setupTestDomain, &state)
+
+	updated, command := model.confirmSelectedStackDelete()
+	model = updated.(profileSetupModel)
+	if command == nil || model.screen != profileSetupScreenStackDeleteConfirm {
+		t.Fatalf("interrupted run blocked stack confirmation: screen=%d", model.screen)
+	}
+	model.stackDeleteInput.SetValue("delete site")
+	updated, command = model.updateStackDeleteConfirm(keyCode(tea.KeyEnter))
+	model, _ = settleProfileStackOperation(t, updated.(profileSetupModel), command)
+	if model.screen != profileSetupScreenStacks || model.err != "" {
+		t.Fatalf("interrupted run blocked stack deletion: screen=%d err=%q", model.screen, model.err)
+	}
+	if _, err := os.Stat(stackDirectory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stack was not deleted after interrupted-run recovery: %v", err)
+	}
+	_, recovered, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.ActiveRunID != "" || recovered.Runs[state.ActiveRunID].Status != runStatusCancelled {
+		t.Fatalf("interrupted run recovery was not persisted: %+v", recovered)
+	}
+}
+
+func createInterruptedDeletionProfile(t *testing.T, store ProfileStore, repository string) (Profile, ProfileState) {
+	t.Helper()
+	profile, err := store.Create(Profile{
+		ID: setupTestProfileID, Name: "production", IP: setupTestHost, ConfigRepositoryPath: repository,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{
+		ActiveRunID: "run-interrupted",
+		Runs: map[string]SetupRun{
+			"run-interrupted": {
+				ID: "run-interrupted", Status: runStatusRunning,
+				Stages: map[string]SetupStageStatus{"harden": {Status: stageStatusRunning}},
+			},
+		},
+	}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	return profile, state
+}
+
+func TestProfileSetupRunHistoryMasksLogsAndNavigates(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{ID: setupTestProfileID, Name: "production", IP: setupTestHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets := ProfileSecrets{GitHubToken: "github_pat_history_secret"}
+	if err := store.SaveSecrets(profile.ID, secrets); err != nil {
+		t.Fatal(err)
+	}
+	profile, state, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	state.ActiveRunID = "run-history"
+	state.Runs["run-history"] = SetupRun{
+		ID: "run-history", Status: runStatusFailed, CreatedAt: now.Add(-time.Minute), UpdatedAt: now,
+		Stages: map[string]SetupStageStatus{"proxy": {Status: stageStatusFailed, LastError: "failed with github_pat_history_secret"}},
+	}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendRunEvent(profile.ID, "run-history", TaskEvent{
+		Type: TaskLogLine, RunID: "run-history", Stage: "proxy", Line: "used github_pat_history_secret", Time: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	model := newProfileSetupModel([]profileChoice{{Profile: profile, State: state, Secrets: secrets}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenDashboard
+	updated, command := model.updateProfileDashboard(keyRunes("h"))
+	result := updated.(profileSetupModel)
+	if command != nil || result.screen != profileSetupScreenRunHistory || len(result.runs) != 1 {
+		t.Fatalf("history did not open: screen=%d runs=%d", result.screen, len(result.runs))
+	}
+	updated, command = result.updateRunHistory(keyCode(tea.KeyEnter))
+	result = updated.(profileSetupModel)
+	if command == nil || result.screen != profileSetupScreenRunHistory || !result.runDetailLoading {
+		t.Fatalf("run detail did not begin loading: screen=%d loading=%v err=%q", result.screen, result.runDetailLoading, result.err)
+	}
+	updated, _ = result.Update(command())
+	result = updated.(profileSetupModel)
+	if result.screen != profileSetupScreenRunDetail || result.runDetailLoading {
+		t.Fatalf("run detail did not open after loading: screen=%d loading=%v err=%q", result.screen, result.runDetailLoading, result.err)
+	}
+	view := result.View().Content
+	if strings.Contains(view, "github_pat_history_secret") || !strings.Contains(view, "used ***") || !strings.Contains(view, "run-history.jsonl") {
+		t.Fatalf("run detail leaked a secret or omitted log metadata:\n%s", view)
+	}
+	updated, _ = result.Update(keyCode(tea.KeyEsc))
+	if result = updated.(profileSetupModel); result.screen != profileSetupScreenRunHistory {
+		t.Fatalf("escape from detail returned to screen %d", result.screen)
 	}
 }
 
@@ -2491,7 +3380,7 @@ func TestProfileRunModelRendersTaskProgressAndLogs(t *testing.T) {
 		"Servestead setup run",
 		"production (203.0.113.10)",
 		"Tasks:",
-		"Current: Harden - Validate sysctl keys",
+		"Current: waiting for next remote task",
 		"Harden     running",
 		"remote output",
 	} {
@@ -2501,6 +3390,9 @@ func TestProfileRunModelRendersTaskProgressAndLogs(t *testing.T) {
 	}
 	if strings.Contains(view, "Harden stdout: remote output") {
 		t.Fatalf("run view should not prefix streamed log output with stage and stream:\n%s", view)
+	}
+	if strings.Contains(view, "Current: Harden - Validate sysctl keys") {
+		t.Fatalf("completed task remained current:\n%s", view)
 	}
 }
 
@@ -2524,7 +3416,7 @@ func TestProfileRunFailureRemainsInTUIOnEscape(t *testing.T) {
 		"Sync stacks",
 		"Preparing configuration repository: /tmp/servestead-config",
 		runErr.Error(),
-		"stopped before remote execution",
+		"Current: none",
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("failure view missing %q:\n%s", expected, view)
@@ -2573,8 +3465,108 @@ func TestProfileRunCompletedEscapeReturnsWhenParentSetupExists(t *testing.T) {
 	}
 }
 
+func TestProfileRunActiveKeysDoNotExit(t *testing.T) {
+	cancelCalls := 0
+	model := newProfileRunModel(
+		Profile{Name: "production", IP: setupTestHost},
+		setupConfig{Host: setupTestHost},
+		"run-1",
+		nil,
+		"stacks",
+		make(chan tea.Msg),
+		func() { cancelCalls++ },
+	)
+
+	updated, command := model.Update(keyRunes("q"))
+	model = updated.(profileRunModel)
+	if command != nil || cancelCalls != 0 || model.cancelled {
+		t.Fatalf("q changed the active run: cancelCalls=%d model=%+v", cancelCalls, model)
+	}
+
+	updated, command = model.Update(keyCtrl('c'))
+	model = updated.(profileRunModel)
+	if command != nil || cancelCalls != 1 || !model.cancelled {
+		t.Fatalf("Ctrl+C did not request cancellation in place: cancelCalls=%d model=%+v", cancelCalls, model)
+	}
+	updated, command = model.Update(keyCtrl('c'))
+	model = updated.(profileRunModel)
+	if command != nil || cancelCalls != 1 {
+		t.Fatalf("repeated Ctrl+C requested cancellation again: cancelCalls=%d model=%+v", cancelCalls, model)
+	}
+	if view := model.View().Content; !strings.Contains(view, "Cancelling setup") || !strings.Contains(view, "may have applied partially") {
+		t.Fatalf("cancellation was not visible:\n%s", view)
+	}
+}
+
+func TestProfileRunMasksSecretsBeforeRendering(t *testing.T) {
+	model := newProfileRunModel(
+		Profile{Name: "production", IP: setupTestHost},
+		setupConfig{
+			Host:                  setupTestHost,
+			GitHubToken:           "github_pat_live_secret",
+			PangolinAdminPassword: "pangolin-live-password",
+			Stacks: []configuredStack{{
+				Name:         "site",
+				SecretValues: SecretSet{"DATABASE_URL": "postgres://live-secret"},
+			}},
+		},
+		"run-secret",
+		nil,
+		"stacks",
+		make(chan tea.Msg),
+		func() {},
+	)
+	model.applyTaskEvent(TaskEvent{
+		Type:  TaskLogLine,
+		Stage: "stacks",
+		Line:  "github_pat_live_secret pangolin-live-password postgres://live-secret",
+	})
+	model.applyTaskEvent(TaskEvent{
+		Type:     TaskFailed,
+		Stage:    "stacks",
+		TaskName: "deploy",
+		Error:    "failed with github_pat_live_secret",
+	})
+	updated, _ := model.updateFinished(profileRunFinishedMsg{err: errors.New("fatal pangolin-live-password")})
+	model = updated.(profileRunModel)
+	joined := strings.Join(model.logLines, "\n")
+	for _, secret := range []string{"github_pat_live_secret", "pangolin-live-password", "postgres://live-secret"} {
+		if strings.Contains(joined, secret) {
+			t.Fatalf("live run log leaked %q: %q", secret, joined)
+		}
+	}
+	if !strings.Contains(joined, "*** *** ***") || !strings.Contains(joined, "failed with ***") {
+		t.Fatalf("live run log did not show redaction markers: %q", joined)
+	}
+	view := model.View().Content
+	if strings.Contains(view, "pangolin-live-password") || !strings.Contains(view, "fatal ***") {
+		t.Fatalf("live run footer leaked a secret: %q", view)
+	}
+}
+
+func TestProfileRunCancellationFinishState(t *testing.T) {
+	model := newProfileRunModel(
+		Profile{Name: "production", IP: setupTestHost},
+		setupConfig{Host: setupTestHost},
+		"run-1",
+		nil,
+		"stacks",
+		make(chan tea.Msg),
+		func() {},
+	)
+	model.applyTaskEvent(TaskEvent{Type: TaskStarted, Stage: "stacks", TaskName: "Deploy stack"})
+	updated, command := model.Update(profileRunFinishedMsg{err: context.Canceled})
+	model = updated.(profileRunModel)
+	if command != nil || !model.done || !model.cancelled || model.err != nil || model.currentStage != "" || model.currentTask != "" {
+		t.Fatalf("cancelled finish was not recorded cleanly: %+v", model)
+	}
+	if view := model.View().Content; !strings.Contains(view, "Cancelled") ||
+		!strings.Contains(view, "Run cancelled.") || !strings.Contains(view, "may have applied partially") {
+		t.Fatalf("cancelled finish view is unclear:\n%s", view)
+	}
+}
+
 func TestProfileRunModelUpdatesAndFinishMessages(t *testing.T) {
-	cancelled := false
 	messages := make(chan tea.Msg, 2)
 	model := newProfileRunModel(
 		Profile{Name: "production", IP: setupTestHost},
@@ -2583,7 +3575,7 @@ func TestProfileRunModelUpdatesAndFinishMessages(t *testing.T) {
 		nil,
 		"stacks",
 		messages,
-		func() { cancelled = true },
+		func() {},
 	)
 
 	updated, command := model.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
@@ -2592,13 +3584,6 @@ func TestProfileRunModelUpdatesAndFinishMessages(t *testing.T) {
 		t.Fatalf("window resize did not update run model: %+v", model)
 	}
 
-	updated, command = model.Update(keyRunes("q"))
-	model = updated.(profileRunModel)
-	if command == nil || !cancelled || !model.cancelled {
-		t.Fatalf("q did not cancel running setup: cancelled=%v model=%+v", cancelled, model)
-	}
-
-	model.cancelled = false
 	updated, _ = model.Update(spinner.TickMsg{})
 	model = updated.(profileRunModel)
 	updated, command = model.Update(profileRunFinishedMsg{})
@@ -2622,6 +3607,140 @@ func TestProfileRunModelUpdatesAndFinishMessages(t *testing.T) {
 	close(messages)
 	if msg := waitForProfileRunMessage(messages)(); msg != nil {
 		t.Fatalf("closed message channel returned unexpected message: %#v", msg)
+	}
+}
+
+func TestProfileRunLogScrollPreservesPositionUntilEnd(t *testing.T) {
+	model := newProfileRunModel(
+		Profile{Name: "production", IP: setupTestHost},
+		setupConfig{Host: setupTestHost},
+		"run-1",
+		nil,
+		"stacks",
+		make(chan tea.Msg),
+		func() {},
+	)
+	model.logViewport.SetHeight(3)
+	for index := range 8 {
+		model.appendRunLog(fmt.Sprintf("line %d", index))
+	}
+	if !model.logViewport.AtBottom() {
+		t.Fatal("new run logs should follow the bottom by default")
+	}
+
+	updated, command := model.Update(keyCode(tea.KeyUp))
+	model = updated.(profileRunModel)
+	if command != nil || model.logViewport.AtBottom() {
+		t.Fatal("up did not pause log following")
+	}
+	offset := model.logViewport.YOffset()
+	model.appendRunLog("queued one")
+	model.appendRunLog("queued two")
+	if model.logViewport.YOffset() != offset || model.pendingLogLines != 2 {
+		t.Fatalf("new logs moved a paused viewport: offset=%d pending=%d", model.logViewport.YOffset(), model.pendingLogLines)
+	}
+	if view := model.View().Content; !strings.Contains(view, "2 new lines, End to follow") {
+		t.Fatalf("paused log view did not show the pending count:\n%s", view)
+	}
+
+	updated, command = model.Update(keyCode(tea.KeyEnd))
+	model = updated.(profileRunModel)
+	if command != nil || !model.logViewport.AtBottom() || model.pendingLogLines != 0 {
+		t.Fatalf("End did not resume log following: %+v", model)
+	}
+	model.appendRunLog("followed")
+	if !model.logViewport.AtBottom() || model.pendingLogLines != 0 {
+		t.Fatalf("new log did not follow after End: %+v", model)
+	}
+}
+
+func TestProfileRunLogDisplayBoundsLongLines(t *testing.T) {
+	model := newProfileRunModel(
+		Profile{Name: "production", IP: setupTestHost},
+		setupConfig{Host: setupTestHost},
+		"run-1",
+		nil,
+		"stacks",
+		make(chan tea.Msg),
+		func() {},
+	)
+	model.appendRunLog(strings.Repeat("界", profileRunLogDisplayColumnLimit*2))
+	if len(model.logLines) != 1 || lipgloss.Width(model.logLines[0]) > profileRunLogDisplayColumnLimit ||
+		!strings.HasSuffix(model.logLines[0], profileRunLogLineTruncatedMarker) {
+		t.Fatalf("display retained an unbounded log line: width=%d line=%q", lipgloss.Width(model.logLines[0]), model.logLines[0])
+	}
+}
+
+func TestProfileRunTerminalEventsClearCurrentTask(t *testing.T) {
+	model := newProfileRunModel(
+		Profile{Name: "production", IP: setupTestHost},
+		setupConfig{Host: setupTestHost},
+		"run-1",
+		nil,
+		"stacks",
+		make(chan tea.Msg),
+		func() {},
+	)
+	model.applyTaskEvent(TaskEvent{Type: TaskStarted, Stage: "stacks", TaskName: "Deploy stack"})
+	model.applyTaskEvent(TaskEvent{Type: TaskSucceeded, Stage: "stacks", TaskName: "Deploy stack"})
+	if model.currentStage != "" || model.currentTask != "" || model.stages[0].Current != "" {
+		t.Fatalf("successful task remained current: %+v", model)
+	}
+
+	model.applyTaskEvent(TaskEvent{Type: TaskStarted, Stage: "stacks", TaskName: "Sync stack"})
+	model.applyTaskEvent(TaskEvent{Type: TaskFailed, Stage: "stacks", TaskName: "Sync stack", Error: "remote failed"})
+	if model.currentStage != "" || model.currentTask != "" || model.stages[0].Current != "" {
+		t.Fatalf("failed task remained current: %+v", model)
+	}
+}
+
+func TestProfileRunFinishMarksStageWhenNoTaskEventWasEmitted(t *testing.T) {
+	model := newProfileRunModel(
+		Profile{Name: "production", IP: setupTestHost},
+		setupConfig{Host: setupTestHost},
+		"run-1",
+		nil,
+		"harden",
+		make(chan tea.Msg),
+		func() {},
+	)
+	updated, _ := model.updateFinished(profileRunFinishedMsg{
+		err: errors.New("SSH client failed"), status: runStatusFailed, stage: "harden",
+	})
+	result := updated.(profileRunModel)
+	if result.stages[0].Status != stageStatusFailed || result.err == nil {
+		t.Fatalf("terminal failure did not mark the live stage: %+v", result)
+	}
+}
+
+func TestProfileRunMinimumSizeGuard(t *testing.T) {
+	model := newProfileRunModel(
+		Profile{Name: "production", IP: setupTestHost},
+		setupConfig{Host: setupTestHost},
+		"run-1",
+		nil,
+		"stacks",
+		make(chan tea.Msg),
+		func() {},
+	)
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	view := updated.(profileRunModel).View().Content
+	for _, expected := range []string{"Terminal too small", "Resize to at least 64 x 21.", "Current size: 40 x 12.", "remote work may already be partially applied"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("minimum-size view missing %q:\n%s", expected, view)
+		}
+	}
+	if strings.Contains(view, "Stages") || strings.Contains(view, "Logs") {
+		t.Fatalf("minimum-size view rendered the full run layout:\n%s", view)
+	}
+
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	view = updated.(profileRunModel).View().Content
+	if strings.Contains(view, "Terminal too small") || !strings.Contains(view, "Stages") || !strings.Contains(view, "Logs") {
+		t.Fatalf("80x24 did not render the full run layout:\n%s", view)
+	}
+	if lineCount := strings.Count(view, "\n") + 1; lineCount > 24 {
+		t.Fatalf("80x24 run layout used %d rows:\n%s", lineCount, view)
 	}
 }
 
@@ -2662,6 +3781,193 @@ func TestProfileRunCommandFinishUpdatesState(t *testing.T) {
 	profileCommand.finish(runErr)
 	if msg := (<-finished).(profileRunFinishedMsg); !errors.Is(msg.err, runErr) || state.Runs["run-3"].Status != runStatusFailed {
 		t.Fatalf("failed run finish did not propagate error/status: msg=%+v state=%+v", msg, state)
+	}
+}
+
+func TestProfileRunCommandReleasesOperationLockBeforeResultAcknowledgement(t *testing.T) {
+	root := t.TempDir()
+	runStore := newFileProfileStore(root)
+	competingStore := newFileProfileStore(root)
+	profile, err := runStore.Create(Profile{ID: setupTestProfileID, IP: setupTestHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const runID = "run-lock-release"
+	state := ProfileState{ActiveRunID: runID, Runs: map[string]SetupRun{runID: newSetupRun(runID, nil)}}
+	if err := runStore.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	rawLock, err := runStore.TryLockProfile(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := guardProfileOperationLock(rawLock)
+	t.Cleanup(func() { releaseProfileOperationLock(lock) })
+
+	messages := make(chan tea.Msg, 1)
+	reporter := &profileRunReporter{store: runStore, profile: profile, state: &state, runID: runID}
+	command := profileRunCommand{profileReporter: reporter, messages: messages, operationLock: lock}
+	command.finish(nil)
+
+	competingLock, err := competingStore.TryLockProfile(profile.ID)
+	if err != nil {
+		t.Fatalf("terminal run completion kept the profile locked before result acknowledgement: %v", err)
+	}
+	releaseProfileOperationLock(competingLock)
+
+	model := newProfileRunModel(profile, setupConfig{Host: profile.IP}, runID, nil, "", messages, func() {})
+	model.operationLock = lock
+	updated, quitCommand := model.Update((<-messages).(profileRunFinishedMsg))
+	finished := updated.(profileRunModel)
+	if quitCommand != nil || !finished.done || finished.returnToSetup {
+		t.Fatalf("terminal message did not remain on the unacknowledged result screen: %+v", finished)
+	}
+	_, persisted, err := runStore.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Runs[runID].Status != runStatusComplete {
+		t.Fatalf("profile lock was released before terminal state persisted: %+v", persisted)
+	}
+}
+
+func TestProfileRunCommandPersistsCancellation(t *testing.T) {
+	cancelErr := fmt.Errorf("stop requested: %w", context.Canceled)
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{IP: setupTestHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{Runs: map[string]SetupRun{"run-4": newSetupRun("run-4", nil)}}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	reporter := &profileRunReporter{store: store, profile: profile, state: &state, runID: "run-4"}
+	finished := make(chan tea.Msg, 1)
+	profileCommand := profileRunCommand{profileReporter: reporter, messages: finished}
+	profileCommand.finish(cancelErr)
+	if msg := (<-finished).(profileRunFinishedMsg); !errors.Is(msg.err, context.Canceled) || state.Runs["run-4"].Status != runStatusCancelled {
+		t.Fatalf("cancelled run finish did not propagate error/status: msg=%+v state=%+v", msg, state)
+	}
+	_, savedState, err := store.Load(profile.ID)
+	if err != nil || savedState.Runs["run-4"].Status != runStatusCancelled {
+		t.Fatalf("cancelled run status was not persisted: err=%v state=%+v", err, savedState)
+	}
+
+	state = ProfileState{Runs: map[string]SetupRun{"run-5": newSetupRunForStage("run-5", "stacks", nil)}}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	reporter = &profileRunReporter{store: store, profile: profile, state: &state, runID: "run-5"}
+	finished = make(chan tea.Msg, 1)
+	profileCommand = profileRunCommand{profileReporter: reporter, messages: finished, stage: "stacks"}
+	profileCommand.finishStage(cancelErr)
+	if msg := (<-finished).(profileRunFinishedMsg); !errors.Is(msg.err, context.Canceled) || state.Runs["run-5"].Status != runStatusCancelled {
+		t.Fatalf("cancelled stage finish did not propagate error/status: msg=%+v state=%+v", msg, state)
+	}
+	_, savedState, err = store.Load(profile.ID)
+	if err != nil || savedState.Runs["run-5"].Status != runStatusCancelled {
+		t.Fatalf("cancelled stage status was not persisted: err=%v state=%+v", err, savedState)
+	}
+}
+
+func TestProfileRunReporterPersistsCancelledStageWithoutError(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{IP: setupTestHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{Runs: map[string]SetupRun{
+		"run-cancelled": newSetupRunForStage("run-cancelled", "harden", nil),
+	}}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	reporter := &profileRunReporter{store: store, profile: profile, state: &state, runID: "run-cancelled"}
+	reporter.Report(TaskEvent{Type: TaskRunStarted, RunID: "run-cancelled", Stage: "harden", Time: time.Now().UTC()})
+	reporter.Report(TaskEvent{Type: TaskCancelled, RunID: "run-cancelled", Stage: "harden", TaskName: "Apply firewall", Time: time.Now().UTC()})
+	reporter.finishRun(runStatusCancelled, context.Canceled, "harden")
+	if reporter.err != nil {
+		t.Fatal(reporter.err)
+	}
+	_, saved, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := saved.Runs["run-cancelled"]
+	stage := run.Stages["harden"]
+	if run.Status != runStatusCancelled || stage.Status != stageStatusCancelled || stage.LastError != "" {
+		t.Fatalf("cancelled run state = %+v", run)
+	}
+	if summary := profileRunErrorSummary(run); summary != "" {
+		t.Fatalf("cancelled run error summary = %q", summary)
+	}
+}
+
+type terminalRunTestCase struct {
+	name      string
+	initial   string
+	status    string
+	runErr    error
+	wantStage string
+	wantError string
+	wantEvent TaskEventType
+}
+
+func TestProfileRunReporterPersistsTerminalStageWithoutTaskEvents(t *testing.T) {
+	tests := []terminalRunTestCase{
+		{name: "failure before task start", initial: stageStatusPending, status: runStatusFailed, runErr: errors.New("dial TOKEN=abc"), wantStage: stageStatusFailed, wantError: "dial TOKEN=***", wantEvent: TaskFailed},
+		{name: "failure after task completion", initial: stageStatusComplete, status: runStatusFailed, runErr: errors.New("close failed"), wantStage: stageStatusFailed, wantError: "close failed", wantEvent: TaskFailed},
+		{name: "cancel before task start", initial: stageStatusPending, status: runStatusCancelled, runErr: context.Canceled, wantStage: stageStatusCancelled, wantEvent: TaskCancelled},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertTerminalRunPersistence(t, test)
+		})
+	}
+}
+
+func assertTerminalRunPersistence(t *testing.T, test terminalRunTestCase) {
+	t.Helper()
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{IP: setupTestHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{Runs: map[string]SetupRun{
+		"run-terminal": newSetupRunForStage("run-terminal", "harden", nil),
+	}}
+	run := state.Runs["run-terminal"]
+	stage := run.Stages["harden"]
+	stage.Status = test.initial
+	run.Stages["harden"] = stage
+	state.Runs["run-terminal"] = run
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	reporter := &profileRunReporter{
+		store: store, profile: profile, state: &state, runID: "run-terminal", secretValues: []string{"abc"},
+	}
+	if got := reporter.finishRun(test.status, test.runErr, "harden"); got != "harden" {
+		t.Fatalf("terminal stage = %q", got)
+	}
+	if reporter.err != nil {
+		t.Fatal(reporter.err)
+	}
+	_, saved, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedRun := saved.Runs["run-terminal"]
+	if savedRun.Status != test.status || savedRun.Stages["harden"].Status != test.wantStage || savedRun.Stages["harden"].LastError != test.wantError {
+		t.Fatalf("saved terminal run = %+v", savedRun)
+	}
+	events, err := store.LoadRunEvents(profile.ID, "run-terminal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Type != test.wantEvent || events[0].Stage != "harden" || events[0].Error != test.wantError {
+		t.Fatalf("terminal events = %+v", events)
 	}
 }
 
@@ -2773,6 +4079,23 @@ func TestProfileDashboardCombinesPlatformStages(t *testing.T) {
 	}
 	if rows[2][0] != "Platform" || rows[2][1] != stageStatusComplete {
 		t.Fatalf("network, proxy, and observability were not combined: %#v", rows)
+	}
+}
+
+func TestProfileDashboardMasksLegacyStageErrors(t *testing.T) {
+	state := ProfileState{
+		ActiveRunID: "run-legacy",
+		Runs: map[string]SetupRun{
+			"run-legacy": {
+				Stages: map[string]SetupStageStatus{
+					"harden": {Status: stageStatusFailed, LastError: "failed with github_pat_legacy_secret"},
+				},
+			},
+		},
+	}
+	rows := profileStageRows(&state, ProfileSecrets{GitHubToken: "github_pat_legacy_secret"})
+	if len(rows) < 2 || strings.Contains(rows[1][2], "github_pat_legacy_secret") || !strings.Contains(rows[1][2], "***") {
+		t.Fatalf("masked dashboard rows = %#v", rows)
 	}
 }
 
@@ -2950,8 +4273,8 @@ func TestProfileSetupModelEscapeBackAndQQuit(t *testing.T) {
 		t.Fatal("q should quit")
 	}
 	result = updatedModel.(profileSetupModel)
-	if !result.cancelled {
-		t.Fatalf("q should mark setup cancelled: %+v", result)
+	if !result.quit || result.cancelled {
+		t.Fatalf("q should mark a clean quit without cancellation: %+v", result)
 	}
 }
 
@@ -3108,12 +4431,114 @@ func TestProfileRunLogWriterEmitsStructuredLogLines(t *testing.T) {
 	if written != len("first line\nsecond line\npartial") {
 		t.Fatalf("unexpected written count: %d", written)
 	}
-	if len(events) != 2 {
-		t.Fatalf("expected 2 complete log lines, got %#v", events)
+	writer.Flush()
+	writer.Flush()
+	if len(events) != 3 {
+		t.Fatalf("expected complete and flushed log lines, got %#v", events)
 	}
-	for index, expected := range []string{"first line", "second line"} {
+	for index, expected := range []string{"first line", "second line", "partial"} {
 		if events[index].Type != TaskLogLine || events[index].RunID != "run-1" || events[index].Stage != "proxy" || events[index].Stream != "stderr" || events[index].Line != expected {
 			t.Fatalf("unexpected event %d: %#v", index, events[index])
 		}
+	}
+}
+
+func TestProfileRunLogWriterBoundsLinesWithoutNewlines(t *testing.T) {
+	events := []TaskEvent{}
+	writer := &profileRunLogWriter{reporter: TaskReporterFunc(func(event TaskEvent) {
+		events = append(events, event)
+	})}
+	payload := bytes.Repeat([]byte("x"), profileRunLogLineByteLimit*4)
+	if written, err := writer.Write(payload); err != nil || written != len(payload) {
+		t.Fatalf("write large fragment: written=%d err=%v", written, err)
+	}
+	if len(writer.partial) > profileRunLogLineByteLimit || len(events) != 0 {
+		t.Fatalf("unbounded partial line: partial=%d events=%d", len(writer.partial), len(events))
+	}
+	if _, err := writer.Write([]byte("\n")); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || len(events[0].Line) > profileRunLogLineByteLimit || !strings.HasSuffix(events[0].Line, profileRunLogLineTruncatedMarker) {
+		t.Fatalf("bounded event = %#v", events)
+	}
+}
+
+func TestProfileRunUIReporterMarksDroppedLiveLogLines(t *testing.T) {
+	messages := make(chan tea.Msg, 2)
+	reporter := &profileRunUIReporter{messages: messages}
+	messages <- profileRunEventMsg{}
+	messages <- profileRunEventMsg{}
+	reporter.Report(TaskEvent{Type: TaskLogLine, RunID: "run-1", Stage: "proxy", Line: "dropped one"})
+	reporter.Report(TaskEvent{Type: TaskLogLine, RunID: "run-1", Stage: "proxy", Line: "dropped two"})
+	<-messages
+	<-messages
+
+	reporter.Report(TaskEvent{Type: TaskLogLine, RunID: "run-1", Stage: "proxy", Line: "visible"})
+	marker := (<-messages).(profileRunEventMsg).event
+	visible := (<-messages).(profileRunEventMsg).event
+	if marker.Type != TaskLogLine || marker.Stream != "servestead" || !strings.Contains(marker.Line, "2 live log lines omitted") {
+		t.Fatalf("dropped-log marker = %#v", marker)
+	}
+	if visible.Line != "visible" || reporter.dropped != 0 {
+		t.Fatalf("visible event = %#v, remaining dropped = %d", visible, reporter.dropped)
+	}
+
+	messages <- profileRunEventMsg{}
+	messages <- profileRunEventMsg{}
+	reporter.Report(TaskEvent{Type: TaskLogLine, RunID: "run-1", Stage: "proxy", Line: "dropped before completion"})
+	<-messages
+	<-messages
+	reporter.Report(TaskEvent{Type: TaskRunCompleted, RunID: "run-1", Stage: "proxy"})
+	marker = (<-messages).(profileRunEventMsg).event
+	terminal := (<-messages).(profileRunEventMsg).event
+	if !strings.Contains(marker.Line, "1 live log line omitted") || terminal.Type != TaskRunCompleted {
+		t.Fatalf("terminal flush events = %#v, %#v", marker, terminal)
+	}
+}
+
+func TestProfileRunReporterBoundsPersistedLogEvents(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	profile, err := store.Create(Profile{ID: setupTestProfileID, IP: setupTestHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, state, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Runs["run-bounded"] = SetupRun{ID: "run-bounded", Stages: map[string]SetupStageStatus{"proxy": {}}}
+	reporter := &profileRunReporter{store: store, profile: profile, state: &state, runID: "run-bounded"}
+	reporter.Report(TaskEvent{Type: TaskLogLine, RunID: "run-bounded", Stage: "proxy", Line: strings.Repeat("x", profileRunLogLineByteLimit*2)})
+	reporter.persistedLogBytes = profileRunLogPersistByteLimit
+	reporter.Report(TaskEvent{Type: TaskLogLine, RunID: "run-bounded", Stage: "proxy", Line: "omitted one"})
+	reporter.Report(TaskEvent{Type: TaskLogLine, RunID: "run-bounded", Stage: "proxy", Line: "omitted two"})
+	if reporter.err != nil {
+		t.Fatal(reporter.err)
+	}
+	events, err := store.LoadRunEvents(profile.ID, "run-bounded")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || len(events[0].Line) > profileRunLogLineByteLimit ||
+		!strings.HasSuffix(events[0].Line, profileRunLogLineTruncatedMarker) || events[1].Line != profileRunLogPersistenceMarker {
+		t.Fatalf("persisted bounded events = %#v", events)
+	}
+}
+
+func TestProfileRunOutputReusesWritersAndFlushesFinalFragments(t *testing.T) {
+	var events []TaskEvent
+	output := newProfileRunOutput(TaskReporterFunc(func(event TaskEvent) {
+		events = append(events, event)
+	}), "run-1")
+	stdout := output.WriterForStage("proxy", "stdout")
+	if _, err := stdout.Write([]byte("joined")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := output.WriterForStage("proxy", "stdout").Write([]byte(" line\nlast")); err != nil {
+		t.Fatal(err)
+	}
+	output.Flush()
+	if len(events) != 2 || events[0].Line != "joined line" || events[1].Line != "last" {
+		t.Fatalf("profile output events = %+v", events)
 	}
 }

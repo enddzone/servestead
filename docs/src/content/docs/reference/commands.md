@@ -1,6 +1,6 @@
 ---
-title: CLI Commands
-description: Launch Servestead Web, run setup, and use direct commands for automation and recovery.
+title: CLI commands
+description: Open the terminal UI, run setup, and use direct commands for automation and recovery.
 ---
 
 Run `./bin/servestead --help` or `./bin/servestead <command> --help` for the complete flag list.
@@ -12,36 +12,33 @@ mkdir -p bin
 go build -o ./bin/servestead ./backend
 ```
 
-## Servestead Web
+## Terminal UI
 
 ```sh
-./bin/servestead ui
-./bin/servestead ui --no-open
-./bin/servestead ui --addr 127.0.0.1:8080 --no-open
+./bin/servestead setup
 ```
 
-`ui` accepts only local loopback addresses. The default chooses a random available port and opens the tokenized session URL.
+This is the primary interactive interface. It opens the profile picker, DigitalOcean provisioning, reviewed setup stages, stack management, and run history.
 
-## Local Preflight
+## Local preflight
 
 ```sh
 ./bin/servestead doctor
 ```
 
-## Generate an SSH Key
+## Generate an SSH key
 
 ```sh
 ./bin/servestead keygen
 ```
 
-## Guided Setup
+## Start setup from an address
 
 ```sh
-./bin/servestead setup
 ./bin/servestead setup --ip 203.0.113.10
 ```
 
-The first command opens the Terminal UI. The second begins an interactive profile-aware run for a known server address.
+This starts an interactive profile-aware run for the known server address. Use `--fresh` to create a separate local profile for an address that already has saved profiles.
 
 For a fully supplied scripted run:
 
@@ -54,7 +51,7 @@ For a fully supplied scripted run:
   --yes
 ```
 
-## Provision Directly
+## Provision directly
 
 ```sh
 ./bin/servestead provision \
@@ -63,9 +60,9 @@ For a fully supplied scripted run:
   --ssh-key provider-key-id-or-fingerprint
 ```
 
-Direct provisioning creates a billable Droplet and stops after reporting its public IPv4 address. It does not create a completed setup plan.
+Direct provisioning creates a billable Droplet and stops after reporting the public IPv4 address. It does not create a profile-aware setup plan.
 
-## Direct Setup Stages
+## Direct setup stages
 
 ```sh
 ./bin/servestead bootstrap \
@@ -95,9 +92,9 @@ Direct provisioning creates a billable Droplet and stops after reporting its pub
   --server-secret 'replace-with-a-long-random-secret'
 ```
 
-Prefer a reviewed profile-aware setup unless a script intentionally manages each stage and secret.
+Prefer the reviewed profile workflow unless a script intentionally manages each stage and secret.
 
-## Profile Credentials
+## Profile credentials
 
 ```sh
 ./bin/servestead pangolin-credentials --profile <profile-id>
@@ -111,7 +108,7 @@ Prefer a reviewed profile-aware setup unless a script intentionally manages each
 ./bin/servestead github-token remove --profile <profile-id>
 ```
 
-## Stack Management
+## Stack management
 
 ```sh
 ./bin/servestead stack add \
@@ -125,7 +122,7 @@ Prefer a reviewed profile-aware setup unless a script intentionally manages each
 ./bin/servestead stack env remove --profile <profile-id> --stack <name>
 ```
 
-## Stack Secret Recovery
+## Stack secret recovery
 
 ```sh
 ./bin/servestead secrets init --profile <profile-id>
@@ -138,3 +135,13 @@ Prefer a reviewed profile-aware setup unless a script intentionally manages each
 SOPS_AGE_KEY_FILE=/path/to/stack-secret-key.txt \
   sops -d stacks/<name>/servestead.secrets.yaml
 ```
+
+## Isolated configuration root
+
+Set `SERVESTEAD_CONFIG_DIR` to keep profiles and default configuration repositories below an explicit directory:
+
+```sh
+SERVESTEAD_CONFIG_DIR=/path/to/isolated-servestead ./bin/servestead setup
+```
+
+This is useful for disposable tests and separate operator environments. The directory becomes the Servestead root itself.

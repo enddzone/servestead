@@ -241,11 +241,12 @@ func (provider ageSecretProvider) Capabilities() SecretCapabilities {
 }
 
 func (provider ageSecretProvider) GetStackSecrets(_ context.Context, ref StackSecretRef) (SecretSet, error) {
-	path, err := stackSecretPath(ref)
+	directory, _, err := openStackSecretRoot(ref, false)
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	defer directory.Close()
+	data, err := readManagedFile(directory, stackSecretFilename, "stack secret file", stackSecretMaxBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -264,10 +265,11 @@ func (provider ageSecretProvider) PutStackSecrets(_ context.Context, ref StackSe
 	if err := validateSecretSet(values); err != nil {
 		return err
 	}
-	path, err := stackSecretPath(ref)
+	directory, path, err := openStackSecretRoot(ref, true)
 	if err != nil {
 		return err
 	}
+	defer directory.Close()
 	if _, err := parseStackSecretRecipients(ref.Recipients); err != nil {
 		return err
 	}
@@ -275,16 +277,23 @@ func (provider ageSecretProvider) PutStackSecrets(_ context.Context, ref StackSe
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(path, data, 0600)
+	return atomicWriteManagedFile(directory, stackSecretFilename, data, 0600)
 }
 
 func (provider ageSecretProvider) DeleteStackSecrets(ctx context.Context, ref StackSecretRef, keys []string) error {
 	if len(keys) == 0 {
-		path, err := stackSecretPath(ref)
+		directory, _, err := openStackSecretRoot(ref, false)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		defer directory.Close()
+		if err := rejectManagedFileSymlink(directory, stackSecretFilename, "stack secret file"); err != nil {
+			return err
+		}
+		if err := directory.Remove(stackSecretFilename); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		return nil
@@ -303,11 +312,12 @@ func (provider ageSecretProvider) DeleteStackSecrets(ctx context.Context, ref St
 }
 
 func (provider ageSecretProvider) ListStackSecretKeys(_ context.Context, ref StackSecretRef) ([]SecretKeyMeta, error) {
-	path, err := stackSecretPath(ref)
+	directory, _, err := openStackSecretRoot(ref, false)
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	defer directory.Close()
+	data, err := readManagedFile(directory, stackSecretFilename, "stack secret file", stackSecretMaxBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -475,13 +485,25 @@ func stackSecretPath(ref StackSecretRef) (string, error) {
 	if ref.RepositoryPath == "" {
 		return "", errors.New("repository path is required")
 	}
-	if !stackSlugPattern.MatchString(ref.StackName) {
-		return "", errors.New("stack name must be a lowercase DNS label")
+	if err := validateStackName(ref.StackName); err != nil {
+		return "", err
 	}
 	if ref.Source != defaultStackSecretSource(ref.StackName) {
 		return "", fmt.Errorf("secrets source must be %s", defaultStackSecretSource(ref.StackName))
 	}
 	return filepath.Join(expandUserPath(ref.RepositoryPath), filepath.FromSlash(ref.Source)), nil
+}
+
+func openStackSecretRoot(ref StackSecretRef, create bool) (*os.Root, string, error) {
+	path, err := stackSecretPath(ref)
+	if err != nil {
+		return nil, "", err
+	}
+	directory, err := openManagedStackRoot(ref.RepositoryPath, ref.StackName, create)
+	if err != nil {
+		return nil, "", err
+	}
+	return directory, path, nil
 }
 
 var secretProviderForName = defaultSecretProviderForName
@@ -590,6 +612,9 @@ func ensureProfileStackSecretIdentity(store ProfileStore, profileID string) (Pro
 }
 
 func parseEnvironmentSecretSet(content string) (SecretSet, []string, error) {
+	if int64(len(content)) > stackEnvironmentMaxBytes {
+		return nil, nil, fmt.Errorf("environment file exceeds the %s limit", formatByteLimit(stackEnvironmentMaxBytes))
+	}
 	if strings.IndexByte(content, 0) >= 0 {
 		return nil, nil, errors.New("environment file contains a NUL byte")
 	}

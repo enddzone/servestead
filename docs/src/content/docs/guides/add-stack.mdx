@@ -1,88 +1,68 @@
 ---
-title: Add an Application Stack
-description: Add Compose, define public routes, review the Git diff, and deploy committed configuration from Servestead Web.
+title: Add an application stack
+description: Import Compose, define public routes, review the Git diff, and deploy committed configuration from the terminal UI.
 ---
 
-import UiScreenshot from '../../../components/UiScreenshot.astro';
-import gitopsReview from '../../../assets/screenshots/gitops-review.jpg';
+Servestead keeps the Compose file consumer-owned and stores public routing as separate metadata. Every service can deploy. Only routes you explicitly define become public through Pangolin.
 
-Servestead keeps the Compose file consumer-owned and stores public routing as separate metadata. Every service can deploy; only routes you explicitly define become public through Pangolin.
+## Before you begin
 
-## Before You Begin
+The profile needs a configuration repository and a completed Platform stage. Prepare a working Compose model and decide which service ports, if any, should be public.
 
-The profile must have a configuration repository and completed platform setup. Prepare a working Compose model and know which service ports, if any, should be public.
+## 1. Open the stack manager
 
-## 1. Open Stack Inventory
+Run `servestead setup`, select the profile, then press `s`. Press `a` to open the Compose file picker or `/` to type a path.
 
-Open **Profiles**, select the environment, choose **Stacks**, then select **Add stack**.
+The Compose file must parse and contain at least one named service.
 
-The inventory shows each stack's public-resource count, metadata status, Git state, and whether deployment is currently eligible.
+## 2. Choose public services
 
-## 2. Add Compose
+Servestead lists every detected service as private by default.
 
-Enter a lowercase DNS-label stack name and the complete `compose.yaml` content. Servestead validates the Compose services before saving.
+- Press `space` to make the selected service public or private.
+- Press `enter` to configure its route.
+- Press `a` to add another route for the same service.
+- Press `n` when the public service choices are complete.
 
-Use `/data/<stack>/...` for application bind mounts. Servestead creates the stack data directory with owner `1000:1000` on first deployment. Use a named volume or prepare the directory yourself when the image runs as another UID or GID.
+Each public route controls the Compose service, container port, subdomain, stable ID, display name, protocol, SSO, and health check. Press `ctrl+x` in the route editor to show the advanced fields.
 
-Do not bind writable application data from `/opt/servestead/repository`; that checkout is deployment input.
+## 3. Choose runtime secrets
 
-## 3. Define Public Resources
+The next screen offers no runtime secrets, a detected adjacent `.env`, or another file. Servestead records values in the encrypted stack secret file and shows only variable names after save.
 
-Select **Add resource** for each route that should be reachable through Pangolin. Provide:
+Do not commit a populated `.env`. Commit an `.env.example` when operators need the required names.
 
-- Stable resource ID.
-- Compose service name.
-- Subdomain and display name.
-- Container port and protocol.
-- SSO setting.
-- Health-check path.
+## 4. Save local files
 
-Leave a service without a public resource to keep it private.
-
-## 4. Save and Review Git
-
-Saving writes the stack files but does not deploy them. Open **GitOps Review** and inspect the working-tree changes.
-
-<UiScreenshot
-  src={gitopsReview}
-  alt="GitOps Review showing repository status, recent commits, recent runs, and guarded stack controls"
-  caption="A saved stack becomes deployable only after its repository changes are intentional and committed."
-/>
-
-Stage the managed stack changes, commit with a specific message, and push when your repository uses an origin. See [GitOps review and sync](../gitops/) for the full sequence.
-
-## 5. Deploy
-
-Return to **Stacks** and deploy the eligible stack, or use **Run stacks** to reconcile all current committed stacks. The run validates the merged Compose model before replacing containers and verifies the expected Pangolin resources afterward.
-
-### Expected Result
-
-The run completes, the stack inventory reports an understood Git state, and each configured public resource is reachable at its intended hostname after DNS and certificate issuance succeed.
-
-## Files Servestead Creates
+The final review shows the Compose path, service counts, routes, and secret key count. Saving writes local repository files. It does not deploy or commit.
 
 | File | Purpose |
 | --- | --- |
 | `stacks/<name>/compose.yaml` | Your reviewed Compose model. |
 | `stacks/<name>/servestead.yaml` | Public-resource contract and route metadata. |
-| `stacks/<name>/servestead.secrets.yaml` | Age-encrypted runtime values when secrets are configured. |
+| `stacks/<name>/servestead.secrets.yaml` | Age-encrypted runtime values when configured. |
 
 Servestead does not inject labels into the consumer-owned Compose file.
 
-## Add Runtime Secrets
+## 5. Review Git and deploy
 
-The browser editor does not import a new `.env` file. Use the CLI:
+Back in the stack manager, press `v` to inspect the diff, `g` to stage managed stack changes, `c` to commit, and `p` when the branch needs a push. Select the committed stack and press `r` to deploy it. Press `y` when you intend to reconcile every committed stack.
 
-```sh
-./bin/servestead stack env set \
-  --profile <profile-id> \
-  --stack <name> \
-  --file /path/to/.env
-```
+The run validates the merged Compose model before replacing containers and verifies the expected Pangolin resources afterward.
 
-Commit the resulting encrypted `servestead.secrets.yaml`, never the populated `.env`. Back up the profile age identity as described in [Access and secrets](../access-and-secrets/).
+## Edit or remove a stack
 
-## CLI Alternative
+Select an existing stack and press `e` or `enter` to edit it. Press `ctrl+s` to save an edit.
+
+Press `d` to review local deletion. The prompt shows the stack path and explains the later remote effect. Enter `delete <stack-name>` exactly as shown. Commit the deletion, then press `y` only when you want reconciliation to remove its remote resources.
+
+## Runtime data paths
+
+Use `/data/<stack>/...` for application bind mounts. Servestead creates the stack data directory with owner `1000:1000` on first deployment. Use a named volume or prepare the directory yourself when an image runs as another UID or GID.
+
+Do not bind writable application data from `/opt/servestead/repository`. That checkout is deployment input.
+
+## Direct command
 
 For a scripted import:
 

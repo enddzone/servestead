@@ -1,6 +1,6 @@
 # Servestead
 
-Servestead, the Server Homestead, is a local control plane and CLI for turning a raw Ubuntu VPS into a hardened, Git-backed place to run private application stacks. Its browser interface guides setup, profiles, diagnostics, GitOps, access, cloud controls, and recovery; direct commands remain available for automation.
+Servestead, the Server Homestead, is a terminal application for turning a raw Ubuntu VPS into a hardened, Git-backed place to run private application stacks. Its full-screen setup flow handles profiles, DigitalOcean provisioning, staged server setup, Git-backed stack management, run history, and recovery. Direct commands remain available for automation.
 
 ## Prerequisites
 
@@ -17,17 +17,17 @@ mkdir -p bin
 go build -o bin/servestead ./backend
 ```
 
-## Servestead Web
+## Terminal UI
 
-Launch the recommended local interface:
+Launch the main interface:
 
 ```sh
-bin/servestead ui
+bin/servestead setup
 ```
 
-Servestead binds a random loopback port, prints a tokenized session URL, and opens it in the default browser. Use `bin/servestead ui --no-open` when you want to copy the printed URL yourself. Keep the CLI process running while the interface is open; use **Shutdown** in the navigation or `Ctrl+C` to stop it.
+The opening screen lists saved profiles and actions for connecting or provisioning a server. Choose a profile to open its dashboard. The footer always shows the keys available on the current screen, `esc` goes back, and `q` exits from navigation screens.
 
-The public documentation at [docs.servestead.com](https://docs.servestead.com) leads with the browser workflow and keeps Terminal UI and direct commands as reference paths.
+The public documentation at [docs.servestead.com](https://docs.servestead.com) covers the terminal workflow and direct commands.
 
 ## Documentation site
 
@@ -78,7 +78,7 @@ Defaults target Ubuntu 24.04 in `nyc3` on `s-1vcpu-1gb` and can be overridden wi
 
 ## Guided setup
 
-For a guided setup on an existing disposable Ubuntu VPS, launch Servestead Web, open **Setup**, and choose **Connect existing VPS**. The five-step workbench collects profile and repository values, presents the complete plan before repository or SSH work begins, and keeps live status, logs, recovery, and retry controls in context.
+For a guided setup on an existing disposable Ubuntu VPS, run `bin/servestead setup` and choose **Set up a new server profile**. Servestead collects the server, SSH, domain, and repository values before showing the complete plan. It prepares the repository only after confirmation and starts SSH work only after local preparation succeeds.
 
 The direct interactive alternative starts from the server IP:
 
@@ -86,7 +86,7 @@ The direct interactive alternative starts from the server IP:
 bin/servestead setup --ip 203.0.113.10
 ```
 
-With `--ip`, Servestead creates or selects a saved profile, collects the missing full-run values up front, generates and stores the Pangolin server secret, checks local prerequisites, then runs bootstrap, hardening, Docker networking, and reverse proxy deployment as one setup plan. Interactive runs show a live terminal run view with task progress, current stage/task, and inline logs; `--yes` keeps script-friendly stdout/stderr output. Saved profiles live under the directory returned by `os.UserConfigDir()` in a `servestead` subdirectory. Each profile keeps metadata, run state, secrets, and JSONL run logs in separate files with owner-only permissions.
+With `--ip`, Servestead creates or selects a saved profile, collects the missing full-run values up front, generates and stores the Pangolin server secret, checks local prerequisites, then runs bootstrap, hardening, Docker networking, proxy, and observability as one setup plan. Interactive runs show task progress, the current stage and task, and inline logs. `--yes` keeps script-friendly stdout and stderr output. Saved profiles live under the operating system's user configuration directory in a `servestead` subdirectory. Set `SERVESTEAD_CONFIG_DIR` to use a different Servestead configuration root. Each profile keeps metadata, run state, secrets, and JSONL run logs in separate owner-only files.
 
 Profiles are keyed by generated profile IDs, so starting fresh for a reused IP preserves old profile data instead of overwriting it:
 
@@ -107,9 +107,9 @@ bin/servestead setup \
   --yes
 ```
 
-Running `setup` without `--ip` opens the full-screen, profile-first terminal UI. It lists saved profiles and can provision a new DigitalOcean VPS before setup. The provisioning path reads a DigitalOcean token, loads regions, sizes, Ubuntu images, and SSH keys from the API, displays hourly and monthly size prices, requires explicit confirmation, creates one billable Droplet, saves it as a profile, and returns to the dashboard. It does not bootstrap or harden automatically. Saved DigitalOcean profiles expose cloud actions from the dashboard: press `o` to restart or destroy the Droplet after confirmation; destroying a Droplet keeps the local profile, secrets, state, and logs.
+Running `setup` without `--ip` opens the full-screen, profile-first terminal UI. It lists saved profiles and can provision a new DigitalOcean VPS before setup. The provisioning path reads a DigitalOcean token, loads regions, sizes, Ubuntu images, and SSH keys from the API, displays hourly and monthly size prices, requires typed confirmation, creates one billable Droplet, saves it as a profile, and returns to the dashboard. It does not bootstrap or harden automatically. Saved DigitalOcean profiles expose cloud actions from the dashboard. Press `o` to restart or destroy the Droplet after confirmation. Destroying a Droplet keeps the local profile, secrets, state, and logs.
 
-Existing profile dashboards present three setup actions: Bootstrap, Harden, and Platform. Platform runs networking, Pangolin proxy, and observability in order from one command. The TUI collects missing full-run values before any remote command runs and presents explicit choices to create a local configuration repository, use an existing checkout, or clone GitHub. The review screen shows the selected repository action. After confirmation, Servestead prepares the repository first and starts SSH execution only after that succeeds. From a saved profile dashboard, use `j`/`k` to select an action and press `r` to run it once, even if it is already marked complete. Press `p` to reveal the saved Pangolin administrator username and password. Retrying Platform after Pangolin has already been registered opens masked administrator email/password inputs and saves the supplied credentials in the owner-only profile secrets file. Press `q` to quit from navigation or run screens, `esc` to go back, or `x` to delete only the local saved profile, secrets, state, and run logs; local profile delete does not change the remote server. The older one-off guided paths remain available from the advanced legacy setup entry.
+Existing profile dashboards present three setup actions: Bootstrap, Harden, and Platform. Platform runs networking, Pangolin proxy, and observability in order. The TUI collects missing values before any remote command runs and offers explicit repository choices: create a local repository, use an existing checkout, or clone GitHub. The review screen shows the selected repository action. After confirmation, Servestead prepares the repository first and starts SSH execution only after that succeeds. Use `j` and `k` to select an action, then press `r` to run it once, even if it is already marked complete. Press `h` to open persisted run history and redacted log detail. Press `p` to reveal saved Pangolin administrator credentials. Retrying Platform after Pangolin has already been registered opens masked administrator credential inputs and saves the supplied values in the owner-only profile secrets file. Press `q` to exit navigation or a completed run and `esc` to go back. Press `ctrl+c` to request cancellation during a run. Once SSH work has started, the active remote task may already be partially applied; wait for cancellation to finish, then inspect the saved run and remote state before retrying. Local profile deletion requires `delete <profile-name>` exactly as shown, blocks active runs, and removes only local profile files. It does not change the remote server. The one-off guided paths remain under **Advanced legacy setup paths**.
 
 For a quick preflight check without opening an interface:
 
@@ -136,7 +136,7 @@ bin/servestead harden \
   --private-key "$HOME/.ssh/id_ed25519"
 ```
 
-The hardening runner targets the administrative user created by `bootstrap` and defaults to `--ssh-user servestead`. It validates the target is Ubuntu 22.04 or newer on Linux 5.15 or newer, applies pending package upgrades, configures a persistent `/swapfile` sized from detected RAM (2× below 2 GiB, 1× from 2–8 GiB, and 4 GiB above 8 GiB), disables root SSH login, disables SSH password and keyboard-interactive login, checks every sysctl key before applying `/etc/sysctl.d/99-vps-hardening.conf`, enables unattended upgrades, installs CrowdSec from its apt repository, installs the matching CrowdSec firewall bouncer for nftables or iptables, and ensures both services are running.
+The hardening runner targets the administrative user created by `bootstrap` and defaults to `--ssh-user servestead`. It validates the target is Ubuntu 22.04 or newer on Linux 5.15 or newer, applies pending package upgrades, configures a persistent `/swapfile` sized from detected RAM (2× below 2 GiB, 1× from 2 to 8 GiB, and 4 GiB above 8 GiB), disables root SSH login, disables SSH password and keyboard-interactive login, checks every sysctl key before applying `/etc/sysctl.d/99-vps-hardening.conf`, enables unattended upgrades, installs CrowdSec from its apt repository, installs the matching CrowdSec firewall bouncer for nftables or iptables, and ensures both services are running.
 
 When logging in manually with the generated key, use the key path explicitly:
 
@@ -179,7 +179,7 @@ Servestead deploys the exact committed `HEAD`. Uncommitted changes to the observ
 
 ## Add an application stack
 
-Saved-profile dashboards show stacks detected in the profile configuration repository. Press `s` to open the standalone stack manager. From there, `a` opens a Compose file browser; press `/` when manual path entry is preferable. If editing the repository directly, place the Compose file at `stacks/<name>/compose.yaml`; setup shows it as a draft until metadata is reviewed and saved. After inspecting the file, the TUI lists every detected service as private by default. Select a service and press `enter` or `space` to configure a public route, use `a` to add another route for the selected service, then press `n` to choose no runtime secrets, use a detected adjacent `.env`, or browse for another file. The final review screen saves local repository files, including any encrypted `servestead.secrets.yaml` file and the base repository scaffold when it is missing, so one config-repository review and commit covers the full import. Existing stacks retain the route editor: `e` edits metadata, `ctrl+s` saves an edit, `d` removes the stack after confirmation, and `r` deploys only the selected committed stack. Repository actions are also available without leaving the TUI: `v` views staged, unstaged, and untracked diffs; `g` stages all changes under `stacks/`; `c` commits the staged stack changes with a supplied message; and `p` pushes the current branch when an `origin` remote is configured. The manager reports `commit required`, `push required`, `sync required`, or `in sync`. Press `y` to synchronize the committed repository with the server. Synchronization deploys every current stack and removes containers, generated overrides, deployment manifests, and Pangolin resources for stacks deleted from Git. The direct command remains available for scripted imports:
+Saved-profile dashboards show stacks detected in the profile configuration repository. Press `s` to open the standalone stack manager. From there, `a` opens a Compose file picker; press `/` when manual path entry is preferable. If editing the repository directly, place the Compose file at `stacks/<name>/compose.yaml`; setup shows it as a draft until metadata is reviewed and saved. After inspecting the file, the TUI lists every detected service as private by default. Select a service and press `enter` or `space` to configure a public route, use `a` to add another route for the selected service, then press `n` to choose no runtime secrets, use a detected adjacent `.env`, or pick another file. The final review screen saves local repository files, including any encrypted `servestead.secrets.yaml` file and the base repository scaffold when it is missing, so one config-repository review and commit covers the full import. Existing stacks retain the route editor: `e` edits metadata, `ctrl+s` saves an edit, and `r` deploys only the selected committed stack. Pressing `d` requires `delete <stack-name>` exactly as shown before it removes local files. Repository actions are also available without leaving the TUI: `v` views staged, unstaged, and untracked diffs; `g` stages all changes under `stacks/`; `c` commits the staged stack changes with a supplied message; and `p` pushes the current branch when an `origin` remote is configured. The manager reports `commit required`, `push required`, `sync required`, or `in sync`. Press `y` to synchronize the committed repository with the server. Synchronization deploys every current stack and removes containers, generated overrides, deployment manifests, and Pangolin resources for stacks deleted from Git. The direct command remains available for scripted imports:
 
 ```sh
 bin/servestead stack add \
@@ -213,7 +213,7 @@ During deployment, Servestead generates an override that:
 
 Review and commit the generated stack files, then select that stack in the TUI and press `r`. Servestead deploys and reports each stack independently, and deploys committed stack configuration only.
 
-DNS registrar changes remain external. Create records for `pangolin.<domain>`, `beszel.<domain>`, and `dozzle.<domain>` pointing to the VPS. Traefik uses HTTP-01 to issue a separate certificate for each hostname, so TCP port 80 must remain reachable.
+DNS registrar changes remain external. Create records for `pangolin.<domain>`, `beszel.<domain>`, `dozzle.<domain>`, and `dockhand.<domain>` pointing to the VPS. Traefik uses HTTP-01 to issue a separate certificate for each hostname, so TCP port 80 must remain reachable.
 
 Retrieve the generated Pangolin administrator credentials:
 

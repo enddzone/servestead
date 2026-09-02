@@ -41,6 +41,11 @@ type configRepositoryRevision struct {
 }
 
 func defaultConfigRepositoryPath(profileID string) (string, error) {
+	if root, configured, err := servesteadConfigDirOverride(); err != nil {
+		return "", err
+	} else if configured {
+		return filepath.Join(root, "repositories", profileID), nil
+	}
 	configDirectory := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME"))
 	if configDirectory == "" {
 		homeDirectory, err := os.UserHomeDir()
@@ -62,6 +67,14 @@ func prepareDeclarativeSetup(ctx context.Context, store ProfileStore, profile Pr
 	if err != nil {
 		return profile, config, err
 	}
+	if err := ctx.Err(); err != nil {
+		return profile, config, err
+	}
+	repositoryLock, err := acquireRepositoryOperationLock(store, path)
+	if err != nil {
+		return profile, config, err
+	}
+	defer releaseProfileOperationLock(repositoryLock)
 	scaffold := observabilityComposeFile(observabilityConfig{
 		BaseDomain: config.BaseDomain,
 		AdminEmail: config.PangolinAdminEmail,
@@ -275,14 +288,14 @@ func commitInitialConfigRepositoryScaffold(ctx context.Context, path string) err
 }
 
 func readConfigRepositoryRevision(ctx context.Context, path, githubURL string) (configRepositoryRevision, error) {
-	status, err := runGit(ctx, path, nil, "status", gitStatusPorcelainFlag, "--", observabilityComposeRepositoryPath)
+	status, err := runGitLimited(ctx, path, stackRepositoryListMaxBytes, "status", gitStatusPorcelainFlag, "--", observabilityComposeRepositoryPath)
 	if err != nil {
 		return configRepositoryRevision{}, err
 	}
 	if strings.TrimSpace(status) != "" {
 		return configRepositoryRevision{}, fmt.Errorf("uncommitted changes in %s block deployment", observabilityComposeRepositoryPath)
 	}
-	stackStatus, err := runGit(ctx, path, nil, "status", gitStatusPorcelainFlag, "--", "stacks")
+	stackStatus, err := runGitLimited(ctx, path, stackRepositoryListMaxBytes, "status", gitStatusPorcelainFlag, "--", "stacks")
 	if err != nil {
 		return configRepositoryRevision{}, err
 	}
@@ -293,7 +306,7 @@ func readConfigRepositoryRevision(ctx context.Context, path, githubURL string) (
 	if err != nil {
 		return configRepositoryRevision{}, err
 	}
-	compose, err := runGit(ctx, path, nil, "show", "HEAD:"+observabilityComposeRepositoryPath)
+	compose, err := runGitLimited(ctx, path, stackComposeMaxBytes, "show", "HEAD:"+observabilityComposeRepositoryPath)
 	if err != nil {
 		return configRepositoryRevision{}, fmt.Errorf("read committed observability Compose file: %w", err)
 	}
@@ -399,29 +412,31 @@ func ensureConfigRepositoryScaffold(ctx context.Context, path, scaffold string) 
 		return false, err
 	}
 	composePath := filepath.Join(path, filepath.FromSlash(observabilityComposeRepositoryPath))
-	if _, err := os.Stat(composePath); err == nil {
-		return refreshConfigRepositoryScaffold(ctx, path, composePath, scaffold)
+	observabilityDirectory, err := openManagedStackRoot(path, reservedObservabilityStackName, true)
+	if err != nil {
+		return false, fmt.Errorf("prepare managed observability directory: %w", err)
+	}
+	defer observabilityDirectory.Close()
+	if _, err := observabilityDirectory.Lstat(stackComposeFilename); err == nil {
+		return refreshConfigRepositoryScaffold(ctx, path, composePath, observabilityDirectory, scaffold)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return false, err
 	}
-	if err := os.MkdirAll(filepath.Dir(composePath), 0700); err != nil {
-		return false, err
-	}
-	if err := os.WriteFile(composePath, []byte(scaffold), 0600); err != nil {
+	if err := atomicWriteManagedFile(observabilityDirectory, stackComposeFilename, []byte(scaffold), 0600); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func refreshConfigRepositoryScaffold(ctx context.Context, path, composePath, scaffold string) (bool, error) {
-	existing, err := os.ReadFile(composePath)
+func refreshConfigRepositoryScaffold(ctx context.Context, path, composePath string, observabilityDirectory *os.Root, scaffold string) (bool, error) {
+	existing, err := readManagedFile(observabilityDirectory, stackComposeFilename, observabilityComposeRepositoryPath, stackComposeMaxBytes)
 	if err != nil {
 		return false, err
 	}
 	if string(existing) == scaffold {
 		return false, nil
 	}
-	status, err := runGit(ctx, path, nil, "status", gitStatusPorcelainFlag, "--", observabilityComposeRepositoryPath)
+	status, err := runGitLimited(ctx, path, stackRepositoryListMaxBytes, "status", gitStatusPorcelainFlag, "--", observabilityComposeRepositoryPath)
 	if err != nil {
 		return false, err
 	}
@@ -431,7 +446,7 @@ func refreshConfigRepositoryScaffold(ctx context.Context, path, composePath, sca
 	if !isManagedObservabilityCompose(existing) {
 		return false, nil
 	}
-	if err := os.WriteFile(composePath, []byte(scaffold), 0600); err != nil {
+	if err := atomicWriteManagedFile(observabilityDirectory, stackComposeFilename, []byte(scaffold), 0600); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -481,36 +496,65 @@ type repositoryStack struct {
 }
 
 func loadCommittedStacks(ctx context.Context, repositoryPath string) ([]repositoryStack, error) {
-	output, err := runGit(ctx, repositoryPath, nil, "ls-tree", "-d", "--name-only", "HEAD:stacks")
+	output, err := runGitLimited(ctx, repositoryPath, stackRepositoryListMaxBytes, "ls-tree", "-d", "--name-only", "HEAD:stacks")
 	if err != nil {
 		return nil, err
 	}
+	names := strings.Fields(output)
+	applicationStackCount := 0
+	for _, name := range names {
+		if name != reservedObservabilityStackName {
+			applicationStackCount++
+		}
+	}
+	if applicationStackCount > stackRepositoryMaxStacks {
+		return nil, fmt.Errorf("configuration repository has more than %d application stacks", stackRepositoryMaxStacks)
+	}
 	stacks := []repositoryStack{}
-	for _, name := range strings.Fields(output) {
+	var totalBytes int64
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		stack, include, err := loadCommittedStack(ctx, repositoryPath, name)
 		if err != nil {
 			return nil, err
 		}
 		if include {
+			totalBytes += committedStackBytes(stack)
+			if totalBytes > stackRepositoryTotalBytes {
+				return nil, fmt.Errorf("committed stack files exceed the %s total limit", formatByteLimit(stackRepositoryTotalBytes))
+			}
 			stacks = append(stacks, stack)
 		}
 	}
 	return stacks, nil
 }
 
+func committedStackBytes(stack repositoryStack) int64 {
+	total := int64(len(stack.Compose) + len(stack.MetadataContent))
+	for _, content := range stack.Files {
+		total += int64(len(content))
+	}
+	return total
+}
+
 func loadCommittedStack(ctx context.Context, repositoryPath, name string) (repositoryStack, bool, error) {
-	if name == "observability" {
+	if name == reservedObservabilityStackName {
 		return repositoryStack{}, false, nil
 	}
-	if !stackSlugPattern.MatchString(name) {
+	if err := validateStackName(name); err != nil {
 		return repositoryStack{}, false, fmt.Errorf("stack directory %q must be a lowercase DNS label", name)
 	}
 	base := "stacks/" + name + "/"
-	compose, err := runGit(ctx, repositoryPath, nil, "show", "HEAD:"+base+stackComposeFilename)
+	compose, err := runGitLimited(ctx, repositoryPath, stackComposeMaxBytes, "show", "HEAD:"+base+stackComposeFilename)
 	if err != nil {
 		return repositoryStack{}, false, fmt.Errorf("stack %s: committed %s is required", name, stackComposeFilename)
 	}
-	metadataContent, err := runGit(ctx, repositoryPath, nil, "show", "HEAD:"+base+stackMetadataFilename)
+	if err := ctx.Err(); err != nil {
+		return repositoryStack{}, false, err
+	}
+	metadataContent, err := runGitLimited(ctx, repositoryPath, stackMetadataMaxBytes, "show", "HEAD:"+base+stackMetadataFilename)
 	if err != nil {
 		return repositoryStack{}, false, fmt.Errorf("stack %s is not configured; run servestead stack add --profile <id> --compose %s", name, filepath.Join(repositoryPath, filepath.FromSlash(base+stackComposeFilename)))
 	}
@@ -537,20 +581,28 @@ func loadCommittedStack(ctx context.Context, repositoryPath, name string) (repos
 }
 
 func loadCommittedStackFiles(ctx context.Context, repositoryPath, base string) (map[string]string, error) {
-	output, err := runGit(ctx, repositoryPath, nil, "ls-tree", "-r", "--name-only", "HEAD", "--", strings.TrimSuffix(base, "/"))
+	output, err := runGitLimited(ctx, repositoryPath, stackRepositoryListMaxBytes, "ls-tree", "-r", "--name-only", "HEAD", "--", strings.TrimSuffix(base, "/"))
 	if err != nil {
 		return nil, err
 	}
 	files := map[string]string{}
+	var totalBytes int64
 	for _, repositoryFile := range strings.Split(strings.TrimSpace(output), "\n") {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		repositoryFile = strings.TrimSpace(repositoryFile)
 		relative := strings.TrimPrefix(repositoryFile, base)
 		if relative == "" || strings.Contains(relative, "\n") {
 			continue
 		}
-		content, err := runGit(ctx, repositoryPath, nil, "show", "HEAD:"+repositoryFile)
+		content, err := runGitLimited(ctx, repositoryPath, stackRepositoryFileMaxBytes, "show", "HEAD:"+repositoryFile)
 		if err != nil {
 			return nil, err
+		}
+		totalBytes += int64(len(content))
+		if totalBytes > stackRepositoryTotalBytes {
+			return nil, fmt.Errorf("committed stack files exceed the %s total limit", formatByteLimit(stackRepositoryTotalBytes))
 		}
 		files[relative] = content
 	}
@@ -572,6 +624,29 @@ func runGit(ctx context.Context, directory string, extraEnv []string, arguments 
 			detail = err.Error()
 		}
 		return "", fmt.Errorf("git %s: %s", arguments[0], detail)
+	}
+	return stdout.String(), nil
+}
+
+func runGitLimited(ctx context.Context, directory string, limit int64, arguments ...string) (string, error) {
+	command, err := newGitCommand(ctx, append([]string{"-C", directory}, arguments...)...)
+	if err != nil {
+		return "", err
+	}
+	command.Env = trustedCommandEnvironment(nil)
+	stdout := &boundedCommandBuffer{limit: int(limit)}
+	stderr := &boundedCommandBuffer{limit: 64 << 10}
+	command.Stdout = stdout
+	command.Stderr = stderr
+	if err := command.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		return "", fmt.Errorf("git %s: %s", arguments[0], detail)
+	}
+	if stdout.truncated {
+		return "", fmt.Errorf("git %s output exceeds the %s limit", arguments[0], formatByteLimit(limit))
 	}
 	return stdout.String(), nil
 }

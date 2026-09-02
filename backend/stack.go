@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,9 +25,24 @@ const stackMetadataFilename = "servestead.yaml"
 const stackComposeFilename = "compose.yaml"
 const gitNoExtDiffFlag = "--no-ext-diff"
 
+const (
+	stackComposeMaxBytes        int64 = 4 << 20
+	stackMetadataMaxBytes       int64 = 1 << 20
+	stackEnvironmentMaxBytes    int64 = 1 << 20
+	stackSecretMaxBytes         int64 = 8 << 20
+	stackRepositoryFileMaxBytes int64 = 4 << 20
+	stackRepositoryListMaxBytes int64 = 1 << 20
+	stackRepositoryTotalBytes   int64 = 16 << 20
+	stackRepositoryDiffMaxBytes int64 = 2 << 20
+	stackRepositoryMaxStacks          = 256
+	stackRepositoryMaxEntries         = 1024
+)
+
 var stackSlugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 var environmentKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var stackPublicResourceProtocols = []string{"http", "tcp", "udp", "ssh", "rdp", "vnc"}
+
+const reservedObservabilityStackName = "observability"
 
 type stackMetadata struct {
 	Version         int                   `yaml:"version"`
@@ -86,78 +102,157 @@ type editableStack struct {
 }
 
 func loadEditableStacks(repositoryPath string) ([]editableStack, error) {
-	stacksDirectory := filepath.Join(expandUserPath(repositoryPath), "stacks")
-	entries, err := os.ReadDir(stacksDirectory)
+	return loadEditableStacksContext(context.Background(), repositoryPath)
+}
+
+func loadEditableStacksContext(ctx context.Context, repositoryPath string) ([]editableStack, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	stacksDirectory, err := openManagedStacksRoot(repositoryPath, false)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	defer stacksDirectory.Close()
+	entries, err := readManagedDirectoryEntries(stacksDirectory)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateEditableStackDirectoryCount(entries); err != nil {
+		return nil, err
+	}
 	stacks := []editableStack{}
+	var totalBytes int64
 	for _, entry := range entries {
-		stack, include, err := loadEditableStackEntry(stacksDirectory, entry)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		stack, include, bytesRead, err := loadEditableStackEntry(ctx, stacksDirectory, entry)
 		if err != nil {
 			return nil, err
 		}
-		if include {
-			stacks = append(stacks, stack)
+		if !include {
+			continue
 		}
+		totalBytes += bytesRead
+		if totalBytes > stackRepositoryTotalBytes {
+			return nil, fmt.Errorf("editable stack files exceed the %s total limit", formatByteLimit(stackRepositoryTotalBytes))
+		}
+		stacks = append(stacks, stack)
 	}
 	sort.Slice(stacks, func(i, j int) bool { return stacks[i].Name < stacks[j].Name })
 	return stacks, nil
 }
 
-func loadEditableStackEntry(stacksDirectory string, entry os.DirEntry) (editableStack, bool, error) {
+func readManagedDirectoryEntries(directory *os.Root) ([]os.DirEntry, error) {
+	entriesFile, err := directory.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer entriesFile.Close()
+	entries, err := entriesFile.ReadDir(stackRepositoryMaxEntries + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	if len(entries) > stackRepositoryMaxEntries {
+		return nil, fmt.Errorf("managed stacks directory has more than %d entries", stackRepositoryMaxEntries)
+	}
+	return entries, nil
+}
+
+func validateEditableStackDirectoryCount(entries []os.DirEntry) error {
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == reservedObservabilityStackName {
+			continue
+		}
+		count++
+		if count > stackRepositoryMaxStacks {
+			return fmt.Errorf("configuration repository has more than %d application stacks", stackRepositoryMaxStacks)
+		}
+	}
+	return nil
+}
+
+func loadEditableStackEntry(ctx context.Context, stacksDirectory *os.Root, entry os.DirEntry) (editableStack, bool, int64, error) {
 	if !entry.IsDir() {
 		if isStackComposeFilename(entry.Name()) {
-			return editableStack{}, false, fmt.Errorf(
+			return editableStack{}, false, 0, fmt.Errorf(
 				"compose file %s is outside a stack directory; move it to %s or press a in setup to import it",
 				filepath.Join("stacks", entry.Name()),
 				filepath.Join("stacks", "<stack-name>", stackComposeFilename),
 			)
 		}
-		return editableStack{}, false, nil
+		return editableStack{}, false, 0, nil
 	}
-	if entry.Name() == "observability" {
-		return editableStack{}, false, nil
+	if entry.Name() == reservedObservabilityStackName {
+		return editableStack{}, false, 0, nil
 	}
-	if !stackSlugPattern.MatchString(entry.Name()) {
-		return editableStack{}, false, fmt.Errorf("stack directory %q must be a lowercase DNS label", entry.Name())
+	if err := validateStackName(entry.Name()); err != nil {
+		return editableStack{}, false, 0, fmt.Errorf("stack directory %q must be a lowercase DNS label", entry.Name())
 	}
-	directory := filepath.Join(stacksDirectory, entry.Name())
+	directory, err := openManagedDirectory(stacksDirectory, entry.Name(), fmt.Sprintf("managed stack directory %q", entry.Name()), false)
+	if err != nil {
+		return editableStack{}, false, 0, err
+	}
+	defer directory.Close()
 	compose, err := readEditableStackCompose(directory, entry.Name())
 	if err != nil {
-		return editableStack{}, false, err
+		return editableStack{}, false, 0, err
 	}
 	if compose == nil {
-		return editableStack{}, false, nil
+		return editableStack{}, false, 0, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return editableStack{}, false, 0, err
 	}
 	services, err := inspectComposeServices(compose)
 	if err != nil {
-		return editableStack{}, false, fmt.Errorf("stack %s: %w", entry.Name(), err)
+		return editableStack{}, false, 0, fmt.Errorf("stack %s: %w", entry.Name(), err)
 	}
-	metadata, metadataMissing, err := readEditableStackMetadata(directory, entry.Name(), services)
+	if err := ctx.Err(); err != nil {
+		return editableStack{}, false, 0, err
+	}
+	metadata, metadataMissing, metadataBytes, err := readEditableStackMetadata(directory, entry.Name(), services)
 	if err != nil {
-		return editableStack{}, false, err
+		return editableStack{}, false, 0, err
 	}
 	return editableStack{
 		Name: entry.Name(), Compose: string(compose), Metadata: metadata, Services: services,
 		MetadataMissing: metadataMissing,
-	}, true, nil
+	}, true, int64(len(compose)) + metadataBytes, nil
 }
 
-func readEditableStackCompose(directory, name string) ([]byte, error) {
-	compose, err := os.ReadFile(filepath.Join(directory, stackComposeFilename))
+var readEditableStackManagedFile = readManagedFile
+
+func readEditableStackCompose(directory *os.Root, name string) ([]byte, error) {
+	compose, err := readEditableStackManagedFile(directory, stackComposeFilename, fmt.Sprintf("stack %s %s", name, stackComposeFilename), stackComposeMaxBytes)
 	if err == nil {
 		return compose, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("stack %s: read %s: %w", name, stackComposeFilename, err)
 	}
-	children, readErr := os.ReadDir(directory)
+	directoryFile, openErr := directory.Open(".")
+	if openErr != nil {
+		return nil, fmt.Errorf("stack %s: inspect directory: %w", name, openErr)
+	}
+	children, readErr := directoryFile.ReadDir(1)
+	closeErr := directoryFile.Close()
+	if errors.Is(readErr, io.EOF) {
+		readErr = nil
+	}
+	if readErr == nil && closeErr != nil {
+		readErr = closeErr
+	}
 	if readErr == nil && len(children) == 0 {
 		return nil, nil
+	}
+	if readErr != nil {
+		return nil, fmt.Errorf("stack %s: inspect directory: %w", name, readErr)
 	}
 	return nil, fmt.Errorf(
 		"stack %s is incomplete: expected %s; move a Compose file there or press a in setup to import one",
@@ -166,22 +261,22 @@ func readEditableStackCompose(directory, name string) ([]byte, error) {
 	)
 }
 
-func readEditableStackMetadata(directory, name string, services []composeServiceSummary) (stackMetadata, bool, error) {
-	metadataData, err := os.ReadFile(filepath.Join(directory, stackMetadataFilename))
+func readEditableStackMetadata(directory *os.Root, name string, services []composeServiceSummary) (stackMetadata, bool, int64, error) {
+	metadataData, err := readEditableStackManagedFile(directory, stackMetadataFilename, fmt.Sprintf("stack %s %s", name, stackMetadataFilename), stackMetadataMaxBytes)
 	metadata := stackMetadata{Version: 1}
 	if errors.Is(err, os.ErrNotExist) {
-		return metadata, true, nil
+		return metadata, true, 0, nil
 	}
 	if err != nil {
-		return metadata, false, fmt.Errorf("stack %s: read %s: %w", name, stackMetadataFilename, err)
+		return metadata, false, 0, fmt.Errorf("stack %s: read %s: %w", name, stackMetadataFilename, err)
 	}
 	if err := yaml.Unmarshal(metadataData, &metadata); err != nil {
-		return metadata, false, fmt.Errorf("stack %s metadata: %w", name, err)
+		return metadata, false, 0, fmt.Errorf("stack %s metadata: %w", name, err)
 	}
 	if err := validateStackMetadata(name, metadata, services); err != nil {
-		return metadata, false, fmt.Errorf("stack %s metadata: %w", name, err)
+		return metadata, false, 0, fmt.Errorf("stack %s metadata: %w", name, err)
 	}
-	return metadata, false, nil
+	return metadata, false, int64(len(metadataData)), nil
 }
 
 func isStackComposeFilename(name string) bool {
@@ -202,85 +297,400 @@ func writeEditableStack(repositoryPath, originalName string, options stackAddOpt
 	if err := validateStackMetadata(options.Name, metadata, services); err != nil {
 		return err
 	}
+	if originalName != "" {
+		if err := validateEditableStackManagedFiles(repositoryPath, originalName); err != nil {
+			return err
+		}
+	}
 	stacksDirectory := filepath.Join(expandUserPath(repositoryPath), "stacks")
 	if _, err := prepareEditableStackDestination(stacksDirectory, originalName, options.Name); err != nil {
 		return err
 	}
-	return writeEditableStackFiles(stacksDirectory, options.Name, metadata, compose)
+	return writeEditableStackFiles(repositoryPath, options.Name, metadata, compose)
 }
 
-func prepareEditableStackDestination(stacksDirectory, originalName, name string) (string, error) {
-	if !stackSlugPattern.MatchString(name) {
-		return "", errors.New("stack name must be a lowercase DNS label")
+func validateEditableStackManagedFiles(repositoryPath, name string) error {
+	directory, err := openManagedStackRoot(repositoryPath, name, false)
+	if err != nil {
+		return err
 	}
-	destination := filepath.Join(stacksDirectory, name)
+	defer directory.Close()
+	for _, managedFile := range []string{stackComposeFilename, stackMetadataFilename, stackSecretFilename} {
+		if err := rejectManagedFileSymlink(directory, managedFile, fmt.Sprintf("stack %s %s", name, managedFile)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var writeEditableStackFile = atomicWriteManagedFile
+
+func prepareEditableStackDestination(stacksPath, originalName, name string) (string, error) {
+	if err := validateStackName(name); err != nil {
+		return "", err
+	}
+	stacksPath = expandUserPath(stacksPath)
+	repositoryPath := filepath.Dir(filepath.Clean(stacksPath))
+	stacksDirectory, err := openManagedStacksRoot(repositoryPath, true)
+	if err != nil {
+		return "", err
+	}
+	defer stacksDirectory.Close()
+	destination := filepath.Join(stacksPath, name)
 	if originalName == "" {
-		if _, err := os.Stat(destination); err == nil {
-			if !stackDirectoryContainsOnlySecretFile(destination) {
-				return "", fmt.Errorf("stack %q already exists", name)
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
+		if err := validateNewEditableStackDestination(stacksDirectory, name); err != nil {
 			return "", err
 		}
 		return destination, nil
 	}
-	if !stackSlugPattern.MatchString(originalName) {
-		return "", errors.New("original stack name must be a lowercase DNS label")
-	}
-	if originalName == name {
-		return destination, nil
-	}
-	if _, err := os.Stat(destination); err == nil {
-		return "", fmt.Errorf("stack %q already exists", name)
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if err := validateStackName(originalName); err != nil {
+		if !stackSlugPattern.MatchString(originalName) {
+			return "", errors.New("original stack name must be a lowercase DNS label")
+		}
 		return "", err
 	}
-	source := filepath.Join(stacksDirectory, originalName)
-	if err := os.Rename(source, destination); err != nil {
+	if originalName == name {
+		if err := validateExistingEditableStackDestination(stacksDirectory, name); err != nil {
+			return "", err
+		}
+		return destination, nil
+	}
+	if err := renameEditableStackDestination(stacksDirectory, originalName, name); err != nil {
 		return "", fmt.Errorf("rename stack: %w", err)
 	}
 	return destination, nil
 }
 
-func writeEditableStackFiles(stacksDirectory, name string, metadata stackMetadata, compose []byte) error {
-	if !stackSlugPattern.MatchString(name) {
-		return errors.New("stack name must be a lowercase DNS label")
+func validateNewEditableStackDestination(stacksDirectory *os.Root, name string) error {
+	info, err := stacksDirectory.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	destination := filepath.Join(stacksDirectory, name)
-	if err := os.MkdirAll(destination, 0700); err != nil {
+	if err != nil {
 		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to save stack %q: managed stack directory is a symbolic link", name)
+	}
+	stackDirectory, err := openManagedDirectory(stacksDirectory, name, fmt.Sprintf("managed stack directory %q", name), false)
+	if err != nil {
+		return err
+	}
+	defer stackDirectory.Close()
+	if !stackRootContainsOnlySecretFile(stackDirectory) {
+		return fmt.Errorf("stack %q already exists", name)
+	}
+	return nil
+}
+
+func validateExistingEditableStackDestination(stacksDirectory *os.Root, name string) error {
+	info, err := stacksDirectory.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to save stack %q: managed stack directory is a symbolic link", name)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("stack %q is not a directory", name)
+	}
+	return nil
+}
+
+func renameEditableStackDestination(stacksDirectory *os.Root, originalName, name string) error {
+	if _, err := stacksDirectory.Lstat(name); err == nil {
+		return fmt.Errorf("stack %q already exists", name)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	sourceInfo, err := stacksDirectory.Lstat(originalName)
+	if err != nil {
+		return err
+	}
+	if sourceInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to rename stack %q: managed stack directory is a symbolic link", originalName)
+	}
+	if !sourceInfo.IsDir() {
+		return fmt.Errorf("stack %q is not a directory", originalName)
+	}
+	return stacksDirectory.Rename(originalName, name)
+}
+
+func writeEditableStackFiles(repositoryPath, name string, metadata stackMetadata, compose []byte) error {
+	if err := validateStackName(name); err != nil {
+		return err
+	}
+	destination, err := openManagedStackRoot(repositoryPath, name, true)
+	if err != nil {
+		return err
+	}
+	defer destination.Close()
+	for _, managedFile := range []string{stackComposeFilename, stackMetadataFilename} {
+		if err := rejectManagedFileSymlink(destination, managedFile, fmt.Sprintf("stack %s %s", name, managedFile)); err != nil {
+			return err
+		}
 	}
 	metadataData, err := yaml.Marshal(metadata)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(destination, stackComposeFilename), compose, 0600); err != nil {
+	if err := writeEditableStackFile(destination, stackComposeFilename, compose, 0600); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(destination, stackMetadataFilename), metadataData, 0600)
+	return writeEditableStackFile(destination, stackMetadataFilename, metadataData, 0600)
 }
 
-func stackDirectoryContainsOnlySecretFile(directory string) bool {
-	entries, err := os.ReadDir(directory)
-	if err != nil || len(entries) != 1 {
+func openManagedStacksRoot(repositoryPath string, create bool) (*os.Root, error) {
+	repository, err := os.OpenRoot(expandUserPath(repositoryPath))
+	if err != nil {
+		return nil, fmt.Errorf("open configuration repository: %w", err)
+	}
+	defer repository.Close()
+	return openManagedDirectory(repository, "stacks", "managed stacks directory", create)
+}
+
+func openManagedStackRoot(repositoryPath, name string, create bool) (*os.Root, error) {
+	stacksDirectory, err := openManagedStacksRoot(repositoryPath, create)
+	if err != nil {
+		return nil, err
+	}
+	defer stacksDirectory.Close()
+	return openManagedDirectory(stacksDirectory, name, fmt.Sprintf("managed stack directory %q", name), create)
+}
+
+func managedStackDirectoryExists(repositoryPath, name string) (bool, error) {
+	stacksDirectory, err := openManagedStacksRoot(repositoryPath, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer stacksDirectory.Close()
+	info, err := stacksDirectory.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("managed stack directory %q is a symbolic link", name)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("managed stack directory %q is not a directory", name)
+	}
+	directory, err := openManagedDirectory(stacksDirectory, name, fmt.Sprintf("managed stack directory %q", name), false)
+	if err != nil {
+		return false, err
+	}
+	return true, directory.Close()
+}
+
+func openManagedDirectory(parent *os.Root, name, label string, create bool) (*os.Root, error) {
+	info, err := parent.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) && create {
+		if mkdirErr := parent.Mkdir(name, 0700); mkdirErr != nil && !errors.Is(mkdirErr, os.ErrExist) {
+			return nil, mkdirErr
+		}
+		info, err = parent.Lstat(name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%s is a symbolic link", label)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", label)
+	}
+	directory, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	openedInfo, err := directory.Stat(".")
+	if err != nil {
+		_ = directory.Close()
+		return nil, err
+	}
+	if !os.SameFile(info, openedInfo) {
+		_ = directory.Close()
+		return nil, fmt.Errorf("%s changed while it was being opened", label)
+	}
+	return directory, nil
+}
+
+func readManagedFile(root *os.Root, name, label string, limit int64) ([]byte, error) {
+	info, err := managedRegularFileInfo(root, name, label)
+	if err != nil {
+		return nil, err
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(info, openedInfo) {
+		return nil, fmt.Errorf("%s changed while it was being opened", label)
+	}
+	return readBounded(file, label, limit)
+}
+
+func readBoundedFile(path, label string, limit int64) ([]byte, error) {
+	file, err := os.Open(expandUserPath(path))
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return readBounded(file, label, limit)
+}
+
+func readBounded(reader io.Reader, label string, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s exceeds the %s limit", label, formatByteLimit(limit))
+	}
+	return data, nil
+}
+
+func formatByteLimit(limit int64) string {
+	if limit%(1<<20) == 0 {
+		return fmt.Sprintf("%d MiB", limit>>20)
+	}
+	return fmt.Sprintf("%d bytes", limit)
+}
+
+func managedRegularFileInfo(root *os.Root, name, label string) (os.FileInfo, error) {
+	info, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%s is a symbolic link", label)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", label)
+	}
+	return info, nil
+}
+
+func rejectManagedFileSymlink(root *os.Root, name, label string) error {
+	info, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symbolic link", label)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", label)
+	}
+	return nil
+}
+
+func atomicWriteManagedFile(root *os.Root, name string, data []byte, mode os.FileMode) error {
+	if err := rejectManagedFileSymlink(root, name, name); err != nil {
+		return err
+	}
+	var randomSuffix [8]byte
+	if _, err := rand.Read(randomSuffix[:]); err != nil {
+		return err
+	}
+	tempName := fmt.Sprintf(".%s.tmp-%x", name, randomSuffix)
+	temp, err := root.OpenFile(tempName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = root.Remove(tempName)
+		}
+	}()
+	if err := temp.Chmod(mode); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := root.Rename(tempName, name); err != nil {
+		return err
+	}
+	cleanup = false
+	if directory, err := root.Open("."); err == nil {
+		_ = directory.Sync()
+		_ = directory.Close()
+	}
+	return nil
+}
+
+func stackRootContainsOnlySecretFile(directory *os.Root) bool {
+	file, err := directory.Open(".")
+	if err != nil {
 		return false
 	}
-	return !entries[0].IsDir() && entries[0].Name() == stackSecretFilename
+	entries, readErr := file.ReadDir(2)
+	closeErr := file.Close()
+	if (readErr != nil && !errors.Is(readErr, io.EOF)) || closeErr != nil || len(entries) != 1 {
+		return false
+	}
+	return entries[0].Type().IsRegular() && entries[0].Name() == stackSecretFilename
 }
 
 func removeEditableStack(repositoryPath, name string) error {
-	if !stackSlugPattern.MatchString(name) || name == "observability" {
-		return errors.New("stack name must be a lowercase DNS label")
+	if err := validateStackName(name); err != nil {
+		return err
 	}
-	directory := filepath.Join(expandUserPath(repositoryPath), "stacks", name)
-	if _, err := os.Stat(filepath.Join(directory, stackMetadataFilename)); err != nil {
+	stacksDirectory, err := openManagedStacksRoot(repositoryPath, false)
+	if err != nil {
 		return fmt.Errorf("stack %q is not configured: %w", name, err)
 	}
-	return os.RemoveAll(directory)
+	defer stacksDirectory.Close()
+	info, err := stacksDirectory.Lstat(name)
+	if err != nil {
+		return fmt.Errorf("stack %q is not configured: %w", name, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to remove stack %q: managed stack directory is a symbolic link", name)
+	}
+	stackDirectory, err := openManagedDirectory(stacksDirectory, name, fmt.Sprintf("managed stack directory %q", name), false)
+	if err != nil {
+		return err
+	}
+	if _, err := managedRegularFileInfo(stackDirectory, stackMetadataFilename, fmt.Sprintf("stack %s %s", name, stackMetadataFilename)); err != nil {
+		_ = stackDirectory.Close()
+		return fmt.Errorf("stack %q is not configured: %w", name, err)
+	}
+	if err := stackDirectory.Close(); err != nil {
+		return err
+	}
+	return stacksDirectory.RemoveAll(name)
 }
 
 func stackRepositoryStatus(ctx context.Context, repositoryPath string) (string, error) {
-	status, err := runGit(ctx, expandUserPath(repositoryPath), nil, "status", "--short", "--", "stacks")
+	status, err := runGitLimited(ctx, expandUserPath(repositoryPath), stackRepositoryListMaxBytes, "status", "--short", "--", "stacks")
 	if err != nil {
 		return "", err
 	}
@@ -323,71 +733,153 @@ func stackRepositoryNeedsPush(ctx context.Context, repositoryPath, head string) 
 
 func stackRepositoryDiff(ctx context.Context, repositoryPath string) (string, error) {
 	repositoryPath = expandUserPath(repositoryPath)
-	unstaged, err := runGit(ctx, repositoryPath, nil, "diff", gitNoExtDiffFlag, "--", "stacks")
+	output := newStackRepositoryDiffOutput(stackRepositoryDiffMaxBytes)
+	unstaged, truncated, err := runBoundedGitDiff(ctx, repositoryPath, false, "diff", gitNoExtDiffFlag, "--", "stacks")
 	if err != nil {
 		return "", err
 	}
-	staged, err := runGit(ctx, repositoryPath, nil, "diff", "--cached", gitNoExtDiffFlag, "--", "stacks")
+	output.appendSection("Unstaged changes", unstaged, truncated)
+	if output.truncated {
+		return output.String(), nil
+	}
+	staged, truncated, err := runBoundedGitDiff(ctx, repositoryPath, false, "diff", "--cached", gitNoExtDiffFlag, "--", "stacks")
 	if err != nil {
 		return "", err
 	}
-	untracked, err := runGit(ctx, repositoryPath, nil, "ls-files", "-z", "--others", "--exclude-standard", "--", "stacks")
+	output.appendSection("Staged changes", staged, truncated)
+	if output.truncated {
+		return output.String(), nil
+	}
+	untracked, truncated, err := runBoundedGitDiff(ctx, repositoryPath, false, "ls-files", "-z", "--others", "--exclude-standard", "--", "stacks")
 	if err != nil {
 		return "", err
 	}
-	var builder strings.Builder
-	appendDiffSection := func(title, content string) {
-		if strings.TrimSpace(content) == "" {
-			return
-		}
-		if builder.Len() > 0 {
-			builder.WriteString("\n")
-		}
-		builder.WriteString(title + "\n\n" + strings.TrimSpace(content) + "\n")
+	if truncated {
+		output.truncated = true
+		return output.String(), nil
 	}
-	appendDiffSection("Unstaged changes", unstaged)
-	appendDiffSection("Staged changes", staged)
 	for _, name := range strings.Split(strings.TrimSuffix(untracked, "\x00"), "\x00") {
 		if name == "" {
 			continue
 		}
-		diff, err := untrackedFileDiff(ctx, repositoryPath, name)
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		diff, truncated, err := untrackedFileDiff(ctx, repositoryPath, name)
 		if err != nil {
 			return "", err
 		}
-		appendDiffSection("Untracked: "+name, diff)
+		output.appendSection("Untracked: "+name, diff, truncated)
+		if output.truncated {
+			break
+		}
 	}
-	if builder.Len() == 0 {
-		return "No stack changes.", nil
-	}
-	return builder.String(), nil
+	return output.String(), nil
 }
 
-func untrackedFileDiff(ctx context.Context, repositoryPath, name string) (string, error) {
+func untrackedFileDiff(ctx context.Context, repositoryPath, name string) (string, bool, error) {
 	cleanName := filepath.Clean(filepath.FromSlash(name))
 	if cleanName == "." || cleanName == "stacks" || !strings.HasPrefix(cleanName, "stacks"+string(filepath.Separator)) {
-		return "", fmt.Errorf("invalid untracked stack path %q", name)
+		return "", false, fmt.Errorf("invalid untracked stack path %q", name)
 	}
-	command, err := newGitCommand(ctx, "-C", repositoryPath, "diff", "--no-index", gitNoExtDiffFlag, "--", "/dev/null", cleanName)
+	return runBoundedGitDiff(ctx, repositoryPath, true, "diff", "--no-index", gitNoExtDiffFlag, "--", "/dev/null", cleanName)
+}
+
+type boundedCommandBuffer struct {
+	buffer    bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (buffer *boundedCommandBuffer) Write(data []byte) (int, error) {
+	written := len(data)
+	remaining := buffer.limit - buffer.buffer.Len()
+	if remaining > 0 {
+		if len(data) > remaining {
+			_, _ = buffer.buffer.Write(data[:remaining])
+			buffer.truncated = true
+		} else {
+			_, _ = buffer.buffer.Write(data)
+		}
+	}
+	if len(data) > remaining {
+		buffer.truncated = true
+	}
+	return written, nil
+}
+
+func (buffer *boundedCommandBuffer) String() string {
+	return buffer.buffer.String()
+}
+
+func runBoundedGitDiff(ctx context.Context, repositoryPath string, allowDiffExit bool, arguments ...string) (string, bool, error) {
+	command, err := newGitCommand(ctx, append([]string{"-C", repositoryPath}, arguments...)...)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	var stdout, stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
+	command.Env = trustedCommandEnvironment(nil)
+	stdout := &boundedCommandBuffer{limit: int(stackRepositoryDiffMaxBytes)}
+	stderr := &boundedCommandBuffer{limit: 64 << 10}
+	command.Stdout = stdout
+	command.Stderr = stderr
 	err = command.Run()
 	if err == nil {
-		return stdout.String(), nil
+		return stdout.String(), stdout.truncated, nil
 	}
 	var exitError *exec.ExitError
-	if errors.As(err, &exitError) && exitError.ExitCode() == 1 {
-		return stdout.String(), nil
+	if allowDiffExit && errors.As(err, &exitError) && exitError.ExitCode() == 1 {
+		return stdout.String(), stdout.truncated, nil
 	}
 	detail := strings.TrimSpace(stderr.String())
 	if detail == "" {
 		detail = err.Error()
 	}
-	return "", fmt.Errorf("git diff: %s", detail)
+	return "", false, fmt.Errorf("git %s: %s", arguments[0], detail)
+}
+
+type stackRepositoryDiffOutput struct {
+	builder   strings.Builder
+	limit     int
+	truncated bool
+}
+
+func newStackRepositoryDiffOutput(limit int64) *stackRepositoryDiffOutput {
+	return &stackRepositoryDiffOutput{limit: int(limit)}
+}
+
+func (output *stackRepositoryDiffOutput) appendSection(title, content string, sourceTruncated bool) {
+	content = strings.TrimSpace(content)
+	if content == "" && !sourceTruncated {
+		return
+	}
+	section := title + "\n\n" + content + "\n"
+	if output.builder.Len() > 0 {
+		section = "\n" + section
+	}
+	remaining := output.limit - output.builder.Len()
+	if remaining <= 0 {
+		output.truncated = true
+		return
+	}
+	if len(section) > remaining {
+		output.builder.WriteString(truncateUTF8Bytes(section, remaining))
+		output.truncated = true
+		return
+	}
+	output.builder.WriteString(section)
+	output.truncated = sourceTruncated
+}
+
+func (output *stackRepositoryDiffOutput) String() string {
+	if output.builder.Len() == 0 && !output.truncated {
+		return "No stack changes."
+	}
+	content := output.builder.String()
+	if !output.truncated {
+		return content
+	}
+	notice := "\n[Additional diff output was omitted after the " + formatByteLimit(stackRepositoryDiffMaxBytes) + " display limit.]\n"
+	return truncateUTF8Bytes(content, output.limit-len(notice)) + notice
 }
 
 func stageStackChanges(ctx context.Context, repositoryPath string) error {
@@ -400,7 +892,7 @@ func commitStackChanges(ctx context.Context, repositoryPath, message string) err
 	if message == "" || strings.ContainsAny(message, "\r\n") {
 		return errors.New("commit message must be a non-empty single line")
 	}
-	staged, err := runGit(ctx, expandUserPath(repositoryPath), nil, "diff", "--cached", "--name-only", "--", "stacks")
+	staged, err := runGitLimited(ctx, expandUserPath(repositoryPath), stackRepositoryListMaxBytes, "diff", "--cached", "--name-only", "--", "stacks")
 	if err != nil {
 		return err
 	}
@@ -467,10 +959,27 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	if err != nil {
 		return err
 	}
-	store, profile, state, err := loadStackAddProfile(options)
+	store, err := newDefaultProfileStore()
 	if err != nil {
 		return err
 	}
+	profile, state, profileLock, err := lockAndLoadProfile(store, options.ProfileID)
+	if err != nil {
+		return fmt.Errorf("load profile: %w", err)
+	}
+	defer releaseProfileOperationLock(profileLock)
+	if profile.BaseDomain == "" && len(options.Resources) > 0 {
+		return errors.New("profile base domain is required before adding a public stack")
+	}
+	repositoryPath, err := stackAddRepositoryPath(profile)
+	if err != nil {
+		return err
+	}
+	repositoryLock, err := acquireRepositoryOperationLock(store, repositoryPath)
+	if err != nil {
+		return err
+	}
+	defer releaseProfileOperationLock(repositoryLock)
 	stackSecretIdentity := ""
 	if options.EnvironmentFile != "" {
 		_, identity, recipient, err := ensureProfileStackSecretIdentity(store, profile.ID)
@@ -511,6 +1020,18 @@ func runStackAdd(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	return nil
 }
 
+func stackAddRepositoryPath(profile Profile) (string, error) {
+	repositoryPath := profile.ConfigRepositoryPath
+	if repositoryPath == "" {
+		var err error
+		repositoryPath, err = defaultConfigRepositoryPath(profile.ID)
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Abs(expandUserPath(repositoryPath))
+}
+
 func stackAddInputs(args []string, stderr io.Writer) (stackAddOptions, []composeServiceSummary, stackMetadata, SecretSet, []string, error) {
 	flags := flag.NewFlagSet("stack add", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -531,7 +1052,7 @@ func stackAddInputs(args []string, stderr io.Writer) (stackAddOptions, []compose
 		return stackAddOptions{}, nil, stackMetadata{}, nil, nil, errors.New("--profile and --compose are required")
 	}
 
-	composeData, err := os.ReadFile(expandUserPath(options.Compose))
+	composeData, err := readBoundedFile(options.Compose, "Compose file", stackComposeMaxBytes)
 	if err != nil {
 		return stackAddOptions{}, nil, stackMetadata{}, nil, nil, fmt.Errorf("read Compose file: %w", err)
 	}
@@ -623,16 +1144,21 @@ func writeStackAddFiles(ctx context.Context, repositoryPath string, options stac
 	if err != nil {
 		return "", false, err
 	}
-	if _, err := os.Stat(filepath.Join(directory, stackMetadataFilename)); err == nil {
+	stackDirectory, err := openManagedStackRoot(repositoryPath, options.Name, true)
+	if err != nil {
+		return "", false, err
+	}
+	defer stackDirectory.Close()
+	if info, err := stackDirectory.Lstat(stackMetadataFilename); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", false, fmt.Errorf("stack %s %s is a symbolic link", options.Name, stackMetadataFilename)
+		}
 		return "", false, fmt.Errorf("stack %q is already configured at %s", options.Name, directory)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", false, err
 	}
-	if err := os.MkdirAll(directory, 0700); err != nil {
-		return "", false, err
-	}
 	copiedCompose := sourcePath != destinationPath
-	if err := copyStackAddCompose(sourcePath, destinationPath, composeDestination, options.Name); err != nil {
+	if err := copyStackAddCompose(stackDirectory, sourcePath, destinationPath, options.Name); err != nil {
 		return "", false, err
 	}
 	if options.EnvironmentFile != "" {
@@ -645,22 +1171,30 @@ func writeStackAddFiles(ctx context.Context, repositoryPath string, options stac
 	if err != nil {
 		return "", false, err
 	}
-	if err := os.WriteFile(filepath.Join(directory, stackMetadataFilename), metadataData, 0600); err != nil {
+	if err := atomicWriteManagedFile(stackDirectory, stackMetadataFilename, metadataData, 0600); err != nil {
 		return "", false, err
 	}
 	return directory, copiedCompose, nil
 }
 
-func copyStackAddCompose(sourcePath, destinationPath, composeDestination, name string) error {
+func copyStackAddCompose(directory *os.Root, sourcePath, destinationPath, name string) error {
 	if sourcePath == destinationPath {
-		return nil
+		_, err := managedRegularFileInfo(directory, stackComposeFilename, fmt.Sprintf("stack %s %s", name, stackComposeFilename))
+		return err
 	}
-	if _, err := os.Stat(composeDestination); err == nil {
+	if info, err := directory.Lstat(stackComposeFilename); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("stack %s %s is a symbolic link", name, stackComposeFilename)
+		}
 		return fmt.Errorf("stack %q already has a %s", name, stackComposeFilename)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return copyFile(sourcePath, composeDestination, 0600)
+	data, err := readBoundedFile(sourcePath, "Compose file", stackComposeMaxBytes)
+	if err != nil {
+		return err
+	}
+	return atomicWriteManagedFile(directory, stackComposeFilename, data, 0600)
 }
 
 type stackAddSummary struct {
@@ -718,6 +1252,19 @@ func runStackEnvironment(ctx context.Context, args []string, stdout, stderr io.W
 	if err != nil {
 		return err
 	}
+	profile, _, profileLock, err := lockAndLoadProfile(store, profileID)
+	if err != nil {
+		return err
+	}
+	defer releaseProfileOperationLock(profileLock)
+	if profile.ConfigRepositoryPath == "" {
+		return errors.New("profile configuration repository is not ready")
+	}
+	repositoryLock, err := acquireRepositoryOperationLock(store, profile.ConfigRepositoryPath)
+	if err != nil {
+		return err
+	}
+	defer releaseProfileOperationLock(repositoryLock)
 	if err := ensureStackEnvironmentTarget(store, profileID, stackName); err != nil {
 		return err
 	}
@@ -744,7 +1291,7 @@ func stackEnvironmentInputs(args []string, stderr io.Writer) (string, string, st
 	if flags.NArg() != 0 {
 		return "", "", "", "", fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
-	if profileID == "" || !stackSlugPattern.MatchString(stackName) {
+	if profileID == "" || validateStackName(stackName) != nil {
 		return "", "", "", "", errors.New("--profile and a valid --stack are required")
 	}
 	return action, profileID, stackName, path, nil
@@ -762,8 +1309,12 @@ func ensureStackEnvironmentTarget(store ProfileStore, profileID, stackName strin
 	if profile.ConfigRepositoryPath == "" {
 		return errors.New("profile configuration repository is not ready")
 	}
-	metadataPath := filepath.Join(expandUserPath(profile.ConfigRepositoryPath), "stacks", stackName, stackMetadataFilename)
-	if _, err := os.Stat(metadataPath); err != nil {
+	directory, err := openManagedStackRoot(profile.ConfigRepositoryPath, stackName, false)
+	if err != nil {
+		return fmt.Errorf("stack %q is not configured: %w", stackName, err)
+	}
+	defer directory.Close()
+	if _, err := managedRegularFileInfo(directory, stackMetadataFilename, fmt.Sprintf("stack %s %s", stackName, stackMetadataFilename)); err != nil {
 		return fmt.Errorf("stack %q is not configured: %w", stackName, err)
 	}
 	return nil
@@ -777,8 +1328,7 @@ func removeStackEnvironment(ctx context.Context, store ProfileStore, profileID, 
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
 	}
-	metadataPath := filepath.Join(expandUserPath(profile.ConfigRepositoryPath), "stacks", stackName, stackMetadataFilename)
-	metadata, err := readStackMetadataFile(metadataPath)
+	metadata, err := readManagedStackMetadata(profile.ConfigRepositoryPath, stackName)
 	if err != nil {
 		return err
 	}
@@ -795,7 +1345,7 @@ func removeStackEnvironment(ctx context.Context, store ProfileStore, profileID, 
 			return err
 		}
 		metadata.Secrets = stackSecretMetadata{}
-		if err := writeStackMetadataFile(metadataPath, metadata); err != nil {
+		if err := writeManagedStackMetadata(profile.ConfigRepositoryPath, stackName, metadata); err != nil {
 			return err
 		}
 	}
@@ -815,8 +1365,15 @@ func setStackEnvironment(ctx context.Context, store ProfileStore, profileID, sta
 	if err != nil {
 		return err
 	}
-	metadataPath := filepath.Join(expandUserPath(profile.ConfigRepositoryPath), "stacks", stackName, stackMetadataFilename)
-	metadata, err := readStackMetadataFile(metadataPath)
+	metadata, err := readManagedStackMetadata(profile.ConfigRepositoryPath, stackName)
+	if err != nil {
+		return err
+	}
+	composeData, err := readManagedStackCompose(profile.ConfigRepositoryPath, stackName)
+	if err != nil {
+		return fmt.Errorf("read stack Compose file: %w", err)
+	}
+	services, err := inspectComposeServices(composeData)
 	if err != nil {
 		return err
 	}
@@ -825,21 +1382,13 @@ func setStackEnvironment(ctx context.Context, store ProfileStore, profileID, sta
 		return err
 	}
 	metadata.Secrets = ageStackSecretMetadata(stackName, values, recipient)
-	composeData, err := os.ReadFile(filepath.Join(expandUserPath(profile.ConfigRepositoryPath), "stacks", stackName, "compose.yaml"))
-	if err != nil {
-		return fmt.Errorf("read stack Compose file: %w", err)
-	}
-	services, err := inspectComposeServices(composeData)
-	if err != nil {
-		return err
-	}
 	if err := validateStackMetadata(stackName, metadata, services); err != nil {
 		return err
 	}
 	if err := putStackSecrets(ctx, profile.ConfigRepositoryPath, stackName, metadata.Secrets, identity, values); err != nil {
 		return err
 	}
-	if err := writeStackMetadataFile(metadataPath, metadata); err != nil {
+	if err := writeManagedStackMetadata(profile.ConfigRepositoryPath, stackName, metadata); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "Saved %d encrypted runtime secret keys for %s: %s\n", len(keys), stackName, strings.Join(keys, ", "))
@@ -871,8 +1420,13 @@ func parseStackPublications(values []string) ([]stackPublicResource, error) {
 	return resources, nil
 }
 
-func readStackMetadataFile(path string) (stackMetadata, error) {
-	data, err := os.ReadFile(path)
+func readManagedStackMetadata(repositoryPath, stackName string) (stackMetadata, error) {
+	directory, err := openManagedStackRoot(repositoryPath, stackName, false)
+	if err != nil {
+		return stackMetadata{}, err
+	}
+	defer directory.Close()
+	data, err := readManagedFile(directory, stackMetadataFilename, fmt.Sprintf("stack %s %s", stackName, stackMetadataFilename), stackMetadataMaxBytes)
 	if err != nil {
 		return stackMetadata{}, err
 	}
@@ -883,12 +1437,26 @@ func readStackMetadataFile(path string) (stackMetadata, error) {
 	return metadata, nil
 }
 
-func writeStackMetadataFile(path string, metadata stackMetadata) error {
+func readManagedStackCompose(repositoryPath, stackName string) ([]byte, error) {
+	directory, err := openManagedStackRoot(repositoryPath, stackName, false)
+	if err != nil {
+		return nil, err
+	}
+	defer directory.Close()
+	return readManagedFile(directory, stackComposeFilename, fmt.Sprintf("stack %s %s", stackName, stackComposeFilename), stackComposeMaxBytes)
+}
+
+func writeManagedStackMetadata(repositoryPath, stackName string, metadata stackMetadata) error {
 	data, err := yaml.Marshal(metadata)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0600)
+	directory, err := openManagedStackRoot(repositoryPath, stackName, false)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return atomicWriteManagedFile(directory, stackMetadataFilename, data, 0600)
 }
 
 func putStackSecrets(ctx context.Context, repositoryPath, stackName string, metadata stackSecretMetadata, identity string, values SecretSet) error {
@@ -908,7 +1476,7 @@ func removeStackSecrets(ctx context.Context, repositoryPath, stackName string, m
 }
 
 func readStackEnvironmentSecrets(path string) (SecretSet, []string, error) {
-	data, err := os.ReadFile(expandUserPath(path))
+	data, err := readBoundedFile(path, "environment file", stackEnvironmentMaxBytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read environment file: %w", err)
 	}
@@ -916,7 +1484,7 @@ func readStackEnvironmentSecrets(path string) (SecretSet, []string, error) {
 }
 
 func readStackEnvironmentFile(path string) (string, []string, error) {
-	data, err := os.ReadFile(expandUserPath(path))
+	data, err := readBoundedFile(path, "environment file", stackEnvironmentMaxBytes)
 	if err != nil {
 		return "", nil, fmt.Errorf("read environment file: %w", err)
 	}
@@ -939,6 +1507,9 @@ func readStackEnvironmentContent(content string) (string, []string, error) {
 }
 
 func inspectComposeServices(data []byte) ([]composeServiceSummary, error) {
+	if int64(len(data)) > stackComposeMaxBytes {
+		return nil, fmt.Errorf("Compose file exceeds the %s limit", formatByteLimit(stackComposeMaxBytes))
+	}
 	var document struct {
 		Services map[string]struct {
 			Expose []any `yaml:"expose"`
@@ -1050,8 +1621,8 @@ func validateStackMetadata(stackName string, metadata stackMetadata, services []
 	if metadata.Version != 1 {
 		return fmt.Errorf("unsupported stack metadata version %d", metadata.Version)
 	}
-	if !stackSlugPattern.MatchString(stackName) {
-		return errors.New("stack name must be a lowercase DNS label")
+	if err := validateStackName(stackName); err != nil {
+		return err
 	}
 	ids := map[string]bool{}
 	subdomains := map[string]bool{}
@@ -1062,6 +1633,16 @@ func validateStackMetadata(stackName string, metadata stackMetadata, services []
 	}
 	if err := validateStackSecretMetadata(stackName, metadata.Secrets); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateStackName(name string) error {
+	if !stackSlugPattern.MatchString(name) {
+		return errors.New("stack name must be a lowercase DNS label")
+	}
+	if name == reservedObservabilityStackName {
+		return fmt.Errorf("stack name %q is reserved for managed observability services", name)
 	}
 	return nil
 }
@@ -1255,12 +1836,4 @@ func titleFromSlug(value string) string {
 		}
 	}
 	return strings.Join(parts, " ")
-}
-
-func copyFile(source, destination string, mode os.FileMode) error {
-	data, err := os.ReadFile(source)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(destination, data, mode)
 }

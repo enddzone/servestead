@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Breaking Changes
+
+* Remove the local `servestead ui` web interface. Use `servestead setup` for the profile dashboard, stack management, cloud actions, and persisted run history.
+
+### Features
+
+* Add redacted run-history detail, guarded destructive actions, cancellable provider work, responsive layouts, and readable live-run log following to the terminal interface.
+
 ## [0.4.0](https://github.com/enddzone/servestead/compare/v0.3.0...v0.4.0) (2026-07-17)
 
 
