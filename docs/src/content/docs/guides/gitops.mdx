@@ -1,59 +1,42 @@
 ---
-title: GitOps Review and Sync
-description: Review repository state, stage stack changes, commit, push, and run the committed configuration.
+title: GitOps review and sync
+description: Review repository state, stage stack changes, commit, push, and reconcile committed configuration from the terminal UI.
 ---
 
-import UiScreenshot from '../../../components/UiScreenshot.astro';
-import gitopsReview from '../../../assets/screenshots/gitops-review.jpg';
+Servestead treats committed configuration as deployment input. The stack manager separates editing from deployment so you can inspect the exact files that will become authoritative.
 
-Servestead treats committed configuration as deployment input. The GitOps workspace separates editing from deployment so you can inspect exactly what will become authoritative.
+## Open the stack manager
 
-<UiScreenshot
-  src={gitopsReview}
-  alt="Servestead GitOps Review showing a clean working tree, up-to-date remote state, recent commits, and recent runs"
-  caption="Repository status, recent commits, recent runs, and the next safe action stay visible before guarded Git operations or stack runs."
-/>
+Select a saved profile and press `s`. The screen reports two independent states:
 
-## Read Repository Status
+- **Git** reports a clean working tree or local changes that need review.
+- **Remote** reports `commit required`, `push required`, `sync required`, `review required`, or `in sync`.
 
-| Signal | Meaning |
-| --- | --- |
-| **Working tree** | `clean` or changes that need review. |
-| **Remote sync** | `up to date` or `needs push` when an origin and branch are available. |
-| **HEAD** | The exact local commit Servestead will use. |
+## Review and commit changes
 
-The **Next** line explains whether to review changes, push, resolve repository access, or run stacks.
+Use this sequence after adding, editing, or deleting a stack:
 
-## Review Before You Change Git
+1. Press `v` to inspect staged, unstaged, and untracked changes.
+2. Press `g` to stage managed changes under `stacks/`.
+3. Press `c`, enter a specific message, and commit the staged stack changes.
+4. Press `p` when the current branch has an `origin` and needs a push.
 
-1. Open **Review working tree changes**.
-2. Confirm that every Compose, metadata, and encrypted-secret change is intentional.
-3. Expand **Repository actions**.
-4. Select **Stage changes** to stage managed stack changes.
-5. Enter a specific commit message and select **Commit staged**.
-6. Select **Push commit** when the repository has an `origin` remote.
+If the repository has no origin, local committed deployment can still be valid. Normal team branch and pull-request rules still apply outside Servestead.
 
-If the repository has no origin, pushing is unavailable but local committed deployment can still be valid for your workflow.
+## Deploy one stack
 
-## Run Committed Stacks
+Select an eligible stack and press `r`. Servestead deploys its committed configuration and records a `stack:<name>` run. Uncommitted changes or an unpushed branch block the action when the repository requires them.
 
-Select **Run stacks** only after the status and commit are correct. The run reconciles current stacks and removes managed containers, generated overrides, manifests, and Pangolin resources for stacks that were deleted from the committed repository.
+## Reconcile the repository
 
-Servestead does not deploy an uncommitted observability Compose change. Application stack eligibility is also shown in **Profiles → Stacks** before an individual deploy.
+Press `y` only after the committed repository matches your intent. Synchronization deploys every current stack and removes managed containers, generated overrides, deployment manifests, and Pangolin resources for stacks deleted from Git.
 
-## Investigate Drift
-
-When the Command Center reports drift:
-
-1. Open GitOps Review.
-2. Compare the working-tree diff with the current `HEAD`.
-3. Decide whether to discard the edit outside Servestead, commit it through the workspace, or complete a pending push.
-4. Run stacks only after the repository state is intentional.
-
-### Expected Result
-
-The workspace reports a clean working tree, an understood remote state, and the commit you intend to deploy. The next stack run records that outcome in recent runs.
-
-:::note[Repository ownership]
-Servestead can stage and commit stack paths, but it does not replace normal repository review. Use branches and pull requests when your team requires them before deployment.
+:::caution[Committed deletion becomes remote deletion]
+Removing a stack locally does not stop its remote containers. Committing the deletion and then pressing `y` authorizes reconciliation to remove the managed remote resources.
 :::
+
+Servestead deploys the exact committed `HEAD`. An uncommitted observability Compose change blocks platform deployment, while unrelated working-tree changes do not.
+
+### Expected result
+
+The stack manager reports a clean working tree, an understood push state, and `in sync` after successful reconciliation. Press `h` from the profile dashboard to inspect the resulting run and redacted task log.

@@ -1,18 +1,18 @@
 ---
 title: Observability
-description: Verify the built-in Beszel, Dozzle, and Dockhand platform and understand its Git-backed configuration.
+description: Verify the remote Beszel, Dozzle, and Dockhand services and understand their Git-backed configuration.
 ---
 
-The observability stage deploys a private operations suite behind Pangolin SSO. None of these services publishes a direct host port.
+The Observability stage deploys a private operations suite behind Pangolin SSO. None of these services publishes a direct host port.
 
-## Verify the Stage
+## Verify the stage
 
-After a platform run:
+After a Platform run:
 
-1. Open **Profiles** and select the environment.
-2. Confirm setup is complete and open the latest run.
-3. Verify the observability stage completed without a recovery message.
-4. Use the configured Pangolin administrator to open each hostname.
+1. Return to the profile dashboard and confirm Platform is complete.
+2. Press `h`, open the latest Platform run, and verify the Observability stage completed.
+3. Sign in through Pangolin with the saved administrator account.
+4. Open each remote service hostname.
 
 | Service | Default hostname | Purpose |
 | --- | --- | --- |
@@ -22,11 +22,11 @@ After a platform run:
 
 Replace `example.com` with the profile's base domain.
 
-### Expected Result
+### Expected result
 
-Pangolin protects all three services with SSO, each target passes its configured health check, Beszel sees the local system, and Dockhand can list the server's containers.
+Pangolin protects all three services with SSO, each target passes its health check, Beszel sees the local system, and Dockhand can list the server's containers.
 
-## Where Files Live
+## Where files live
 
 | Path | Purpose |
 | --- | --- |
@@ -36,21 +36,17 @@ Pangolin protects all three services with SSO, each target passes its configured
 
 The consumer-owned configuration is `stacks/observability/compose.yaml` in the profile repository.
 
-## Repository Rules
+## Repository rules
 
 Servestead deploys the exact committed `HEAD`. An uncommitted observability Compose change blocks deployment, while unrelated working-tree changes do not.
 
 When the repository has a GitHub origin and branch, stack synchronization creates or updates matching Dockhand Git-stack records with automatic updates disabled. Servestead remains the authoritative deployer.
 
-Use [GitOps review and sync](../gitops/) to inspect, commit, and push changes before rerunning the stage.
+Use [GitOps review and sync](../gitops/) to inspect, commit, and push changes before rerunning Platform.
 
-## GitHub Personal Access Token
+## GitHub personal access token
 
-Private repositories require a GitHub PAT. Public repositories can also use one to avoid anonymous rate limits.
-
-Prefer a fine-grained token that is limited to the configuration repository, grants read-only `Contents` access, and has an expiration you can rotate. Save or replace it under **Profiles → Access**.
-
-For a terminal-only workflow:
+Private repositories require a GitHub PAT. Public repositories can use one to avoid anonymous rate limits. Press `g` from the profile dashboard to manage the saved token, or use:
 
 ```sh
 ./bin/servestead github-token set \
@@ -60,13 +56,13 @@ rm ./github-token.txt
 ./bin/servestead github-token status --profile <profile-id>
 ```
 
-`SERVESTEAD_GITHUB_TOKEN` remains available as a one-run override. When both exist, the environment value wins.
+`SERVESTEAD_GITHUB_TOKEN` remains available as a one-run override. The environment value wins when both exist.
 
-## If Verification Fails
+## If verification fails
 
-- Check DNS and ports 80/443 for hostname or certificate failures.
-- Open the latest run for the exact proxy or observability task error.
-- Review GitOps when the committed revision or working tree is rejected.
-- Save existing Pangolin credentials under **Access** when a retry reports missing credentials.
+- Check DNS and ports 80 and 443 for hostname or certificate failures.
+- Press `h` and open the latest run for the exact Proxy or Observability task error.
+- Review the repository when the committed revision or working tree is rejected.
+- Save the existing Pangolin administrator credentials in the profile's advanced fields when a retry reports missing credentials.
 
 Continue with [Common issues](../../troubleshooting/) for focused recovery steps.

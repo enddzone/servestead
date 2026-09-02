@@ -1,17 +1,15 @@
-# Servestead Docs Site
+# Servestead docs site
 
 This directory contains the Astro Starlight documentation site for Servestead.
 
-## Run Locally
+## Run locally
 
 ```sh
 npm ci
 npm run dev
 ```
 
-The dev server prints the local URL. Content lives under `src/content/docs/`; screenshot-bearing guides use MDX and the shared `src/components/UiScreenshot.astro` component.
-
-Product screenshots live in `src/assets/screenshots/` so Astro can resize, fingerprint, and optimize them. Capture the current UI with sanitized example data, exclude tokenized URLs and revealed credentials, and write captions that explain the user outcome.
+The dev server prints the local URL. Content lives under `src/content/docs/`. The site documents the terminal UI and the remote dashboards that Servestead deploys.
 
 ## Build
 

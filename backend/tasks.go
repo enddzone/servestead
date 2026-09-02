@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -27,6 +28,7 @@ const (
 	TaskLogLine      TaskEventType = "log_line"
 	TaskSucceeded    TaskEventType = "task_succeeded"
 	TaskFailed       TaskEventType = "task_failed"
+	TaskCancelled    TaskEventType = "task_cancelled"
 	TaskRunCompleted TaskEventType = "run_completed"
 )
 
@@ -85,6 +87,10 @@ func runTasksWithReporter(ctx context.Context, client remoteClient, sshUser stri
 			err = client.Run(ctx, privilegedCommand(sshUser, task.Apply))
 		}
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				reportTaskEvent(reporter, TaskEvent{Type: TaskCancelled, RunID: runID, Stage: stage, TaskIndex: index + 1, TaskTotal: len(tasks), TaskName: task.Name, Time: time.Now()})
+				return fmt.Errorf("task %q cancelled: %w", task.Name, err)
+			}
 			reportTaskEvent(reporter, TaskEvent{Type: TaskFailed, RunID: runID, Stage: stage, TaskIndex: index + 1, TaskTotal: len(tasks), TaskName: task.Name, Error: err.Error(), Time: time.Now()})
 			return fmt.Errorf("task %q failed: %w", task.Name, err)
 		}

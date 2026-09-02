@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,10 @@ import (
 
 func TestSecretsCommandsManageProfileIdentity(t *testing.T) {
 	store, profile := newSecretsCommandTestProfile(t, "203.0.113.10")
+	initialSecrets := ProfileSecrets{ServerSecret: "server-secret", GitHubToken: "github-token"}
+	if err := store.SaveSecrets(profile.ID, initialSecrets); err != nil {
+		t.Fatal(err)
+	}
 
 	var stdout, stderr strings.Builder
 	runSecretsCommand(t, []string{"init", "--profile", profile.ID}, &stdout, &stderr)
@@ -21,6 +26,9 @@ func TestSecretsCommandsManageProfileIdentity(t *testing.T) {
 	identity := strings.TrimSpace(secrets.StackSecretIdentity)
 	if !strings.HasPrefix(identity, "AGE-SECRET-KEY-") || !strings.HasPrefix(secrets.StackSecretRecipient, "age1") {
 		t.Fatalf("stack secret identity was not saved: %+v", secrets)
+	}
+	if secrets.ServerSecret != initialSecrets.ServerSecret || secrets.GitHubToken != initialSecrets.GitHubToken {
+		t.Fatalf("secrets init clobbered unrelated current secrets: %+v", secrets)
 	}
 
 	runSecretsCommand(t, []string{"status", "--profile", profile.ID}, &stdout, &stderr)
@@ -35,6 +43,10 @@ func TestSecretsCommandsManageProfileIdentity(t *testing.T) {
 	}
 
 	_, importedProfile := newSecretsCommandProfile(t, store, "203.0.113.11")
+	importedBefore := ProfileSecrets{ServerSecret: "import-server-secret", GitHubToken: "import-github-token"}
+	if err := store.SaveSecrets(importedProfile.ID, importedBefore); err != nil {
+		t.Fatal(err)
+	}
 	keyPath := filepath.Join(t.TempDir(), "stack-secret-key.txt")
 	if err := os.WriteFile(keyPath, []byte(identity+"\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -48,6 +60,59 @@ func TestSecretsCommandsManageProfileIdentity(t *testing.T) {
 	if importedSecrets.StackSecretIdentity != identity || importedSecrets.StackSecretRecipient != secrets.StackSecretRecipient {
 		t.Fatalf("import-key did not save the imported identity: %+v", importedSecrets)
 	}
+	if importedSecrets.ServerSecret != importedBefore.ServerSecret || importedSecrets.GitHubToken != importedBefore.GitHubToken {
+		t.Fatalf("import-key clobbered unrelated current secrets: %+v", importedSecrets)
+	}
+}
+
+func TestSecretsIdentityMutationsRespectProfileLock(t *testing.T) {
+	for _, action := range []string{"init", "import-key"} {
+		t.Run(action, func(t *testing.T) {
+			testSecretsIdentityMutationRespectsProfileLock(t, action)
+		})
+	}
+}
+
+func testSecretsIdentityMutationRespectsProfileLock(t *testing.T, action string) {
+	t.Helper()
+	identity, _, err := generateStackSecretIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, profile := newSecretsCommandTestProfile(t, "203.0.113.20")
+	before := ProfileSecrets{ServerSecret: "server-secret", GitHubToken: "github-token"}
+	if err := store.SaveSecrets(profile.ID, before); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "identity.txt")
+	if err := os.WriteFile(keyPath, []byte(identity), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fileStore := store.(*fileProfileStore)
+	lock, err := newFileProfileStore(fileStore.root).TryLockProfile(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr strings.Builder
+	err = runSecrets(context.Background(), secretsIdentityMutationArgs(action, profile.ID, keyPath), &stdout, &stderr)
+	releaseProfileOperationLock(lock)
+	if !errors.Is(err, errProfileOperationLocked) {
+		t.Fatalf("secrets %s ignored the profile lock: %v", action, err)
+	}
+	after, err := store.LoadSecrets(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("locked secrets %s mutated secrets: before=%+v after=%+v", action, before, after)
+	}
+}
+
+func secretsIdentityMutationArgs(action, profileID, keyPath string) []string {
+	if action == "import-key" {
+		return []string{action, "--profile", profileID, "--file", keyPath}
+	}
+	return []string{action, "--profile", profileID}
 }
 
 func TestSecretsStatusListsRepositoryStacks(t *testing.T) {

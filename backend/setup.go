@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"charm.land/bubbles/v2/filepicker"
 	"charm.land/bubbles/v2/help"
@@ -26,6 +28,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-isatty"
 )
 
@@ -112,6 +115,8 @@ Runs local preflight checks for built-in SSH/key support and optional key files 
 `
 
 const (
+	profileSetupMinWidth          = 80
+	profileSetupMinHeight         = 24
 	setupStageStackPrefix         = "stack:"
 	setupPrivateKeyLabel          = "Servestead private key"
 	setupBaseDomainLabel          = "Base domain"
@@ -181,17 +186,17 @@ func runSetupFromOptions(ctx context.Context, options setupCLIOptions, stdout, s
 	if err != nil {
 		return err
 	}
-	profile, state, config, err := prepareProfileSetup(options, store, stderr)
+	profile, state, config, lock, err := prepareProfileSetupWithOperationLock(options, store, stderr)
 	if err != nil {
 		return err
 	}
 	if shouldUseProfileRunView(options, stderr) {
 		return runProfileSetupPlanWithRunView(ctx, profileSetupPlanRun{
 			store: store, profile: profile, state: state, config: config,
-			stdout: stdout, stderr: stderr,
+			stdout: stdout, stderr: stderr, lock: lock,
 		}, false)
 	}
-	return runProfileSetupPlan(ctx, store, profile, state, config, stdout, stderr)
+	return runProfileSetupPlan(ctx, store, profile, state, config, stdout, stderr, lock)
 }
 
 func runInteractiveSetup(ctx context.Context, stdout, stderr io.Writer) error {
@@ -205,6 +210,9 @@ func runInteractiveSetup(ctx context.Context, stdout, stderr io.Writer) error {
 	resume := setupResume{}
 	for {
 		request, err := collectSetupRequest(ctx, store, stderr, resume)
+		if errors.Is(err, errSetupQuit) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -229,30 +237,30 @@ func runInteractiveSetup(ctx context.Context, stdout, stderr io.Writer) error {
 }
 
 func runInteractiveSetupStage(ctx context.Context, store ProfileStore, request setupRequest, stdout, stderr io.Writer) (setupResume, error) {
-	profile, state, config, err := prepareProfileStageSetup(request.ProfileOptions, store, request.Stage)
+	profile, state, config, lock, err := prepareProfileStageSetupWithOperationLock(request.ProfileOptions, store, request.Stage)
 	if err != nil {
 		return setupResume{}, err
 	}
 	err = runProfileSetupStagePlanWithRunView(ctx, profileSetupPlanRun{
 		store: store, profile: profile, state: state, config: config,
-		stdout: stdout, stderr: stderr,
+		stdout: stdout, stderr: stderr, lock: lock,
 	}, request.Stage, true)
 	return resumeAfterStage(request.ProfileOptions.ProfileID, request.Stage), err
 }
 
 func runInteractiveSetupPlan(ctx context.Context, store ProfileStore, request setupRequest, stdout, stderr io.Writer) (setupResume, error) {
-	profile, state, config, err := prepareProfileSetup(request.ProfileOptions, store, stderr)
+	profile, state, config, lock, err := prepareProfileSetupWithOperationLock(request.ProfileOptions, store, stderr)
 	if err != nil {
 		return setupResume{}, err
 	}
 	if shouldUseProfileRunView(request.ProfileOptions, stderr) {
 		err = runProfileSetupPlanWithRunView(ctx, profileSetupPlanRun{
 			store: store, profile: profile, state: state, config: config,
-			stdout: stdout, stderr: stderr,
+			stdout: stdout, stderr: stderr, lock: lock,
 		}, true)
 		return setupResume{ProfileID: profile.ID, Screen: profileSetupScreenDashboard}, err
 	}
-	return setupResume{}, runProfileSetupPlan(ctx, store, profile, state, config, stdout, stderr)
+	return setupResume{}, runProfileSetupPlan(ctx, store, profile, state, config, stdout, stderr, lock)
 }
 
 func runDoctor(args []string, stdout, stderr io.Writer) error {
@@ -277,7 +285,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 func collectSetupRequest(ctx context.Context, store ProfileStore, output io.Writer, resume setupResume) (setupRequest, error) {
 	resumeState := resume
 	for {
-		result, err := runProfileSetupRequestTUI(store, output, resumeState)
+		result, err := runProfileSetupRequestTUI(ctx, store, output, resumeState)
 		if err != nil {
 			return setupRequest{}, err
 		}
@@ -293,12 +301,13 @@ func collectSetupRequest(ctx context.Context, store ProfileStore, output io.Writ
 	}
 }
 
-func runProfileSetupRequestTUI(store ProfileStore, output io.Writer, resume setupResume) (profileSetupModel, error) {
+func runProfileSetupRequestTUI(ctx context.Context, store ProfileStore, output io.Writer, resume setupResume) (profileSetupModel, error) {
 	profiles, err := loadProfileChoices(store)
 	if err != nil {
 		return profileSetupModel{}, err
 	}
 	model := newProfileSetupModel(profiles)
+	model.tuiContext = ctx
 	model.profileStore = store
 	applySetupResume(&model, resume)
 	program := tea.NewProgram(model, tea.WithOutput(output))
@@ -314,11 +323,14 @@ func runProfileSetupRequestTUI(store ProfileStore, output io.Writer, resume setu
 }
 
 func setupRequestFromResult(ctx context.Context, store ProfileStore, output io.Writer, result profileSetupModel) (setupRequest, setupResume, bool, error) {
+	if result.quit {
+		return setupRequest{}, setupResume{}, false, errSetupQuit
+	}
 	if result.cancelled {
 		return setupRequest{}, setupResume{}, false, errors.New("setup cancelled")
 	}
 	if result.deleteProfileID != "" {
-		return setupRequest{}, setupResume{}, true, store.Delete(result.deleteProfileID)
+		return setupRequest{}, setupResume{}, true, deleteProfileWhenIdle(store, result.deleteProfileID)
 	}
 	if result.legacy {
 		config, err := collectLegacySetupConfig(output)
@@ -326,6 +338,9 @@ func setupRequestFromResult(ctx context.Context, store ProfileStore, output io.W
 	}
 	if result.provision {
 		profile, err := collectDigitalOceanProvisionProfile(ctx, store, output)
+		if errors.Is(err, errReturnToSetup) {
+			return setupRequest{}, setupResume{}, true, nil
+		}
 		return setupRequest{}, setupResume{ProfileID: profile.ID, Screen: profileSetupScreenDashboard}, true, err
 	}
 	if !result.done {
@@ -344,6 +359,19 @@ func collectDigitalOceanProvisionProfile(ctx context.Context, store ProfileStore
 	result, ok := finalModel.(digitalOceanProvisionModel)
 	if !ok {
 		return Profile{}, errors.New("provisioning TUI returned an unexpected model")
+	}
+	return profileFromProvisionResult(result)
+}
+
+func profileFromProvisionResult(result digitalOceanProvisionModel) (Profile, error) {
+	if result.returnToSetup {
+		return Profile{}, errReturnToSetup
+	}
+	if result.quit {
+		return Profile{}, errSetupQuit
+	}
+	if result.remoteOutcomeUnknown {
+		return Profile{}, errors.New(result.err)
 	}
 	if result.cancelled {
 		return Profile{}, errors.New("provisioning cancelled")
@@ -411,6 +439,9 @@ func collectLegacySetupConfig(output io.Writer) (setupConfig, error) {
 	if !ok {
 		return setupConfig{}, errors.New("setup TUI returned an unexpected model")
 	}
+	if result.quit {
+		return setupConfig{}, errSetupQuit
+	}
 	if result.cancelled {
 		return setupConfig{}, errors.New("setup cancelled")
 	}
@@ -458,6 +489,8 @@ type profileSetupScreen int
 const (
 	profileSetupScreenPicker profileSetupScreen = iota
 	profileSetupScreenDashboard
+	profileSetupScreenRunHistory
+	profileSetupScreenRunDetail
 	profileSetupScreenIntake
 	profileSetupScreenAdvanced
 	profileSetupScreenRepository
@@ -476,6 +509,7 @@ const (
 	profileSetupScreenCloud
 	profileSetupScreenCloudConfirm
 	profileSetupScreenCloudRunning
+	profileSetupScreenCloudSaveRecovery
 	profileSetupScreenReview
 	profileSetupScreenDeleteConfirm
 )
@@ -494,8 +528,15 @@ const (
 )
 
 type pangolinRegistrationStatusMsg struct {
+	requestID  uint64
+	profileID  string
+	baseDomain string
+	complete   bool
+	err        error
+}
+
+type profileDeletedMsg struct {
 	profileID string
-	complete  bool
 	err       error
 }
 
@@ -511,76 +552,106 @@ func (item profileListItem) Description() string { return item.description }
 func (item profileListItem) FilterValue() string { return item.title + " " + item.description }
 
 type profileSetupModel struct {
-	screen                   profileSetupScreen
-	profiles                 []profileChoice
-	profileList              list.Model
-	repositoryList           list.Model
-	stageTable               table.Model
-	progress                 progress.Model
-	planViewport             viewport.Model
-	help                     help.Model
-	selectedIndex            int
-	deleteProfileID          string
-	singleStage              string
-	pangolinStatus           pangolinRegistrationStatus
-	pangolinError            string
-	showPangolinAccess       bool
-	fresh                    bool
-	inputs                   []textinput.Model
-	advanced                 []textinput.Model
-	repositoryInputs         []textinput.Model
-	githubTokenInput         textinput.Model
-	githubTokenNotice        string
-	stackComposeInput        textinput.Model
-	stackComposePicker       filepicker.Model
-	stackComposeManual       bool
-	stackComposePath         string
-	stackTable               table.Model
-	stacks                   []editableStack
-	stackInputs              []textinput.Model
-	stackServices            []composeServiceSummary
-	stackServiceTable        table.Model
-	stackCompose             string
-	stackOriginalName        string
-	stackMetadataMissing     bool
-	stackResources           []stackPublicResource
-	stackResourceTable       table.Model
-	stackResourceInputs      []textinput.Model
-	stackResourceIndex       int
-	stackResourceReturn      profileSetupScreen
-	stackResourceAdvanced    bool
-	stackEnvironmentInput    textinput.Model
-	stackEnvironmentPicker   filepicker.Model
-	stackEnvironmentMode     stackEnvironmentMode
-	stackEnvironmentOptions  []stackEnvironmentOption
-	stackEnvironmentCursor   int
-	stackEnvironmentReturn   profileSetupScreen
-	stackEnvironment         string
-	stackEnvironmentOriginal string
-	stackEnvironmentKeys     []string
-	stackEnvironmentDirty    bool
-	profileStore             ProfileStore
-	profileNotice            string
-	stackNotice              string
-	stackGitStatus           string
-	stackHead                string
-	stackNeedsPush           bool
-	stackSyncStatus          string
-	stackDiffViewport        viewport.Model
-	stackCommitInput         textinput.Model
-	cloudAction              string
-	cloudNotice              string
-	cloudTokenInput          textinput.Model
-	cloudConfirmInput        textinput.Model
-	repositoryMode           string
-	focus                    int
-	err                      string
-	width                    int
-	height                   int
-	done                     bool
-	legacy                   bool
-	provision                bool
-	cancelled                bool
+	screen                       profileSetupScreen
+	profiles                     []profileChoice
+	profileList                  list.Model
+	repositoryList               list.Model
+	stageTable                   table.Model
+	runTable                     table.Model
+	progress                     progress.Model
+	dashboardViewport            viewport.Model
+	planViewport                 viewport.Model
+	runLogViewport               viewport.Model
+	stackEditorViewport          viewport.Model
+	stackReviewViewport          viewport.Model
+	help                         help.Model
+	selectedIndex                int
+	deleteProfileID              string
+	deleteProfilePending         bool
+	runs                         []SetupRun
+	selectedRunID                string
+	runLogPath                   string
+	runDetailLoading             bool
+	runDetailRequestID           uint64
+	runDetailCancel              context.CancelFunc
+	singleStage                  string
+	pangolinStatus               pangolinRegistrationStatus
+	pangolinError                string
+	pangolinRequestID            uint64
+	pangolinRequestDomain        string
+	showPangolinAccess           bool
+	fresh                        bool
+	inputs                       []textinput.Model
+	advanced                     []textinput.Model
+	repositoryInputs             []textinput.Model
+	githubTokenInput             textinput.Model
+	githubTokenNotice            string
+	deleteProfileInput           textinput.Model
+	stackComposeInput            textinput.Model
+	stackComposePicker           filepicker.Model
+	stackComposeBrowserError     string
+	stackComposeManual           bool
+	stackComposePath             string
+	stackTable                   table.Model
+	stacks                       []editableStack
+	stackInputs                  []textinput.Model
+	stackServices                []composeServiceSummary
+	stackServiceTable            table.Model
+	stackCompose                 string
+	stackOriginalName            string
+	stackMetadataMissing         bool
+	stackResources               []stackPublicResource
+	stackResourceTable           table.Model
+	stackResourceInputs          []textinput.Model
+	stackResourceIndex           int
+	stackResourceReturn          profileSetupScreen
+	stackResourceAdvanced        bool
+	stackEnvironmentInput        textinput.Model
+	stackEnvironmentPicker       filepicker.Model
+	stackEnvironmentBrowserError string
+	stackEnvironmentMode         stackEnvironmentMode
+	stackEnvironmentOptions      []stackEnvironmentOption
+	stackEnvironmentCursor       int
+	stackEnvironmentReturn       profileSetupScreen
+	stackEnvironment             string
+	stackEnvironmentOriginal     string
+	stackEnvironmentKeys         []string
+	stackEnvironmentDirty        bool
+	profileStore                 ProfileStore
+	profileNotice                string
+	stackNotice                  string
+	stackGitStatus               string
+	stackHead                    string
+	stackNeedsPush               bool
+	stackSyncStatus              string
+	stackDiffViewport            viewport.Model
+	stackCommitInput             textinput.Model
+	stackDeleteInput             textinput.Model
+	stackSpinner                 spinner.Model
+	stackOperation               profileStackOperationKind
+	stackOperationCancel         context.CancelFunc
+	stackOperationCancelling     bool
+	tuiContext                   context.Context
+	cloudAction                  string
+	cloudNotice                  string
+	cloudOutcomeUnknownID        string
+	cloudCancel                  context.CancelFunc
+	cloudCancelling              bool
+	cloudRecoveryProfile         Profile
+	cloudRecoveryState           ProfileState
+	cloudRecoverySaving          bool
+	cloudTokenInput              textinput.Model
+	cloudConfirmInput            textinput.Model
+	repositoryMode               string
+	focus                        int
+	err                          string
+	width                        int
+	height                       int
+	done                         bool
+	legacy                       bool
+	provision                    bool
+	cancelled                    bool
+	quit                         bool
 }
 
 type stackEnvironmentMode int
@@ -599,24 +670,7 @@ type stackEnvironmentOption struct {
 }
 
 func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
-	items := make([]list.Item, 0, len(profiles)+3)
-	for index, choice := range profiles {
-		status := latestProfileStatus(choice.State)
-		if status == "" {
-			status = "no runs yet"
-		}
-		items = append(items, profileListItem{
-			kind:        "profile",
-			index:       index,
-			title:       firstNonEmpty(choice.Profile.Name, choice.Profile.IP),
-			description: fmt.Sprintf("%s - %s - updated %s", choice.Profile.IP, status, choice.Profile.UpdatedAt.Local().Format("2006-01-02 15:04")),
-		})
-	}
-	items = append(items,
-		profileListItem{kind: "provision", title: "Provision a new DigitalOcean VPS", description: "Create one billable Droplet, save it as a profile, then return to setup."},
-		profileListItem{kind: "new", title: "Set up a new server profile", description: "Collect IP, SSH key, domain, and email before running the full setup plan."},
-		profileListItem{kind: "legacy", title: "Advanced legacy setup paths", description: "Open key generation, one-off hardening, network, proxy, or doctor modes."},
-	)
+	items := profilePickerItems(profiles)
 
 	delegate := list.NewDefaultDelegate()
 	delegate.SetHeight(2)
@@ -625,6 +679,7 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 	profileList.SetShowStatusBar(false)
 	profileList.SetFilteringEnabled(false)
 	profileList.DisableQuitKeybindings()
+	profileList.SetShowHelp(false)
 
 	repositoryList := list.New([]list.Item{
 		profileListItem{
@@ -647,6 +702,7 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 	repositoryList.SetShowStatusBar(false)
 	repositoryList.SetFilteringEnabled(false)
 	repositoryList.DisableQuitKeybindings()
+	repositoryList.SetShowHelp(false)
 
 	model := profileSetupModel{
 		screen:            profileSetupScreenPicker,
@@ -654,15 +710,25 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 		profileList:       profileList,
 		repositoryList:    repositoryList,
 		stageTable:        newProfileStageTable(nil),
+		runTable:          newRunHistoryTable(nil),
 		stackTable:        newStackTable(nil, "", nil),
 		stackServiceTable: newStackServiceTable(nil, nil),
 		stackDiffViewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(18)),
+		stackSpinner:      newProfileStackSpinner(),
 		progress:          progress.New(progress.WithWidth(42)),
+		dashboardViewport: viewport.New(viewport.WithWidth(82), viewport.WithHeight(19)),
 		planViewport:      viewport.New(viewport.WithWidth(82), viewport.WithHeight(10)),
-		help:              help.New(),
-		selectedIndex:     -1,
-		width:             82,
-		height:            24,
+		runLogViewport:    viewport.New(viewport.WithWidth(82), viewport.WithHeight(14)),
+		stackEditorViewport: viewport.New(
+			viewport.WithWidth(82), viewport.WithHeight(19),
+		),
+		stackReviewViewport: viewport.New(
+			viewport.WithWidth(82), viewport.WithHeight(19),
+		),
+		help:          help.New(),
+		selectedIndex: -1,
+		width:         82,
+		height:        24,
 	}
 	model.inputs = setupProfileInputs(setupCLIOptions{})
 	model.advanced = setupAdvancedInputs(setupCLIOptions{})
@@ -670,6 +736,9 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 	model.repositoryMode = "create"
 	model.githubTokenInput = newSetupInputs([]setupInputField{{
 		label: "GitHub PAT", placeholder: "paste token", secret: true,
+	}})[0]
+	model.deleteProfileInput = newSetupInputs([]setupInputField{{
+		label: "Confirmation", placeholder: "delete profile-name",
 	}})[0]
 	model.stackComposeInput = newSetupInputs([]setupInputField{{
 		label: "Docker Compose file", placeholder: "/path/to/docker-compose.yml",
@@ -682,6 +751,9 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 	model.stackCommitInput = newSetupInputs([]setupInputField{{
 		label: "Commit message", placeholder: "Update application stacks",
 	}})[0]
+	model.stackDeleteInput = newSetupInputs([]setupInputField{{
+		label: "Confirmation", placeholder: "delete stack-name",
+	}})[0]
 	model.cloudTokenInput = newSetupInputs([]setupInputField{{
 		label: "DigitalOcean API token", value: firstNonEmpty(os.Getenv("DIGITALOCEAN_ACCESS_TOKEN"), os.Getenv("DIGITALOCEAN_TOKEN")), secret: true,
 	}})[0]
@@ -690,6 +762,28 @@ func newProfileSetupModel(profiles []profileChoice) profileSetupModel {
 	}})[0]
 	model.inputs[0].Focus()
 	return model
+}
+
+func profilePickerItems(profiles []profileChoice) []list.Item {
+	items := make([]list.Item, 0, len(profiles)+3)
+	for index, choice := range profiles {
+		status := latestProfileStatus(choice.State)
+		if status == "" {
+			status = "no runs yet"
+		}
+		items = append(items, profileListItem{
+			kind:        "profile",
+			index:       index,
+			title:       sanitizeTerminalLine(firstNonEmpty(choice.Profile.Name, choice.Profile.IP)),
+			description: fmt.Sprintf("%s - %s - updated %s", sanitizeTerminalLine(choice.Profile.IP), sanitizeTerminalLine(status), choice.Profile.UpdatedAt.Local().Format("2006-01-02 15:04")),
+		})
+	}
+	items = append(items,
+		profileListItem{kind: "provision", title: "Provision a new DigitalOcean VPS", description: "Create one billable Droplet, save it as a profile, then return to setup."},
+		profileListItem{kind: "new", title: "Set up a new server profile", description: "Collect IP, SSH key, domain, and email before running the full setup plan."},
+		profileListItem{kind: "legacy", title: "Advanced legacy setup paths", description: "Open key generation, one-off hardening, network, proxy, or doctor modes."},
+	)
+	return items
 }
 
 func newStackFilePicker(directory string, allowedTypes []string, showHidden bool) filepicker.Model {
@@ -703,6 +797,79 @@ func newStackFilePicker(directory string, allowedTypes []string, showHidden bool
 	picker.Styles.Cursor = setupTitleStyle
 	picker.Styles.Selected = setupTitleStyle
 	return picker
+}
+
+const stackFilePickerMaxEntries = 4096
+
+func stackFilePickerDirectoryError(directory string) string {
+	if !terminalSingleLineSafe(directory) {
+		return "File browser paused because the current directory path contains terminal control characters. Press / to type a safe path or go back."
+	}
+	file, err := os.Open(directory)
+	if err != nil {
+		return "File browser unavailable: " + sanitizeTerminalLine(err.Error())
+	}
+	defer file.Close()
+	return inspectStackFilePickerDirectory(file, directory)
+}
+
+func inspectStackFilePickerDirectory(file *os.File, directory string) string {
+	entryCount := 0
+	for {
+		entries, readErr := file.ReadDir(128)
+		entryCount += len(entries)
+		if entryCount > stackFilePickerMaxEntries {
+			return fmt.Sprintf("File browser paused because this directory contains more than %d entries. Press / to type a path.", stackFilePickerMaxEntries)
+		}
+		if warning := stackFilePickerEntriesError(directory, entries); warning != "" {
+			return warning
+		}
+		if errors.Is(readErr, io.EOF) {
+			return ""
+		}
+		if readErr != nil {
+			return "File browser unavailable: " + sanitizeTerminalLine(readErr.Error())
+		}
+	}
+}
+
+func stackFilePickerEntriesError(directory string, entries []os.DirEntry) string {
+	for _, entry := range entries {
+		if !terminalSingleLineSafe(entry.Name()) {
+			return "File browser paused because this directory contains a filename with terminal control characters. Press / to type a safe path or go back."
+		}
+		if entry.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		target, err := filepath.EvalSymlinks(filepath.Join(directory, entry.Name()))
+		if err == nil && !terminalSingleLineSafe(target) {
+			return "File browser paused because this directory contains a symlink target with terminal control characters. Press / to type a safe path or go back."
+		}
+	}
+	return ""
+}
+
+func terminalSingleLineSafe(value string) bool {
+	return sanitizeTerminalText(value) == value && !strings.ContainsAny(value, "\r\n\t")
+}
+
+func stackFilePickerBackKey(key tea.KeyMsg) bool {
+	switch key.String() {
+	case "h", "backspace", "left":
+		return true
+	default:
+		return false
+	}
+}
+
+func resetStackFilePickerToParent(picker filepicker.Model) (filepicker.Model, tea.Cmd, string) {
+	parent := filepath.Dir(picker.CurrentDirectory)
+	next := newStackFilePicker(parent, picker.AllowedTypes, picker.ShowHidden)
+	browserError := stackFilePickerDirectoryError(parent)
+	if browserError != "" {
+		return next, nil, browserError
+	}
+	return next, next.Init(), ""
 }
 
 func setupProfileInputs(options setupCLIOptions) []textinput.Model {
@@ -731,21 +898,45 @@ func setupRepositoryInputs(options setupCLIOptions) []textinput.Model {
 	})
 }
 
-func newProfileStageTable(state *ProfileState) table.Model {
+func newProfileStageTable(state *ProfileState, secrets ...ProfileSecrets) table.Model {
 	return table.New(
 		table.WithColumns([]table.Column{
 			{Title: "Stage", Width: 16},
 			{Title: "Status", Width: 12},
 			{Title: "Last error", Width: 42},
 		}),
-		table.WithRows(profileStageRows(state)),
+		table.WithRows(profileStageRows(state, secrets...)),
 		table.WithHeight(len(dashboardStageOrder)+1),
 		table.WithWidth(78),
 		table.WithFocused(true),
 	)
 }
 
-func profileStageRows(state *ProfileState) []table.Row {
+func newRunHistoryTable(runs []SetupRun) table.Model {
+	rows := make([]table.Row, 0, len(runs))
+	for _, run := range runs {
+		rows = append(rows, table.Row{
+			sanitizeTerminalLine(run.ID),
+			sanitizeTerminalLine(firstNonEmpty(run.Status, runStatusPlanned)),
+			run.UpdatedAt.Local().Format("2006-01-02 15:04"),
+			sanitizeTerminalLine(profileRunStageSummary(run)),
+		})
+	}
+	return table.New(
+		table.WithColumns([]table.Column{
+			{Title: "Run", Width: 28},
+			{Title: "Status", Width: 10},
+			{Title: "Updated", Width: 16},
+			{Title: "Stages", Width: 24},
+		}),
+		table.WithRows(rows),
+		table.WithHeight(clampInt(len(rows)+1, 2, 14)),
+		table.WithWidth(82),
+		table.WithFocused(true),
+	)
+}
+
+func profileStageRows(state *ProfileState, secrets ...ProfileSecrets) []table.Row {
 	labels := map[string]string{
 		"bootstrap": "Bootstrap",
 		"harden":    "Harden",
@@ -764,6 +955,9 @@ func profileStageRows(state *ProfileState) []table.Row {
 	rows := []table.Row{}
 	for _, stage := range dashboardStageOrder {
 		status, lastError := profileStageRowStatus(stage, completed, activeStages)
+		if len(secrets) > 0 {
+			lastError = maskProfileSecrets(lastError, secrets[0])
+		}
 		rows = append(rows, table.Row{labels[stage], status, truncateForTable(lastError, 42)})
 	}
 	return rows
@@ -782,6 +976,9 @@ func profileStageRowStatus(stage string, completed map[string]bool, activeStages
 		}
 		if stageState.Status == stageStatusFailed {
 			return stageStatusFailed, stageState.LastError
+		}
+		if stageState.Status == stageStatusCancelled {
+			return stageStatusCancelled, ""
 		}
 		if stageState.Status == stageStatusRunning {
 			status = stageStatusRunning
@@ -825,7 +1022,7 @@ func newStackTable(stacks []editableStack, baseDomain string, state *ProfileStat
 		} else if len(stack.Metadata.PublicResources) > 1 {
 			resource = fmt.Sprintf("%d public resources", len(stack.Metadata.PublicResources))
 		}
-		rows = append(rows, table.Row{stack.Name, status, resource})
+		rows = append(rows, table.Row{sanitizeTerminalLine(stack.Name), sanitizeTerminalLine(status), sanitizeTerminalLine(resource)})
 	}
 	return table.New(
 		table.WithColumns([]table.Column{
@@ -870,14 +1067,15 @@ func stackNeedsMetadataMessage(name string) string {
 }
 
 func truncateForTable(value string, width int) string {
-	value = strings.TrimSpace(value)
-	if len(value) <= width {
-		return value
+	value = sanitizeTerminalLine(value)
+	if width <= 0 {
+		return ""
 	}
-	if width <= 1 {
-		return value[:width]
+	tail := "."
+	if width == 1 {
+		tail = ""
 	}
-	return value[:width-1] + "."
+	return ansi.Truncate(value, width, tail)
 }
 
 func latestProfileStatus(state ProfileState) string {
@@ -917,6 +1115,16 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return model.updatePangolinRegistrationStatus(msg)
 	case profileCloudActionMsg:
 		return model.applyProfileCloudAction(msg), nil
+	case profileCloudSaveMsg:
+		return model.applyProfileCloudSave(msg), nil
+	case profileDeletedMsg:
+		return model.applyProfileDeleted(msg), nil
+	case profileStackOperationMsg:
+		return model.applyProfileStackOperation(msg)
+	case profileRunDetailLoadedMsg:
+		return model.applyProfileRunDetailLoaded(msg), nil
+	case spinner.TickMsg:
+		return model.updateProfileStackSpinner(msg)
 	case tea.KeyMsg:
 		return model.updateProfileSetupKey(msg)
 	default:
@@ -927,24 +1135,62 @@ func (model profileSetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (model profileSetupModel) updateWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	model.width = msg.Width
 	model.height = msg.Height
-	contentWidth := max(40, msg.Width-4)
-	navigationHeight := max(8, msg.Height-7)
+	contentWidth := max(20, msg.Width-4)
+	navigationHeight := max(4, msg.Height-7)
 	model.profileList.SetSize(contentWidth, navigationHeight)
 	model.repositoryList.SetSize(contentWidth, navigationHeight)
 	model.planViewport.SetWidth(contentWidth)
-	model.planViewport.SetHeight(max(6, msg.Height-14))
+	model.planViewport.SetHeight(max(3, msg.Height-14))
+	model.runLogViewport.SetWidth(contentWidth)
+	model.runLogViewport.SetHeight(max(3, msg.Height-13))
 	model.stackDiffViewport.SetWidth(contentWidth)
-	model.stackDiffViewport.SetHeight(max(6, msg.Height-10))
-	model.progress.SetWidth(clampInt(msg.Width-8, 24, 64))
+	model.stackDiffViewport.SetHeight(max(3, msg.Height-10))
+	model.progress.SetWidth(clampInt(msg.Width-8, 12, 64))
+	model.help.SetWidth(contentWidth)
+	fieldWidth := max(10, contentWidth-34)
+	for _, inputs := range [][]textinput.Model{
+		model.inputs,
+		model.advanced,
+		model.repositoryInputs,
+		model.stackInputs,
+		model.stackResourceInputs,
+	} {
+		for index := range inputs {
+			inputs[index].SetWidth(fieldWidth)
+		}
+	}
+	standaloneWidth := max(10, contentWidth-28)
+	for _, input := range []*textinput.Model{
+		&model.githubTokenInput,
+		&model.deleteProfileInput,
+		&model.stackComposeInput,
+		&model.stackEnvironmentInput,
+		&model.stackCommitInput,
+		&model.stackDeleteInput,
+		&model.cloudTokenInput,
+		&model.cloudConfirmInput,
+	} {
+		input.SetWidth(standaloneWidth)
+	}
 	model.stackComposePicker.SetHeight(max(4, msg.Height-13))
 	model.stackEnvironmentPicker.SetHeight(max(4, msg.Height-13))
+	model.resizeStageTable()
+	model.resizeRunHistoryTable()
 	model.resizeStackTable()
 	model.resizeStackServiceTable()
+	if model.screen == profileSetupScreenDashboard {
+		model.syncDashboardViewport()
+	}
 	return model, nil
 }
 
 func (model profileSetupModel) updatePangolinRegistrationStatus(msg pangolinRegistrationStatusMsg) (tea.Model, tea.Cmd) {
-	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) || model.profiles[model.selectedIndex].Profile.ID != msg.profileID {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		return model, nil
+	}
+	profile := model.profiles[model.selectedIndex].Profile
+	if msg.requestID != model.pangolinRequestID || msg.profileID != profile.ID ||
+		msg.baseDomain != model.pangolinRequestDomain || msg.baseDomain != profile.BaseDomain {
 		return model, nil
 	}
 	if msg.err != nil {
@@ -965,23 +1211,59 @@ func (model profileSetupModel) updatePangolinRegistrationStatus(msg pangolinRegi
 }
 
 func (model profileSetupModel) updateProfileSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if model.profileStackOperationBusy() {
+		return model.updateProfileStackBusyKey(msg)
+	}
 	if updated, command, handled := model.updateProfileSetupGlobalKey(msg); handled {
 		return updated, command
+	}
+	if model.profileSetupTerminalTooSmall() {
+		return model, nil
 	}
 	return model.updateProfileSetupScreenKey(msg)
 }
 
+func (model profileSetupModel) profileSetupTerminalTooSmall() bool {
+	return model.width > 0 && (model.width < profileSetupMinWidth || model.height < profileSetupMinHeight)
+}
+
 func (model profileSetupModel) updateProfileSetupGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	if model.screen == profileSetupScreenDeleteConfirm && model.deleteProfilePending {
+		return model, nil, true
+	}
+	if model.screen == profileSetupScreenCloudSaveRecovery {
+		switch msg.String() {
+		case setupKeyCtrlC, "q", "esc":
+			model.err = "The Droplet was destroyed remotely. Finish saving the local profile state before exiting."
+			return model, nil, true
+		}
+	}
 	switch msg.String() {
 	case setupKeyCtrlC:
+		model.cancelProfileRunDetailLoad()
+		if model.screen == profileSetupScreenCloudRunning {
+			return model.cancelProfileCloudAction()
+		}
 		model.cancelled = true
 		return model, tea.Quit, true
 	case "q":
+		if model.screen == profileSetupScreenCloudRunning {
+			return model.cancelProfileCloudAction()
+		}
 		if !profileSetupScreenAcceptsText(model.screen) {
-			model.cancelled = true
+			model.cancelProfileRunDetailLoad()
+			model.quit = true
 			return model, tea.Quit, true
 		}
+	case "?":
+		if !profileSetupScreenAcceptsText(model.screen) {
+			model.help.ShowAll = !model.help.ShowAll
+			return model, nil, true
+		}
 	case "esc":
+		if model.screen == profileSetupScreenCloudRunning {
+			return model.cancelProfileCloudAction()
+		}
 		model.goBack()
 		model.err = ""
 		return model, nil, true
@@ -995,6 +1277,10 @@ func (model profileSetupModel) updateProfileSetupScreenKey(msg tea.KeyMsg) (tea.
 		return model.updateProfilePicker(msg)
 	case profileSetupScreenDashboard:
 		return model.updateProfileDashboard(msg)
+	case profileSetupScreenRunHistory:
+		return model.updateRunHistory(msg)
+	case profileSetupScreenRunDetail:
+		return model.updateRunDetail(msg)
 	case profileSetupScreenIntake:
 		return model.updateProfileInput(msg, false)
 	case profileSetupScreenAdvanced:
@@ -1031,6 +1317,8 @@ func (model profileSetupModel) updateProfileSetupScreenKey(msg tea.KeyMsg) (tea.
 		return model.updateProfileCloudConfirm(msg)
 	case profileSetupScreenCloudRunning:
 		return model, nil
+	case profileSetupScreenCloudSaveRecovery:
+		return model.updateProfileCloudSaveRecovery(msg)
 	case profileSetupScreenReview:
 		return model.updateProfileReview(msg)
 	case profileSetupScreenDeleteConfirm:
@@ -1056,7 +1344,7 @@ func profileSetupScreenAcceptsText(screen profileSetupScreen) bool {
 	case profileSetupScreenIntake, profileSetupScreenAdvanced, profileSetupScreenRepositoryDetails,
 		profileSetupScreenGitHubToken, profileSetupScreenStackCompose, profileSetupScreenStackEditor, profileSetupScreenStackResourceEditor,
 		profileSetupScreenStackEnvironment, profileSetupScreenStackReview, profileSetupScreenStackCommit,
-		profileSetupScreenCloudConfirm:
+		profileSetupScreenStackDeleteConfirm, profileSetupScreenCloudConfirm, profileSetupScreenDeleteConfirm:
 		return true
 	default:
 		return false
@@ -1064,11 +1352,13 @@ func profileSetupScreenAcceptsText(screen profileSetupScreen) bool {
 }
 
 func (model *profileSetupModel) resizeStackTable() {
-	contentWidth := max(78, model.width-4)
-	resourceWidth := max(38, contentWidth-34)
+	contentWidth := max(32, model.width-4)
+	stackWidth := clampInt(contentWidth/4, 10, 18)
+	statusWidth := clampInt(contentWidth/6, 8, 10)
+	resourceWidth := max(10, contentWidth-stackWidth-statusWidth-4)
 	model.stackTable.SetColumns([]table.Column{
-		{Title: "Stack", Width: 18},
-		{Title: "Status", Width: 10},
+		{Title: "Stack", Width: stackWidth},
+		{Title: "Status", Width: statusWidth},
 		{Title: "Public resource", Width: resourceWidth},
 	})
 	model.stackTable.SetWidth(contentWidth)
@@ -1077,6 +1367,35 @@ func (model *profileSetupModel) resizeStackTable() {
 		availableHeight = model.height - 23
 	}
 	model.stackTable.SetHeight(clampInt(len(model.stacks)+1, 2, max(2, availableHeight)))
+}
+
+func (model *profileSetupModel) resizeStageTable() {
+	contentWidth := max(32, model.width-4)
+	stageWidth := clampInt(contentWidth/5, 10, 16)
+	statusWidth := clampInt(contentWidth/6, 8, 12)
+	errorWidth := max(10, contentWidth-stageWidth-statusWidth-4)
+	model.stageTable.SetColumns([]table.Column{
+		{Title: "Stage", Width: stageWidth},
+		{Title: "Status", Width: statusWidth},
+		{Title: "Last error", Width: errorWidth},
+	})
+	model.stageTable.SetWidth(contentWidth)
+}
+
+func (model *profileSetupModel) resizeRunHistoryTable() {
+	contentWidth := max(48, model.width-4)
+	runWidth := clampInt(contentWidth/3, 16, 28)
+	statusWidth := clampInt(contentWidth/7, 8, 10)
+	updatedWidth := clampInt(contentWidth/5, 11, 16)
+	stagesWidth := max(10, contentWidth-runWidth-statusWidth-updatedWidth-6)
+	model.runTable.SetColumns([]table.Column{
+		{Title: "Run", Width: runWidth},
+		{Title: "Status", Width: statusWidth},
+		{Title: "Updated", Width: updatedWidth},
+		{Title: "Stages", Width: stagesWidth},
+	})
+	model.runTable.SetWidth(contentWidth)
+	model.runTable.SetHeight(clampInt(len(model.runs)+1, 2, max(2, model.height-11)))
 }
 
 func (model profileSetupModel) updateProfilePicker(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1103,9 +1422,11 @@ func (model profileSetupModel) updateProfilePicker(key tea.KeyMsg) (tea.Model, t
 			model.selectedIndex = selected.index
 			model.fresh = false
 			model.setInputsFromChoice(false)
-			model.refreshDashboard()
+			model.prepareDashboard()
 			model.screen = profileSetupScreenDashboard
-			return model, model.checkPangolinRegistration()
+			pangolinCommand := model.checkPangolinRegistration()
+			model, stackCommand := model.startProfileStackRefreshIfConfigured()
+			return model, tea.Batch(pangolinCommand, stackCommand)
 		}
 	}
 	var cmd tea.Cmd
@@ -1115,6 +1436,13 @@ func (model profileSetupModel) updateProfilePicker(key tea.KeyMsg) (tea.Model, t
 
 func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
+	case "pgup", "pgdown", "home", "end":
+		model.syncDashboardViewport()
+		var command tea.Cmd
+		model.dashboardViewport, command = model.dashboardViewport.Update(key)
+		return model, command
+	case "h", "H":
+		return model.openRunHistory(), nil
 	case "v", "V":
 		model.err = ""
 		model.refreshPlanPreview()
@@ -1130,7 +1458,7 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 		model.profileNotice = ""
 		model.screen = profileSetupScreenAdvanced
 	case "s", "S":
-		model.openStacksScreen()
+		return model.openStacksScreen()
 	case "g", "G":
 		model.err = ""
 		model.githubTokenNotice = ""
@@ -1144,7 +1472,10 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 		model.screen = profileSetupScreenIntake
 	case "x", "X":
 		model.err = ""
+		model.deleteProfileInput.SetValue("")
+		model.deleteProfileInput.Focus()
 		model.screen = profileSetupScreenDeleteConfirm
+		return model, textinput.Blink
 	case "p", "P":
 		if model.selectedProfileHasPangolinAccess() {
 			model.showPangolinAccess = !model.showPangolinAccess
@@ -1159,6 +1490,138 @@ func (model profileSetupModel) updateProfileDashboard(key tea.KeyMsg) (tea.Model
 		return model, cmd
 	}
 	return model, nil
+}
+
+func profileStateHasActiveRun(state ProfileState) bool {
+	run, ok := state.Runs[state.ActiveRunID]
+	return ok && run.Status == runStatusRunning
+}
+
+func (model profileSetupModel) openRunHistory() profileSetupModel {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		model.err = setupNoProfileSelectedMessage
+		return model
+	}
+	model.err = ""
+	model.selectedRunID = ""
+	model.runLogPath = ""
+	model.cancelProfileRunDetailLoad()
+	model.runs = sortedSetupRuns(model.profiles[model.selectedIndex].State)
+	model.runTable = newRunHistoryTable(model.runs)
+	model.resizeRunHistoryTable()
+	model.runTable.Focus()
+	model.screen = profileSetupScreenRunHistory
+	return model
+}
+
+func (model profileSetupModel) updateRunHistory(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.String() == "enter" {
+		if model.runDetailLoading {
+			return model, nil
+		}
+		if len(model.runs) == 0 {
+			return model, nil
+		}
+		cursor := model.runTable.Cursor()
+		if cursor < 0 || cursor >= len(model.runs) {
+			model.err = "no setup run selected"
+			return model, nil
+		}
+		if model.profileStore == nil {
+			model.err = setupProfileStoreUnavailable
+			return model, nil
+		}
+		choice := model.profiles[model.selectedIndex]
+		run := model.runs[cursor]
+		model.err = ""
+		model.selectedRunID = run.ID
+		model.runDetailLoading = true
+		model.runDetailRequestID++
+		requestID := model.runDetailRequestID
+		parentCtx := model.tuiContext
+		if parentCtx == nil {
+			parentCtx = context.Background()
+		}
+		loadCtx, cancel := context.WithCancel(parentCtx)
+		model.runDetailCancel = cancel
+		store := model.profileStore
+		profileID := choice.Profile.ID
+		secrets := choice.Secrets
+		return model, func() tea.Msg {
+			detail, err := loadProfileRunDetailContext(loadCtx, store, profileID, run.ID, secrets)
+			return profileRunDetailLoadedMsg{requestID: requestID, profileID: profileID, runID: run.ID, detail: detail, err: err}
+		}
+	}
+	var command tea.Cmd
+	model.runTable, command = model.runTable.Update(key)
+	return model, command
+}
+
+type profileRunDetailLoadedMsg struct {
+	requestID uint64
+	profileID string
+	runID     string
+	detail    profileRunDetail
+	err       error
+}
+
+func (model profileSetupModel) applyProfileRunDetailLoaded(message profileRunDetailLoadedMsg) profileSetupModel {
+	if !model.runDetailLoading || message.requestID != model.runDetailRequestID || model.screen != profileSetupScreenRunHistory || message.runID != model.selectedRunID {
+		return model
+	}
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) || model.profiles[model.selectedIndex].Profile.ID != message.profileID {
+		return model
+	}
+	model.finishProfileRunDetailLoad()
+	if message.err != nil {
+		if !errors.Is(message.err, context.Canceled) {
+			model.err = message.err.Error()
+		}
+		return model
+	}
+	model.err = ""
+	model.runLogPath = message.detail.Path
+	lines := append([]string(nil), message.detail.Lines...)
+	if message.detail.Truncated {
+		lines = append([]string{fmt.Sprintf("Showing the latest %d saved events; earlier or oversized log data was omitted.", profileRunHistoryMaxEvents)}, lines...)
+	}
+	if len(lines) == 0 {
+		lines = []string{"No log events were recorded for this run."}
+	}
+	model.runLogViewport.SetContent(strings.Join(lines, "\n"))
+	model.runLogViewport.GotoTop()
+	model.screen = profileSetupScreenRunDetail
+	return model
+}
+
+func (model *profileSetupModel) cancelProfileRunDetailLoad() {
+	if model.runDetailCancel != nil {
+		model.runDetailCancel()
+	}
+	model.finishProfileRunDetailLoad()
+	model.runDetailRequestID++
+}
+
+func (model *profileSetupModel) finishProfileRunDetailLoad() {
+	if model.runDetailCancel != nil {
+		model.runDetailCancel()
+	}
+	model.runDetailCancel = nil
+	model.runDetailLoading = false
+}
+
+func (model profileSetupModel) updateRunDetail(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "home", "g":
+		model.runLogViewport.GotoTop()
+		return model, nil
+	case "end", "G":
+		model.runLogViewport.GotoBottom()
+		return model, nil
+	}
+	var command tea.Cmd
+	model.runLogViewport, command = model.runLogViewport.Update(key)
+	return model, command
 }
 
 func (model profileSetupModel) runSelectedDashboardStage() (tea.Model, tea.Cmd) {
@@ -1187,11 +1650,11 @@ func (model profileSetupModel) selectedProfileProxyFailed() bool {
 	return ok && run.Stages["proxy"].Status == stageStatusFailed
 }
 
-func (model *profileSetupModel) openStacksScreen() {
+func (model profileSetupModel) openStacksScreen() (tea.Model, tea.Cmd) {
 	model.err = ""
 	model.screen = profileSetupScreenStacks
-	model.refreshStacks()
 	model.stackTable.Focus()
+	return model.startProfileStackOperation(profileStackOperationRefresh, "", false)
 }
 
 func (model profileSetupModel) openProfileCloudScreen() (tea.Model, tea.Cmd) {
@@ -1294,7 +1757,7 @@ func (model profileSetupModel) updateProfileInput(key tea.KeyMsg, advanced bool)
 		}
 	case setupKeyCtrlS:
 		model.storeFocusedInputs(inputs, advanced)
-		return model.saveSelectedProfileSettings(), nil
+		return model.saveSelectedProfileSettings()
 	case "enter":
 		if model.focus < len(inputs)-1 {
 			inputs[model.focus].Blur()
@@ -1317,7 +1780,7 @@ func (model profileSetupModel) updateProfileInput(key tea.KeyMsg, advanced bool)
 		return model, nil
 	}
 	var cmd tea.Cmd
-	inputs[model.focus], cmd = inputs[model.focus].Update(key)
+	inputs[model.focus], cmd = updateSetupTextInput(inputs[model.focus], key)
 	model.storeFocusedInputs(inputs, advanced)
 	return model, cmd
 }
@@ -1364,7 +1827,7 @@ func (model profileSetupModel) updateRepositoryDetails(key tea.KeyMsg) (tea.Mode
 		return model.saveRepositoryDetails()
 	}
 	var cmd tea.Cmd
-	model.repositoryInputs[model.focus], cmd = model.repositoryInputs[model.focus].Update(key)
+	model.repositoryInputs[model.focus], cmd = updateSetupTextInput(model.repositoryInputs[model.focus], key)
 	return model, cmd
 }
 
@@ -1377,7 +1840,7 @@ func (model profileSetupModel) updateGitHubToken(key tea.KeyMsg) (tea.Model, tea
 			return model, nil
 		}
 		return model.saveSelectedGitHubToken(token), nil
-	case "e", "E":
+	case setupKeyCtrlE:
 		token, err := normalizeGitHubToken(os.Getenv("SERVESTEAD_GITHUB_TOKEN"))
 		if err != nil {
 			model.err = "SERVESTEAD_GITHUB_TOKEN: " + err.Error()
@@ -1388,11 +1851,11 @@ func (model profileSetupModel) updateGitHubToken(key tea.KeyMsg) (tea.Model, tea
 			model.githubTokenNotice = "Stored SERVESTEAD_GITHUB_TOKEN in the selected profile."
 		}
 		return model, nil
-	case "x", "X", "d", "D":
+	case setupKeyCtrlX:
 		return model.removeSelectedGitHubToken(), nil
 	}
 	var cmd tea.Cmd
-	model.githubTokenInput, cmd = model.githubTokenInput.Update(key)
+	model.githubTokenInput, cmd = updateSetupTextInput(model.githubTokenInput, key)
 	return model, cmd
 }
 
@@ -1405,12 +1868,13 @@ func (model profileSetupModel) saveSelectedGitHubToken(token string) profileSetu
 		model.err = setupProfileStoreUnavailable
 		return model
 	}
-	choice := &model.profiles[model.selectedIndex]
-	choice.Secrets.GitHubToken = token
-	if err := model.profileStore.SaveSecrets(choice.Profile.ID, choice.Secrets); err != nil {
+	profileID := model.profiles[model.selectedIndex].Profile.ID
+	choice, err := saveProfileGitHubToken(model.profileStore, profileID, token)
+	if err != nil {
 		model.err = err.Error()
 		return model
 	}
+	model.profiles[model.selectedIndex] = choice
 	model.githubTokenInput.SetValue("")
 	model.githubTokenNotice = "Stored GitHub token in the selected profile."
 	model.err = ""
@@ -1426,70 +1890,59 @@ func (model profileSetupModel) removeSelectedGitHubToken() profileSetupModel {
 		model.err = setupProfileStoreUnavailable
 		return model
 	}
-	choice := &model.profiles[model.selectedIndex]
-	choice.Secrets.GitHubToken = ""
-	if err := model.profileStore.SaveSecrets(choice.Profile.ID, choice.Secrets); err != nil {
+	profileID := model.profiles[model.selectedIndex].Profile.ID
+	choice, err := saveProfileGitHubToken(model.profileStore, profileID, "")
+	if err != nil {
 		model.err = err.Error()
 		return model
 	}
+	model.profiles[model.selectedIndex] = choice
 	model.githubTokenInput.SetValue("")
 	model.githubTokenNotice = "Removed stored GitHub token from the selected profile."
 	model.err = ""
 	return model
 }
 
-func (model profileSetupModel) saveSelectedProfileSettings() profileSetupModel {
+func (model profileSetupModel) saveSelectedProfileSettings() (tea.Model, tea.Cmd) {
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
 		model.err = setupNoProfileSelectedMessage
-		return model
+		return model, nil
 	}
 	if model.profileStore == nil {
 		model.err = setupProfileStoreUnavailable
-		return model
+		return model, nil
 	}
 	options, err := model.optionsForSelectedProfile()
 	if err != nil {
 		model.err = err.Error()
-		return model
+		return model, nil
 	}
 	if err := validateSavedProfileOptions(options); err != nil {
 		model.err = err.Error()
-		return model
+		return model, nil
 	}
 
-	choice := &model.profiles[model.selectedIndex]
-	profile := choice.Profile
-	profile.Name = firstNonEmpty(options.Name, profile.IP)
-	profile.InitialSSHUser = firstNonEmpty(options.InitialSSHUser, "root")
-	profile.AdminUser = firstNonEmpty(options.AdminUser, "servestead")
-	profile.PrivateKeyPath = expandUserPath(options.PrivateKeyPath)
-	profile.BaseDomain = strings.TrimSpace(options.BaseDomain)
-	profile.LetsEncryptEmail = strings.TrimSpace(options.LetsEncryptEmail)
-	profile.PangolinAdminEmail = firstNonEmpty(strings.TrimSpace(options.PangolinAdminEmail), profile.LetsEncryptEmail)
-	profile.ConfigRepositoryPath = expandUserPath(strings.TrimSpace(options.ConfigRepositoryPath))
-	if err := model.profileStore.Save(profile, choice.State); err != nil {
+	staleChoice := model.profiles[model.selectedIndex]
+	patch := newProfileSettingsPatch(staleChoice.Profile, staleChoice.Secrets, options)
+	choice, err := saveProfileSettings(model.profileStore, staleChoice.Profile.ID, patch)
+	if err != nil {
 		model.err = err.Error()
-		return model
+		return model, nil
 	}
-	choice.Profile = profile
-
-	if password := strings.TrimSpace(options.PangolinAdminPassword); password != "" {
-		choice.Secrets.PangolinAdminPassword = password
-		if err := model.profileStore.SaveSecrets(profile.ID, choice.Secrets); err != nil {
-			model.err = err.Error()
-			return model
-		}
-	}
+	model.profiles[model.selectedIndex] = choice
 
 	model.err = ""
 	model.profileNotice = "Saved profile settings."
 	model.setInputsFromChoice(false)
-	model.refreshDashboard()
+	model.prepareDashboard()
 	model.screen = profileSetupScreenDashboard
-	return model
+	return model.startProfileStackRefreshIfConfigured()
 }
 
 func validateSavedProfileOptions(options setupCLIOptions) error {
+	if strings.TrimSpace(options.IP) == "" {
+		return errors.New("server IP or hostname is required")
+	}
 	if options.PrivateKeyPath == "" {
 		return errors.New("private key path is required")
 	}
@@ -1577,7 +2030,7 @@ func (model profileSetupModel) updateStackCompose(msg tea.Msg) (tea.Model, tea.C
 			return model.loadStackCompose(model.stackComposeInput.Value())
 		}
 		var command tea.Cmd
-		model.stackComposeInput, command = model.stackComposeInput.Update(msg)
+		model.stackComposeInput, command = updateSetupTextInput(model.stackComposeInput, msg)
 		return model, command
 	}
 	if isKey && key.String() == "/" {
@@ -1587,13 +2040,27 @@ func (model profileSetupModel) updateStackCompose(msg tea.Msg) (tea.Model, tea.C
 		model.err = ""
 		return model, textinput.Blink
 	}
+	if model.stackComposeBrowserError != "" {
+		if isKey && stackFilePickerBackKey(key) {
+			var command tea.Cmd
+			model.stackComposePicker, command, model.stackComposeBrowserError = resetStackFilePickerToParent(model.stackComposePicker)
+			model.err = model.stackComposeBrowserError
+			return model, command
+		}
+		return model, nil
+	}
 	var command tea.Cmd
 	model.stackComposePicker, command = model.stackComposePicker.Update(msg)
+	model.stackComposeBrowserError = stackFilePickerDirectoryError(model.stackComposePicker.CurrentDirectory)
+	if model.stackComposeBrowserError != "" {
+		model.err = model.stackComposeBrowserError
+		return model, nil
+	}
 	if selected, path := model.stackComposePicker.DidSelectFile(msg); selected {
 		return model.loadStackCompose(path)
 	}
 	if disabled, path := model.stackComposePicker.DidSelectDisabledFile(msg); disabled {
-		model.err = fmt.Sprintf("%s is not a YAML file", filepath.Base(path))
+		model.err = fmt.Sprintf("%s is not a YAML file", sanitizeTerminalLine(filepath.Base(path)))
 	}
 	return model, command
 }
@@ -1604,14 +2071,14 @@ func (model profileSetupModel) loadStackCompose(selectedPath string) (tea.Model,
 		model.err = "Docker Compose file path is required"
 		return model, nil
 	}
-	services, err := inspectComposeFile(path)
-	if err != nil {
-		model.err = err.Error()
-		return model, nil
-	}
-	compose, err := os.ReadFile(path)
+	compose, err := readBoundedFile(path, "Compose file", stackComposeMaxBytes)
 	if err != nil {
 		model.err = fmt.Sprintf("read Compose file: %v", err)
+		return model, nil
+	}
+	services, err := inspectComposeServices(compose)
+	if err != nil {
+		model.err = err.Error()
 		return model, nil
 	}
 	options := withStackAddDefaults(stackAddOptions{Compose: path}, services)
@@ -1675,7 +2142,12 @@ func (model profileSetupModel) openStackComposePicker() (tea.Model, tea.Cmd) {
 	model.stackComposeInput.SetValue("")
 	model.stackComposeInput.Blur()
 	model.stackComposePicker = newStackFilePicker(directory, []string{".yaml", ".yml"}, false)
+	model.stackComposeBrowserError = stackFilePickerDirectoryError(directory)
+	model.err = model.stackComposeBrowserError
 	model.screen = profileSetupScreenStackCompose
+	if model.stackComposeBrowserError != "" {
+		return model, nil
+	}
 	return model, model.stackComposePicker.Init()
 }
 
@@ -1690,13 +2162,16 @@ func (model profileSetupModel) editSelectedStack() (tea.Model, tea.Cmd) {
 }
 
 func (model profileSetupModel) confirmSelectedStackDelete() (tea.Model, tea.Cmd) {
-	if _, ok := model.selectedStack(); !ok {
+	_, ok := model.selectedStack()
+	if !ok {
 		model.err = setupNoStackSelectedMessage
 		return model, nil
 	}
 	model.err = ""
+	model.stackDeleteInput.SetValue("")
+	model.stackDeleteInput.Focus()
 	model.screen = profileSetupScreenStackDeleteConfirm
-	return model, nil
+	return model, textinput.Blink
 }
 
 func (model profileSetupModel) runSelectedStack() (tea.Model, tea.Cmd) {
@@ -1732,36 +2207,11 @@ func (model profileSetupModel) validateStackReadyForRun(stack editableStack) err
 }
 
 func (model profileSetupModel) openStackDiff() (tea.Model, tea.Cmd) {
-	repositoryPath, err := model.selectedRepositoryPath()
-	if err != nil {
-		model.err = err.Error()
-		return model, nil
-	}
-	diff, err := stackRepositoryDiff(context.Background(), repositoryPath)
-	if err != nil {
-		model.err = err.Error()
-		return model, nil
-	}
-	model.stackDiffViewport.SetContent(diff)
-	model.stackDiffViewport.GotoTop()
-	model.err = ""
-	model.screen = profileSetupScreenStackDiff
-	return model, nil
+	return model.startProfileStackOperation(profileStackOperationDiff, "", false)
 }
 
 func (model profileSetupModel) stageStackGitChanges() (tea.Model, tea.Cmd) {
-	repositoryPath, err := model.selectedRepositoryPath()
-	if err != nil {
-		model.err = err.Error()
-		return model, nil
-	}
-	if err := stageStackChanges(context.Background(), repositoryPath); err != nil {
-		model.err = err.Error()
-		return model, nil
-	}
-	model.stackNotice = "All changes under stacks/ are staged."
-	model.refreshStacks()
-	return model, nil
+	return model.startProfileStackOperation(profileStackOperationStage, "", false)
 }
 
 func (model profileSetupModel) openStackCommit() (tea.Model, tea.Cmd) {
@@ -1777,6 +2227,10 @@ func (model profileSetupModel) openStackCommit() (tea.Model, tea.Cmd) {
 }
 
 func (model profileSetupModel) runStackSync() (tea.Model, tea.Cmd) {
+	return model.startProfileStackOperation(profileStackOperationSync, "", false)
+}
+
+func (model profileSetupModel) finishStackSync() (tea.Model, tea.Cmd) {
 	if stack, ok := firstStackMissingMetadata(model.stacks); ok {
 		model.err = stackNeedsMetadataMessage(stack.Name)
 		return model, nil
@@ -1803,18 +2257,7 @@ func (model profileSetupModel) pushStackGitRepository() (tea.Model, tea.Cmd) {
 		model.err = stackNeedsMetadataMessage(stack.Name)
 		return model, nil
 	}
-	repositoryPath, err := model.selectedRepositoryPath()
-	if err != nil {
-		model.err = err.Error()
-		return model, nil
-	}
-	if err := pushStackRepository(context.Background(), repositoryPath); err != nil {
-		model.err = err.Error()
-		return model, nil
-	}
-	model.stackNotice = "Pushed the current configuration branch to origin."
-	model.refreshStacks()
-	return model, nil
+	return model.startProfileStackOperation(profileStackOperationPush, "", false)
 }
 
 func (model profileSetupModel) updateStackServices(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1855,6 +2298,12 @@ func (model profileSetupModel) updateStackServices(key tea.KeyMsg) (tea.Model, t
 }
 
 func (model profileSetupModel) updateStackEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if profileSetupViewportKey(key) {
+		model.syncStackEditorViewport()
+		var command tea.Cmd
+		model.stackEditorViewport, command = model.stackEditorViewport.Update(key)
+		return model, command
+	}
 	if model.focus == 0 {
 		switch key.String() {
 		case setupKeyCtrlS:
@@ -1866,7 +2315,7 @@ func (model profileSetupModel) updateStackEditor(key tea.KeyMsg) (tea.Model, tea
 			return model, nil
 		}
 		var command tea.Cmd
-		model.stackInputs[0], command = model.stackInputs[0].Update(key)
+		model.stackInputs[0], command = updateSetupTextInput(model.stackInputs[0], key)
 		return model, command
 	}
 	switch key.String() {
@@ -1904,177 +2353,11 @@ func (model profileSetupModel) updateStackEditor(key tea.KeyMsg) (tea.Model, tea
 }
 
 func (model profileSetupModel) saveStackEditor() (tea.Model, tea.Cmd) {
-	ctx := context.Background()
-	request, err := model.stackEditorSaveRequest(ctx)
+	request, err := model.stackEditorSaveOperationRequest()
 	if err != nil {
 		return model.withStackEditorError(err), nil
 	}
-	scaffoldCreated, err := ensureStackEditorScaffold(request.RepositoryPath, request.Profile)
-	if err != nil {
-		return model.withStackEditorError(err), nil
-	}
-	secretsWritten, err := model.writeStackEditorSecretsBeforeMetadata(ctx, request)
-	if err != nil {
-		return model.withStackEditorError(err), nil
-	}
-	if err := writeEditableStack(request.RepositoryPath, model.stackOriginalName, request.Options, []byte(model.stackCompose)); err != nil {
-		return model.withStackEditorError(err), nil
-	}
-	if err := model.reconcileStackEditorSecrets(ctx, request, secretsWritten); err != nil {
-		return model.withStackEditorError(err), nil
-	}
-	model.finishStackEditorSave(scaffoldCreated)
-	return model, nil
-}
-
-type stackEditorSaveRequest struct {
-	Name           string
-	RepositoryPath string
-	Profile        Profile
-	CurrentSecrets stackSecretMetadata
-	Options        stackAddOptions
-	SecretPlan     stackEditorSecretPlan
-}
-
-type stackEditorSecretPlan struct {
-	Metadata       stackSecretMetadata
-	Values         SecretSet
-	Identity       string
-	RenameExisting bool
-}
-
-func (model *profileSetupModel) stackEditorSaveRequest(ctx context.Context) (stackEditorSaveRequest, error) {
-	name := strings.TrimSpace(model.stackInputs[0].Value())
-	repositoryPath, err := model.selectedRepositoryPath()
-	if err != nil {
-		return stackEditorSaveRequest{}, err
-	}
-	profile, err := model.selectedProfile()
-	if err != nil {
-		return stackEditorSaveRequest{}, err
-	}
-	currentSecrets := model.currentStackEditorSecrets(repositoryPath)
-	secretPlan, err := model.stackEditorSecretPlan(ctx, repositoryPath, name, currentSecrets)
-	if err != nil {
-		return stackEditorSaveRequest{}, err
-	}
-	options := stackAddOptions{Name: name, Resources: model.stackResources, Secrets: secretPlan.Metadata}
-	metadata := stackMetadata{Version: 1, PublicResources: model.stackResources, Secrets: options.Secrets}
-	if err := validateStackMetadata(name, metadata, model.stackServices); err != nil {
-		return stackEditorSaveRequest{}, err
-	}
-	return stackEditorSaveRequest{
-		Name: name, RepositoryPath: repositoryPath, Profile: profile,
-		CurrentSecrets: currentSecrets, Options: options, SecretPlan: secretPlan,
-	}, nil
-}
-
-func (model profileSetupModel) currentStackEditorSecrets(repositoryPath string) stackSecretMetadata {
-	if model.stackOriginalName == "" {
-		return stackSecretMetadata{}
-	}
-	metadataPath := filepath.Join(repositoryPath, "stacks", model.stackOriginalName, stackMetadataFilename)
-	existing, err := readStackMetadataFile(metadataPath)
-	if err != nil {
-		return stackSecretMetadata{}
-	}
-	return existing.Secrets
-}
-
-func (model *profileSetupModel) stackEditorSecretPlan(ctx context.Context, repositoryPath, name string, currentSecrets stackSecretMetadata) (stackEditorSecretPlan, error) {
-	if model.stackEnvironmentDirty {
-		return model.dirtyStackEditorSecretPlan(name)
-	}
-	return model.existingStackEditorSecretPlan(ctx, repositoryPath, name, currentSecrets)
-}
-
-func (model *profileSetupModel) dirtyStackEditorSecretPlan(name string) (stackEditorSecretPlan, error) {
-	if model.stackEnvironment == "" {
-		return stackEditorSecretPlan{}, nil
-	}
-	values, _, err := parseEnvironmentSecretSet(model.stackEnvironment)
-	if err != nil {
-		return stackEditorSecretPlan{}, err
-	}
-	identity, recipient, err := model.ensureSelectedStackSecretIdentity()
-	if err != nil {
-		return stackEditorSecretPlan{}, err
-	}
-	return stackEditorSecretPlan{
-		Metadata: ageStackSecretMetadata(name, values, recipient),
-		Values:   values,
-		Identity: identity,
-	}, nil
-}
-
-func (model profileSetupModel) existingStackEditorSecretPlan(ctx context.Context, repositoryPath, name string, currentSecrets stackSecretMetadata) (stackEditorSecretPlan, error) {
-	if !currentSecrets.HasSecrets() {
-		return stackEditorSecretPlan{}, nil
-	}
-	plan := stackEditorSecretPlan{Metadata: currentSecrets}
-	if model.stackOriginalName != "" && model.stackOriginalName != name {
-		values, identity, err := model.currentStackEditorSecretValues(ctx, repositoryPath, currentSecrets)
-		if err != nil {
-			return stackEditorSecretPlan{}, err
-		}
-		plan.Values = values
-		plan.Identity = identity
-		plan.RenameExisting = true
-	}
-	plan.Metadata.Source = defaultStackSecretSource(name)
-	return plan, nil
-}
-
-func (model profileSetupModel) currentStackEditorSecretValues(ctx context.Context, repositoryPath string, metadata stackSecretMetadata) (SecretSet, string, error) {
-	identity, _, err := model.profiles[model.selectedIndex].Secrets.StackSecretIdentityPair()
-	if err != nil {
-		return nil, "", err
-	}
-	provider, err := secretProviderForName(metadata.Provider)
-	if err != nil {
-		return nil, "", err
-	}
-	values, err := provider.GetStackSecrets(ctx, metadata.Ref(repositoryPath, model.stackOriginalName, identity))
-	if err != nil {
-		return nil, "", err
-	}
-	return values, identity, nil
-}
-
-func (model profileSetupModel) writeStackEditorSecretsBeforeMetadata(ctx context.Context, request stackEditorSaveRequest) (bool, error) {
-	canWrite := model.stackEnvironmentDirty &&
-		request.SecretPlan.Metadata.HasSecrets() &&
-		(model.stackOriginalName == "" || model.stackOriginalName == request.Name)
-	if !canWrite {
-		return false, nil
-	}
-	return true, putStackSecrets(ctx, request.RepositoryPath, request.Name, request.SecretPlan.Metadata, request.SecretPlan.Identity, request.SecretPlan.Values)
-}
-
-func (model profileSetupModel) reconcileStackEditorSecrets(ctx context.Context, request stackEditorSaveRequest, secretsWritten bool) error {
-	if model.stackEnvironmentDirty {
-		return model.reconcileDirtyStackEditorSecrets(ctx, request, secretsWritten)
-	}
-	if request.SecretPlan.RenameExisting {
-		return putStackSecrets(ctx, request.RepositoryPath, request.Name, request.SecretPlan.Metadata, request.SecretPlan.Identity, request.SecretPlan.Values)
-	}
-	return nil
-}
-
-func (model profileSetupModel) reconcileDirtyStackEditorSecrets(ctx context.Context, request stackEditorSaveRequest, secretsWritten bool) error {
-	if request.SecretPlan.Metadata.HasSecrets() && !secretsWritten {
-		return putStackSecrets(ctx, request.RepositoryPath, request.Name, request.SecretPlan.Metadata, request.SecretPlan.Identity, request.SecretPlan.Values)
-	}
-	if !request.CurrentSecrets.HasSecrets() {
-		return nil
-	}
-	currentSecrets := request.CurrentSecrets
-	currentSecrets.Source = defaultStackSecretSource(request.Name)
-	identity, _, err := model.profiles[model.selectedIndex].Secrets.StackSecretIdentityPair()
-	if err != nil {
-		return err
-	}
-	return removeStackSecrets(ctx, request.RepositoryPath, request.Name, currentSecrets, identity)
+	return model.startProfileStackOperationRequest(request)
 }
 
 func (model profileSetupModel) withStackEditorError(err error) profileSetupModel {
@@ -2082,46 +2365,14 @@ func (model profileSetupModel) withStackEditorError(err error) profileSetupModel
 	return model
 }
 
-func (model *profileSetupModel) finishStackEditorSave(scaffoldCreated bool) {
-	model.stackNotice = stackEditorSavedNotice(model.stackOriginalName, model.stackMetadataMissing, scaffoldCreated)
+func (model *profileSetupModel) finishStackEditorSave(result profileStackSaveResult) {
+	model.stackNotice = stackEditorSavedNotice(result.OriginalName, result.MetadataMissing, result.ScaffoldCreated)
 	model.err = ""
 	model.screen = profileSetupScreenStacks
-	model.refreshStacks()
 	if model.stackEnvironmentDirty && model.stackGitStatus == "clean" {
 		model.stackNotice = "Runtime secrets updated in Git-backed encrypted state. Review and commit the stack changes."
 	}
 	model.stackTable.Focus()
-}
-
-func (model *profileSetupModel) ensureSelectedStackSecretIdentity() (string, string, error) {
-	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
-		return "", "", errors.New(setupNoProfileSelectedMessage)
-	}
-	choice := &model.profiles[model.selectedIndex]
-	recipient, changed, err := choice.Secrets.EnsureStackSecretIdentity()
-	if err != nil {
-		return "", "", err
-	}
-	if changed && model.profileStore != nil {
-		if err := model.profileStore.SaveSecrets(choice.Profile.ID, choice.Secrets); err != nil {
-			return "", "", err
-		}
-	}
-	return choice.Secrets.StackSecretIdentity, recipient, nil
-}
-
-func (model profileSetupModel) selectedProfile() (Profile, error) {
-	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
-		return Profile{}, errors.New(setupNoProfileSelectedMessage)
-	}
-	return model.profiles[model.selectedIndex].Profile, nil
-}
-
-func ensureStackEditorScaffold(repositoryPath string, profile Profile) (bool, error) {
-	return ensureConfigRepositoryScaffold(context.Background(), repositoryPath, observabilityComposeFile(observabilityConfig{
-		BaseDomain: profile.BaseDomain,
-		AdminEmail: firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail),
-	}))
 }
 
 func stackEditorSavedNotice(originalName string, metadataMissing, scaffoldCreated bool) string {
@@ -2169,7 +2420,7 @@ func (model profileSetupModel) updateStackResourceEditor(key tea.KeyMsg) (tea.Mo
 		return model.saveStackResourceEditor()
 	}
 	var command tea.Cmd
-	model.stackResourceInputs[model.focus], command = model.stackResourceInputs[model.focus].Update(key)
+	model.stackResourceInputs[model.focus], command = updateSetupTextInput(model.stackResourceInputs[model.focus], key)
 	return model, command
 }
 
@@ -2247,7 +2498,7 @@ func (model *profileSetupModel) openStackEnvironment(returnScreen profileSetupSc
 	})
 	if model.stackComposePath != "" {
 		adjacent := filepath.Join(filepath.Dir(model.stackComposePath), ".env")
-		if info, err := os.Stat(adjacent); err == nil && !info.IsDir() {
+		if info, err := os.Stat(adjacent); err == nil && !info.IsDir() && terminalSingleLineSafe(adjacent) {
 			model.stackEnvironmentOptions = append(model.stackEnvironmentOptions, stackEnvironmentOption{
 				kind: "file", label: "Use adjacent .env", detail: adjacent, path: adjacent,
 			})
@@ -2321,8 +2572,12 @@ func (model profileSetupModel) openStackEnvironmentBrowser() (tea.Model, tea.Cmd
 		directory = current
 	}
 	model.stackEnvironmentPicker = newStackFilePicker(directory, nil, true)
+	model.stackEnvironmentBrowserError = stackFilePickerDirectoryError(directory)
 	model.stackEnvironmentMode = stackEnvironmentBrowse
-	model.err = ""
+	model.err = model.stackEnvironmentBrowserError
+	if model.stackEnvironmentBrowserError != "" {
+		return model, nil
+	}
 	return model, model.stackEnvironmentPicker.Init()
 }
 
@@ -2332,7 +2587,7 @@ func (model profileSetupModel) updateStackEnvironmentManual(msg tea.Msg) (tea.Mo
 		return model.loadStackEnvironment(model.stackEnvironmentInput.Value())
 	}
 	var command tea.Cmd
-	model.stackEnvironmentInput, command = model.stackEnvironmentInput.Update(msg)
+	model.stackEnvironmentInput, command = updateSetupTextInput(model.stackEnvironmentInput, msg)
 	return model, command
 }
 
@@ -2345,8 +2600,22 @@ func (model profileSetupModel) updateStackEnvironmentBrowse(msg tea.Msg) (tea.Mo
 		model.err = ""
 		return model, textinput.Blink
 	}
+	if model.stackEnvironmentBrowserError != "" {
+		if isKey && stackFilePickerBackKey(key) {
+			var command tea.Cmd
+			model.stackEnvironmentPicker, command, model.stackEnvironmentBrowserError = resetStackFilePickerToParent(model.stackEnvironmentPicker)
+			model.err = model.stackEnvironmentBrowserError
+			return model, command
+		}
+		return model, nil
+	}
 	var command tea.Cmd
 	model.stackEnvironmentPicker, command = model.stackEnvironmentPicker.Update(msg)
+	model.stackEnvironmentBrowserError = stackFilePickerDirectoryError(model.stackEnvironmentPicker.CurrentDirectory)
+	if model.stackEnvironmentBrowserError != "" {
+		model.err = model.stackEnvironmentBrowserError
+		return model, nil
+	}
 	if selected, path := model.stackEnvironmentPicker.DidSelectFile(msg); selected {
 		return model.loadStackEnvironment(path)
 	}
@@ -2385,22 +2654,38 @@ func (model profileSetupModel) finishStackEnvironment(environment string, keys [
 }
 
 func (model profileSetupModel) updateStackReview(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if profileSetupViewportKey(key) {
+		model.syncStackReviewViewport()
+		var command tea.Cmd
+		model.stackReviewViewport, command = model.stackReviewViewport.Update(key)
+		return model, command
+	}
 	if key.String() == "enter" {
 		return model.saveStackEditor()
 	}
 	var command tea.Cmd
-	model.stackInputs[0], command = model.stackInputs[0].Update(key)
+	model.stackInputs[0], command = updateSetupTextInput(model.stackInputs[0], key)
 	return model, command
 }
 
 func (model profileSetupModel) updateStackDeleteConfirm(key tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch key.String() {
-	case "y", "Y":
+	if key.String() == "enter" {
+		stack, ok := model.selectedStack()
+		if !ok {
+			model.err = setupNoStackSelectedMessage
+			return model, nil
+		}
+		want := "delete " + safeStackConfirmationName(stack.Name)
+		if strings.TrimSpace(model.stackDeleteInput.Value()) != want {
+			model.err = fmt.Sprintf("type %q exactly to remove this stack", want)
+			return model, nil
+		}
+		model.stackDeleteInput.Blur()
 		return model.deleteSelectedStack()
-	case "n", "N":
-		model.screen = profileSetupScreenStacks
 	}
-	return model, nil
+	var command tea.Cmd
+	model.stackDeleteInput, command = updateSetupTextInput(model.stackDeleteInput, key)
+	return model, command
 }
 
 func (model profileSetupModel) deleteSelectedStack() (tea.Model, tea.Cmd) {
@@ -2408,23 +2693,17 @@ func (model profileSetupModel) deleteSelectedStack() (tea.Model, tea.Cmd) {
 	if !ok {
 		return model.stackDeleteError(setupNoStackSelectedMessage), nil
 	}
-	repositoryPath, err := model.selectedRepositoryPath()
+	request, err := model.profileStackRequest(profileStackOperationDelete, "", false)
 	if err != nil {
 		return model.stackDeleteError(err.Error()), nil
 	}
-	if err := removeEditableStack(repositoryPath, stack.Name); err != nil {
-		return model.stackDeleteError(err.Error()), nil
-	}
-	model.stackNotice = fmt.Sprintf("Stack %s removed. Review and commit the deletion before deployment.", stack.Name)
-	model.err = ""
-	model.refreshStacks()
-	model.screen = profileSetupScreenStacks
-	return model, nil
+	request.StackName = stack.Name
+	return model.startProfileStackOperationRequest(request)
 }
 
 func (model profileSetupModel) stackDeleteError(message string) profileSetupModel {
 	model.err = message
-	model.screen = profileSetupScreenStacks
+	model.screen = profileSetupScreenStackDeleteConfirm
 	return model
 }
 
@@ -2436,26 +2715,11 @@ func (model profileSetupModel) updateStackDiff(key tea.KeyMsg) (tea.Model, tea.C
 
 func (model profileSetupModel) updateStackCommit(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.String() == "enter" {
-		repositoryPath, err := model.selectedRepositoryPath()
-		if err != nil {
-			model.err = err.Error()
-			return model, nil
-		}
 		message := strings.TrimSpace(model.stackCommitInput.Value())
-		if err := commitStackChanges(context.Background(), repositoryPath, message); err != nil {
-			model.err = err.Error()
-			return model, nil
-		}
-		model.stackCommitInput.Blur()
-		model.stackNotice = fmt.Sprintf("Committed stack changes: %s. Press y to synchronize the server.", message)
-		model.err = ""
-		model.screen = profileSetupScreenStacks
-		model.refreshStacks()
-		model.stackTable.Focus()
-		return model, nil
+		return model.startProfileStackOperation(profileStackOperationCommit, message, false)
 	}
 	var command tea.Cmd
-	model.stackCommitInput, command = model.stackCommitInput.Update(key)
+	model.stackCommitInput, command = updateSetupTextInput(model.stackCommitInput, key)
 	return model, command
 }
 
@@ -2650,7 +2914,7 @@ func newStackServiceTable(services []composeServiceSummary, resources []stackPub
 			published = "[x]"
 			exposure = strings.Join(hostnames, ", ")
 		}
-		rows = append(rows, table.Row{published, service.Name, ports, exposure})
+		rows = append(rows, table.Row{published, sanitizeTerminalLine(service.Name), ports, sanitizeTerminalLine(exposure)})
 	}
 	return table.New(
 		table.WithColumns([]table.Column{
@@ -2670,9 +2934,9 @@ func newStackResourceTable(resources []stackPublicResource) table.Model {
 	rows := make([]table.Row, 0, len(resources))
 	for _, resource := range resources {
 		rows = append(rows, table.Row{
-			resource.ID,
-			resource.Subdomain,
-			fmt.Sprintf("%s:%d", resource.Service, resource.Port),
+			sanitizeTerminalLine(resource.ID),
+			sanitizeTerminalLine(resource.Subdomain),
+			fmt.Sprintf("%s:%d", sanitizeTerminalLine(resource.Service), resource.Port),
 		})
 	}
 	return table.New(
@@ -2716,65 +2980,13 @@ func (model *profileSetupModel) refreshStacks() {
 		model.err = err.Error()
 		return
 	}
-	stacks, err := loadEditableStacks(path)
-	if err != nil {
-		model.err = err.Error()
-		return
-	}
-	model.stacks = stacks
 	choice := model.profiles[model.selectedIndex]
-	model.stackTable = newStackTable(stacks, choice.Profile.BaseDomain, &choice.State)
-	model.resizeStackTable()
-	status, err := stackRepositoryStatus(context.Background(), path)
+	snapshot, err := loadProfileStackRepositorySnapshot(context.Background(), path, choice)
 	if err != nil {
 		model.err = err.Error()
 		return
 	}
-	model.stackGitStatus = status
-	if status != "clean" {
-		model.stackHead = ""
-		model.stackNeedsPush = false
-		model.stackSyncStatus = "commit required"
-		model.err = ""
-		return
-	}
-	if stack, ok := firstStackMissingMetadata(stacks); ok {
-		model.stackHead = ""
-		model.stackNeedsPush = false
-		model.stackSyncStatus = "review required"
-		model.stackNotice = stackNeedsMetadataMessage(stack.Name)
-		model.err = ""
-		return
-	}
-	head, err := stackRepositoryHead(context.Background(), path)
-	if err != nil {
-		model.err = err.Error()
-		return
-	}
-	model.stackHead = head
-	needsPush, err := stackRepositoryNeedsPush(context.Background(), path, head)
-	if err != nil {
-		model.err = err.Error()
-		return
-	}
-	model.stackNeedsPush = needsPush
-	switch {
-	case needsPush:
-		model.stackSyncStatus = "push required"
-	case choice.State.StackRepositoryCommit != head:
-		model.stackSyncStatus = "sync required"
-	default:
-		model.stackSyncStatus = "in sync"
-	}
-	model.err = ""
-}
-
-func inspectComposeFile(path string) ([]composeServiceSummary, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read Compose file: %w", err)
-	}
-	return inspectComposeServices(data)
+	model.applyProfileStackSnapshot(snapshot)
 }
 
 func (model profileSetupModel) repositoryDetailIndexes() []int {
@@ -2815,22 +3027,66 @@ func (model profileSetupModel) updateProfileReview(key tea.KeyMsg) (tea.Model, t
 }
 
 func (model profileSetupModel) updateProfileDeleteConfirm(key tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch key.String() {
-	case "y", "Y":
+	if model.deleteProfilePending {
+		return model, nil
+	}
+	if key.String() == "enter" {
 		if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
 			model.err = setupNoProfileSelectedMessage
 			model.screen = profileSetupScreenPicker
 			return model, nil
 		}
-		model.deleteProfileID = model.profiles[model.selectedIndex].Profile.ID
-		return model, tea.Quit
-	case "n", "N":
-		model.screen = profileSetupScreenDashboard
+		if model.profileStore == nil {
+			model.err = setupProfileStoreUnavailable
+			return model, nil
+		}
+		choice := model.profiles[model.selectedIndex]
+		name := safeProfileConfirmationName(choice.Profile)
+		want := "delete " + name
+		if strings.TrimSpace(model.deleteProfileInput.Value()) != want {
+			model.err = fmt.Sprintf("type %q exactly to delete this profile", want)
+			return model, nil
+		}
+		model.deleteProfilePending = true
+		model.deleteProfileInput.Blur()
+		store := model.profileStore
+		profileID := choice.Profile.ID
+		return model, func() tea.Msg {
+			return profileDeletedMsg{profileID: profileID, err: deleteProfileWhenIdle(store, profileID)}
+		}
 	}
-	return model, nil
+	var command tea.Cmd
+	model.deleteProfileInput, command = updateSetupTextInput(model.deleteProfileInput, key)
+	return model, command
+}
+
+func (model profileSetupModel) applyProfileDeleted(message profileDeletedMsg) profileSetupModel {
+	model.deleteProfilePending = false
+	if message.err != nil {
+		model.err = sanitizeTerminalLine(message.err.Error())
+		model.deleteProfileInput.Focus()
+		return model
+	}
+	for index, choice := range model.profiles {
+		if choice.Profile.ID == message.profileID {
+			model.profiles = append(model.profiles[:index], model.profiles[index+1:]...)
+			break
+		}
+	}
+	model.profileList.SetItems(profilePickerItems(model.profiles))
+	model.profileList.Select(0)
+	model.selectedIndex = -1
+	model.deleteProfileInput.SetValue("")
+	model.err = ""
+	model.profileNotice = "Profile deleted from local storage. The remote server was not changed."
+	model.screen = profileSetupScreenPicker
+	return model
 }
 
 func (model *profileSetupModel) goBack() {
+	if model.screen == profileSetupScreenRunHistory && model.runDetailLoading {
+		model.cancelProfileRunDetailLoad()
+	}
 	if target, ok := profileSetupBackTargets[model.screen]; ok {
 		model.screen = target
 		return
@@ -2865,6 +3121,8 @@ func (model *profileSetupModel) goBack() {
 
 var profileSetupBackTargets = map[profileSetupScreen]profileSetupScreen{
 	profileSetupScreenDashboard:          profileSetupScreenPicker,
+	profileSetupScreenRunHistory:         profileSetupScreenDashboard,
+	profileSetupScreenRunDetail:          profileSetupScreenRunHistory,
 	profileSetupScreenGitHubToken:        profileSetupScreenDashboard,
 	profileSetupScreenRepository:         profileSetupScreenIntake,
 	profileSetupScreenRepositoryDetails:  profileSetupScreenRepository,
@@ -3003,23 +3261,10 @@ func (model *profileSetupModel) storeFocusedInputs(inputs []textinput.Model, adv
 }
 
 func (model *profileSetupModel) refreshDashboard() {
-	model.pangolinStatus = pangolinRegistrationUnknown
-	model.pangolinError = ""
-	model.showPangolinAccess = false
-	model.stacks = nil
-	model.stackGitStatus = ""
-	model.stackHead = ""
-	model.stackNeedsPush = false
-	model.stackSyncStatus = ""
-	model.cloudNotice = ""
-	model.stackTable = newStackTable(nil, "", nil)
-	model.resizeStackTable()
+	model.prepareDashboard()
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
-		model.stageTable = newProfileStageTable(nil)
 		return
 	}
-	state := model.profiles[model.selectedIndex].State
-	model.stageTable = newProfileStageTable(&state)
 	path := model.profiles[model.selectedIndex].Profile.ConfigRepositoryPath
 	if path != "" {
 		if _, err := os.Stat(filepath.Join(expandUserPath(path), ".git")); err == nil {
@@ -3029,7 +3274,31 @@ func (model *profileSetupModel) refreshDashboard() {
 	}
 }
 
+func (model *profileSetupModel) prepareDashboard() {
+	model.pangolinStatus = pangolinRegistrationUnknown
+	model.pangolinError = ""
+	model.showPangolinAccess = false
+	model.stacks = nil
+	model.stackGitStatus = ""
+	model.stackHead = ""
+	model.stackNeedsPush = false
+	model.stackSyncStatus = ""
+	model.cloudNotice = ""
+	model.dashboardViewport.GotoTop()
+	model.stackTable = newStackTable(nil, "", nil)
+	model.resizeStackTable()
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		model.stageTable = newProfileStageTable(nil)
+		return
+	}
+	state := model.profiles[model.selectedIndex].State
+	model.stageTable = newProfileStageTable(&state, model.profiles[model.selectedIndex].Secrets)
+}
+
 func (model *profileSetupModel) checkPangolinRegistration() tea.Cmd {
+	model.pangolinRequestID++
+	requestID := model.pangolinRequestID
+	model.pangolinRequestDomain = ""
 	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
 		return nil
 	}
@@ -3042,9 +3311,20 @@ func (model *profileSetupModel) checkPangolinRegistration() tea.Cmd {
 	model.pangolinStatus = pangolinRegistrationChecking
 	model.pangolinError = ""
 	profile := choice.Profile
+	model.pangolinRequestDomain = profile.BaseDomain
+	requestContext := model.tuiContext
+	if requestContext == nil {
+		requestContext = context.Background()
+	}
 	return func() tea.Msg {
-		complete, err := pangolinInitialSetupComplete(context.Background(), pangolinRegistrationHTTPClient, "https://pangolin."+profile.BaseDomain)
-		return pangolinRegistrationStatusMsg{profileID: profile.ID, complete: complete, err: err}
+		complete, err := pangolinInitialSetupComplete(requestContext, pangolinRegistrationHTTPClient, "https://pangolin."+profile.BaseDomain)
+		return pangolinRegistrationStatusMsg{
+			requestID:  requestID,
+			profileID:  profile.ID,
+			baseDomain: profile.BaseDomain,
+			complete:   complete,
+			err:        err,
+		}
 	}
 }
 
@@ -3099,15 +3379,15 @@ func (model profileSetupModel) reviewPlanSummary(options setupCLIOptions, config
 		return setupPlanSummary(config)
 	}
 	var builder strings.Builder
-	stageLabel := profileRunStageLabel(model.singleStage)
+	stageLabel := sanitizeTerminalLine(profileRunStageLabel(model.singleStage))
 	fmt.Fprintf(&builder, "Selected action: %s\n", stageLabel)
 	fmt.Fprintf(&builder, "- Target: %s\n", reviewTargetLabel(options))
-	fmt.Fprintf(&builder, "- SSH user: %s with %s\n", config.AdminUser, config.PrivateKeyPath)
+	fmt.Fprintf(&builder, "- SSH user: %s with %s\n", sanitizeTerminalLine(config.AdminUser), sanitizeTerminalLine(config.PrivateKeyPath))
 	if config.BaseDomain != "" {
-		fmt.Fprintf(&builder, "- Domain: %s\n", config.BaseDomain)
+		fmt.Fprintf(&builder, "- Domain: %s\n", sanitizeTerminalLine(config.BaseDomain))
 	}
 	if config.LetsEncryptEmail != "" {
-		fmt.Fprintf(&builder, "- Let's Encrypt email: %s\n", config.LetsEncryptEmail)
+		fmt.Fprintf(&builder, "- Let's Encrypt email: %s\n", sanitizeTerminalLine(config.LetsEncryptEmail))
 	}
 	builder.WriteString("\nWhat will run:\n")
 	switch model.singleStage {
@@ -3125,7 +3405,7 @@ func (model profileSetupModel) reviewPlanSummary(options setupCLIOptions, config
 		builder.WriteString("- Synchronize committed standalone stack configuration with the server.\n")
 	default:
 		if strings.HasPrefix(model.singleStage, setupStageStackPrefix) {
-			fmt.Fprintf(&builder, "- Deploy only the %s standalone stack from committed configuration.\n", strings.TrimPrefix(model.singleStage, setupStageStackPrefix))
+			fmt.Fprintf(&builder, "- Deploy only the %s standalone stack from committed configuration.\n", sanitizeTerminalLine(strings.TrimPrefix(model.singleStage, setupStageStackPrefix)))
 		} else {
 			fmt.Fprintf(&builder, "- Run only the selected %s stage.\n", stageLabel)
 		}
@@ -3136,7 +3416,7 @@ func (model profileSetupModel) reviewPlanSummary(options setupCLIOptions, config
 		builder.WriteString("- SSH execution starts only after repository preparation succeeds.\n")
 	}
 	if model.singleStage == "platform" && config.BaseDomain != "" && config.Host != "" {
-		fmt.Fprintf(&builder, "\n%s.\n", requiredDNSGuidance(config.BaseDomain, config.Host))
+		fmt.Fprintf(&builder, "\n%s.\n", sanitizeTerminalLine(requiredDNSGuidance(config.BaseDomain, config.Host)))
 	}
 	return builder.String()
 }
@@ -3168,7 +3448,7 @@ func (model profileSetupModel) optionsFromInputs() (setupCLIOptions, error) {
 	}
 	if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
 		options.ProfileID = model.profiles[model.selectedIndex].Profile.ID
-		options.IP = model.profiles[model.selectedIndex].Profile.IP
+		options.IP = firstNonEmpty(model.profiles[model.selectedIndex].Profile.IP, options.IP)
 	}
 	config := setupConfig{
 		Mode:               setupModeFullRun,
@@ -3206,7 +3486,7 @@ func (model profileSetupModel) optionsForSelectedProfile() (setupCLIOptions, err
 		return strings.TrimSpace(model.advanced[index].Value())
 	}
 	options := setupCLIOptions{
-		IP:                    profile.IP,
+		IP:                    firstNonEmpty(profile.IP, inputValue(0)),
 		ProfileID:             profile.ID,
 		Name:                  firstNonEmpty(advancedValue(0), profile.Name),
 		InitialSSHUser:        firstNonEmpty(advancedValue(1), profile.InitialSSHUser),
@@ -3239,17 +3519,37 @@ func (model profileSetupModel) selectedDashboardStage() (string, error) {
 }
 
 func (model profileSetupModel) View() tea.View {
+	if model.profileSetupTerminalTooSmall() {
+		return altScreenView(fmt.Sprintf(
+			"Servestead setup\n\nTerminal too small: %dx%d\nResize to at least %dx%d to continue.",
+			model.width,
+			model.height,
+			profileSetupMinWidth,
+			profileSetupMinHeight,
+		))
+	}
 	var builder strings.Builder
+	helpText := model.profileSetupHelpText()
 	builder.WriteString(setupTitleStyle.Render("Servestead setup"))
 	builder.WriteString("\n")
-	builder.WriteString(setupHelpStyle.Render("Profile-aware setup manages the server platform and standalone application stacks."))
+	tagline := "Profile-aware setup manages the server platform and standalone application stacks."
+	builder.WriteString(setupHelpStyle.Render(truncateForTable(tagline, max(1, model.width))))
 	builder.WriteString("\n\n")
+	if model.profileStackOperationBusy() {
+		builder.WriteString(model.profileStackOperationView())
+		return altScreenView(fitTerminalWidth(builder.String(), model.width))
+	}
 
 	switch model.screen {
 	case profileSetupScreenPicker:
 		builder.WriteString(model.profileList.View())
 	case profileSetupScreenDashboard:
-		builder.WriteString(model.dashboardView())
+		model.syncDashboardViewport()
+		builder.WriteString(model.dashboardViewport.View())
+	case profileSetupScreenRunHistory:
+		builder.WriteString(model.runHistoryView())
+	case profileSetupScreenRunDetail:
+		builder.WriteString(model.runDetailView())
 	case profileSetupScreenIntake:
 		builder.WriteString(model.inputView(false))
 	case profileSetupScreenAdvanced:
@@ -3269,20 +3569,26 @@ func (model profileSetupModel) View() tea.View {
 		if model.stackComposeManual {
 			builder.WriteString(model.stackComposeInput.View())
 		} else {
-			builder.WriteString(setupHelpStyle.Render(model.stackComposePicker.CurrentDirectory))
+			builder.WriteString(setupHelpStyle.Render(sanitizeTerminalLine(model.stackComposePicker.CurrentDirectory)))
 			builder.WriteString("\n\n")
-			builder.WriteString(model.stackComposePicker.View())
+			if model.stackComposeBrowserError != "" {
+				builder.WriteString(setupWarningStyle.Render(sanitizeTerminalText(model.stackComposeBrowserError)))
+			} else {
+				builder.WriteString(sanitizeTerminalText(model.stackComposePicker.View()))
+			}
 		}
 	case profileSetupScreenStackServices:
 		builder.WriteString(model.stackServicesView())
 	case profileSetupScreenStackEditor:
-		builder.WriteString(model.stackEditorView())
+		model.syncStackEditorViewport()
+		builder.WriteString(model.stackEditorViewport.View())
 	case profileSetupScreenStackResourceEditor:
 		builder.WriteString(model.stackResourceEditorView())
 	case profileSetupScreenStackEnvironment:
 		builder.WriteString(model.stackEnvironmentView())
 	case profileSetupScreenStackReview:
-		builder.WriteString(model.stackReviewView())
+		model.syncStackReviewViewport()
+		builder.WriteString(model.stackReviewViewport.View())
 	case profileSetupScreenStackDeleteConfirm:
 		builder.WriteString(model.stackDeleteConfirmView())
 	case profileSetupScreenStackDiff:
@@ -3299,17 +3605,24 @@ func (model profileSetupModel) View() tea.View {
 		builder.WriteString(model.profileCloudConfirmView())
 	case profileSetupScreenCloudRunning:
 		builder.WriteString(model.profileCloudRunningView())
+	case profileSetupScreenCloudSaveRecovery:
+		builder.WriteString(model.profileCloudSaveRecoveryView())
 	case profileSetupScreenReview:
 		builder.WriteString(model.reviewView())
 	case profileSetupScreenDeleteConfirm:
 		builder.WriteString(model.deleteConfirmView())
 	}
-	if model.err != "" {
+	if model.err != "" && !profileSetupErrorInsideViewport(model.screen) {
 		builder.WriteString("\n\n")
-		builder.WriteString(setupErrorStyle.Render(model.err))
+		builder.WriteString(setupErrorStyle.Render(sanitizeTerminalText(model.err)))
 	}
 	builder.WriteString("\n\n")
-	builder.WriteString(model.help.View(profileSetupHelp{
+	builder.WriteString(helpText)
+	return altScreenView(fitTerminalWidth(builder.String(), model.width))
+}
+
+func (model profileSetupModel) profileSetupHelpText() string {
+	helpMap := profileSetupHelp{
 		screen:               model.screen,
 		hasProfile:           model.selectedIndex >= 0,
 		hasPangolinAccess:    model.selectedProfileHasPangolinAccess(),
@@ -3317,8 +3630,44 @@ func (model profileSetupModel) View() tea.View {
 		stackComposeManual:   model.stackComposeManual,
 		stackEnvironmentMode: model.stackEnvironmentMode,
 		stackEditorFocus:     model.focus,
-	}))
-	return altScreenView(builder.String())
+	}
+	return model.help.View(profileSetupHelpView{base: helpMap, expanded: model.help.ShowAll, width: model.help.Width()})
+}
+
+func (model *profileSetupModel) syncDashboardViewport() {
+	content := model.dashboardView()
+	model.syncProfileSetupViewport(&model.dashboardViewport, content)
+}
+
+func (model *profileSetupModel) syncStackEditorViewport() {
+	model.syncProfileSetupViewport(&model.stackEditorViewport, model.stackEditorView())
+}
+
+func (model *profileSetupModel) syncStackReviewViewport() {
+	model.syncProfileSetupViewport(&model.stackReviewViewport, model.stackReviewView())
+}
+
+func (model *profileSetupModel) syncProfileSetupViewport(target *viewport.Model, content string) {
+	helpHeight := max(1, lipgloss.Height(model.profileSetupHelpText()))
+	target.SetWidth(max(1, model.width))
+	target.SetHeight(max(3, model.height-4-helpHeight))
+	if model.err != "" {
+		content += "\n\n" + setupErrorStyle.Render(sanitizeTerminalText(model.err))
+	}
+	target.SetContent(fitTerminalWidth(content, model.width))
+}
+
+func profileSetupErrorInsideViewport(screen profileSetupScreen) bool {
+	return screen == profileSetupScreenDashboard || screen == profileSetupScreenStackEditor || screen == profileSetupScreenStackReview
+}
+
+func profileSetupViewportKey(key tea.KeyMsg) bool {
+	switch key.String() {
+	case "pgup", "pgdown", "home", "end":
+		return true
+	default:
+		return false
+	}
 }
 
 func (model profileSetupModel) dashboardView() string {
@@ -3327,20 +3676,20 @@ func (model profileSetupModel) dashboardView() string {
 	}
 	choice := model.profiles[model.selectedIndex]
 	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("Dashboard for %s (%s)\n\n", firstNonEmpty(choice.Profile.Name, choice.Profile.IP), choice.Profile.IP))
-	builder.WriteString(fmt.Sprintf("Domain: %s\n", firstNonEmpty(choice.Profile.BaseDomain, "(missing)")))
-	builder.WriteString(fmt.Sprintf("Email:  %s\n", firstNonEmpty(choice.Profile.LetsEncryptEmail, "(missing)")))
+	builder.WriteString(fmt.Sprintf("Dashboard for %s (%s)\n\n", sanitizeTerminalLine(firstNonEmpty(choice.Profile.Name, choice.Profile.IP)), sanitizeTerminalLine(choice.Profile.IP)))
+	builder.WriteString(fmt.Sprintf("Domain: %s\n", sanitizeTerminalLine(firstNonEmpty(choice.Profile.BaseDomain, "(missing)"))))
+	builder.WriteString(fmt.Sprintf("Email:  %s\n", sanitizeTerminalLine(firstNonEmpty(choice.Profile.LetsEncryptEmail, "(missing)"))))
 	repositoryPath := choice.Profile.ConfigRepositoryPath
 	if repositoryPath == "" {
 		builder.WriteString("Config repository: not created; choose one during full setup review.\n\n")
 	} else if _, err := os.Stat(expandUserPath(repositoryPath)); errors.Is(err, os.ErrNotExist) {
-		builder.WriteString(fmt.Sprintf("Config repository: %s (will be created before the next run)\n", repositoryPath))
+		builder.WriteString(fmt.Sprintf("Config repository: %s (will be created before the next run)\n", sanitizeTerminalLine(repositoryPath)))
 	} else {
-		builder.WriteString(fmt.Sprintf("Config repository: %s\n", repositoryPath))
+		builder.WriteString(fmt.Sprintf("Config repository: %s\n", sanitizeTerminalLine(repositoryPath)))
 	}
 	builder.WriteString(fmt.Sprintf("GitHub token: %s\n\n", githubTokenStatusSummary(choice.Secrets)))
 	if model.profileNotice != "" {
-		builder.WriteString(setupHelpStyle.Render(model.profileNotice))
+		builder.WriteString(setupHelpStyle.Render(sanitizeTerminalText(model.profileNotice)))
 		builder.WriteString("\n\n")
 	}
 	builder.WriteString(model.pangolinRegistrationView(choice))
@@ -3360,8 +3709,70 @@ func (model profileSetupModel) dashboardView() string {
 		builder.WriteString(model.stackTable.View())
 	}
 	builder.WriteString("\n")
-	builder.WriteString(setupHelpStyle.Render("Platform runs Network, Proxy, and Observability. Press r to run an action; press s to manage stacks; press g to manage the GitHub token."))
+	builder.WriteString(setupHelpStyle.Render("Keys: r runs the selected stage; h opens history; s manages stacks; Page Up/Down scrolls."))
 	return builder.String()
+}
+
+func (model profileSetupModel) runHistoryView() string {
+	if model.selectedIndex < 0 || model.selectedIndex >= len(model.profiles) {
+		return setupNoProfileSelectedView
+	}
+	choice := model.profiles[model.selectedIndex]
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("Run history for %s\n", sanitizeTerminalLine(firstNonEmpty(choice.Profile.Name, choice.Profile.IP))))
+	builder.WriteString(setupHelpStyle.Render("Saved setup runs are ordered newest first. Select one to inspect its masked local log."))
+	builder.WriteString("\n\n")
+	if model.runDetailLoading {
+		builder.WriteString("Loading the bounded saved-log tail. Press Esc to cancel and return to the dashboard.")
+		return builder.String()
+	}
+	if len(model.runs) == 0 {
+		builder.WriteString("No setup runs have been recorded for this profile.")
+	} else {
+		builder.WriteString(model.runTable.View())
+	}
+	return builder.String()
+}
+
+func (model profileSetupModel) runDetailView() string {
+	run, ok := model.selectedHistoryRun()
+	if !ok {
+		return "No setup run selected."
+	}
+	secrets := ProfileSecrets{}
+	if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
+		secrets = model.profiles[model.selectedIndex].Secrets
+	}
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("Run %s\n\n", sanitizeTerminalLine(run.ID)))
+	builder.WriteString(fmt.Sprintf("Status:  %s\n", sanitizeTerminalLine(firstNonEmpty(run.Status, runStatusPlanned))))
+	builder.WriteString(fmt.Sprintf("Created: %s\n", formatProfileRunTime(run.CreatedAt)))
+	builder.WriteString(fmt.Sprintf("Updated: %s\n", formatProfileRunTime(run.UpdatedAt)))
+	builder.WriteString(fmt.Sprintf("Stages:  %s\n", sanitizeTerminalLine(profileRunStageSummary(run))))
+	if message := maskProfileSecrets(profileRunErrorSummary(run), secrets); message != "" {
+		builder.WriteString(setupErrorStyle.Render("Error: " + message))
+		builder.WriteByte('\n')
+	}
+	builder.WriteString(fmt.Sprintf("Log:     %s\n\n", sanitizeTerminalLine(model.runLogPath)))
+	builder.WriteString("Masked event log\n")
+	builder.WriteString(model.runLogViewport.View())
+	return builder.String()
+}
+
+func (model profileSetupModel) selectedHistoryRun() (SetupRun, bool) {
+	for _, run := range model.runs {
+		if run.ID == model.selectedRunID {
+			return run, true
+		}
+	}
+	return SetupRun{}, false
+}
+
+func formatProfileRunTime(value time.Time) string {
+	if value.IsZero() {
+		return "unknown"
+	}
+	return value.Local().Format("2006-01-02 15:04:05 MST")
 }
 
 func (model profileSetupModel) githubTokenView() string {
@@ -3385,7 +3796,7 @@ func (model profileSetupModel) githubTokenView() string {
 	builder.WriteString("\n")
 	builder.WriteString(model.githubTokenInput.View())
 	builder.WriteString("\n\n")
-	builder.WriteString(setupHelpStyle.Render("Paste a token and press enter to save. Press e to store SERVESTEAD_GITHUB_TOKEN. Press x to remove the saved profile token."))
+	builder.WriteString(setupHelpStyle.Render("Paste a token and press enter to save. Press Ctrl+E to store SERVESTEAD_GITHUB_TOKEN. Press Ctrl+X to remove the saved profile token."))
 	return builder.String()
 }
 
@@ -3430,7 +3841,7 @@ func (model profileSetupModel) stacksView() string {
 	case "":
 		builder.WriteString("unknown\n\n")
 	default:
-		builder.WriteString(setupWarningStyle.Render(model.stackSyncStatus))
+		builder.WriteString(setupWarningStyle.Render(sanitizeTerminalText(model.stackSyncStatus)))
 		advice := " • press y to sync"
 		if model.stackSyncStatus == "commit required" {
 			advice = " • review, stage, and commit first"
@@ -3449,7 +3860,7 @@ func (model profileSetupModel) stacksView() string {
 	}
 	if model.stackNotice != "" {
 		builder.WriteString("\n")
-		builder.WriteString(setupWarningStyle.Render(model.stackNotice))
+		builder.WriteString(setupWarningStyle.Render(sanitizeTerminalText(model.stackNotice)))
 	}
 	return builder.String()
 }
@@ -3493,7 +3904,7 @@ func (model profileSetupModel) stackEditorView() string {
 			}
 			ports = strings.Join(values, ", ")
 		}
-		builder.WriteString(fmt.Sprintf("  %s: %s\n", service.Name, ports))
+		builder.WriteString(fmt.Sprintf("  %s: %s\n", sanitizeTerminalLine(service.Name), ports))
 	}
 	builder.WriteString("\n")
 	builder.WriteString("\n")
@@ -3509,7 +3920,7 @@ func (model profileSetupModel) stackEditorView() string {
 	if len(model.stackEnvironmentKeys) == 0 {
 		builder.WriteString("none")
 	} else {
-		builder.WriteString(fmt.Sprintf("%d key(s): %s", len(model.stackEnvironmentKeys), strings.Join(model.stackEnvironmentKeys, ", ")))
+		builder.WriteString(fmt.Sprintf("%d key(s): %s", len(model.stackEnvironmentKeys), sanitizeTerminalLine(strings.Join(model.stackEnvironmentKeys, ", "))))
 	}
 	builder.WriteString("\n")
 	return builder.String()
@@ -3524,9 +3935,13 @@ func (model profileSetupModel) stackEnvironmentView() string {
 	case stackEnvironmentManual:
 		builder.WriteString(model.stackEnvironmentInput.View())
 	case stackEnvironmentBrowse:
-		builder.WriteString(setupHelpStyle.Render(model.stackEnvironmentPicker.CurrentDirectory))
+		builder.WriteString(setupHelpStyle.Render(sanitizeTerminalLine(model.stackEnvironmentPicker.CurrentDirectory)))
 		builder.WriteString("\n\n")
-		builder.WriteString(model.stackEnvironmentPicker.View())
+		if model.stackEnvironmentBrowserError != "" {
+			builder.WriteString(setupWarningStyle.Render(sanitizeTerminalText(model.stackEnvironmentBrowserError)))
+		} else {
+			builder.WriteString(sanitizeTerminalText(model.stackEnvironmentPicker.View()))
+		}
 	default:
 		for index, option := range model.stackEnvironmentOptions {
 			cursor := "  "
@@ -3535,7 +3950,7 @@ func (model profileSetupModel) stackEnvironmentView() string {
 			}
 			line := cursor + option.label
 			if option.detail != "" {
-				line += " — " + option.detail
+				line += " — " + sanitizeTerminalLine(option.detail)
 			}
 			if index == model.stackEnvironmentCursor {
 				builder.WriteString(setupTitleStyle.Render(line))
@@ -3555,7 +3970,7 @@ func (model profileSetupModel) stackReviewView() string {
 	builder.WriteString("\n\n")
 	builder.WriteString(model.stackInputs[0].View())
 	builder.WriteString("\n\n")
-	builder.WriteString(fmt.Sprintf("Compose: %s\n", model.stackComposePath))
+	builder.WriteString(fmt.Sprintf("Compose: %s\n", sanitizeTerminalLine(model.stackComposePath)))
 	builder.WriteString(fmt.Sprintf("Services: %d total, %d public, %d private\n",
 		len(model.stackServices),
 		publishedStackServiceCount(model.stackResources),
@@ -3566,7 +3981,7 @@ func (model profileSetupModel) stackReviewView() string {
 	} else {
 		builder.WriteString("Routes:\n")
 		for _, resource := range model.stackResources {
-			builder.WriteString(fmt.Sprintf("  %s: %s:%d → %s\n", resource.ID, resource.Service, resource.Port, resource.Subdomain))
+			builder.WriteString(fmt.Sprintf("  %s: %s:%d → %s\n", sanitizeTerminalLine(resource.ID), sanitizeTerminalLine(resource.Service), resource.Port, sanitizeTerminalLine(resource.Subdomain)))
 		}
 	}
 	if len(model.stackEnvironmentKeys) == 0 {
@@ -3604,10 +4019,20 @@ func (model profileSetupModel) stackDeleteConfirmView() string {
 	if !ok {
 		return "No stack selected."
 	}
-	return fmt.Sprintf(
-		"Remove stack %s?\n\nThis deletes its local directory, including Compose and application files. Commit the deletion, then press y in the stack manager to remove the remote deployment.\n",
-		stack.Name,
-	)
+	repositoryPath := ""
+	if model.selectedIndex >= 0 && model.selectedIndex < len(model.profiles) {
+		repositoryPath = model.profiles[model.selectedIndex].Profile.ConfigRepositoryPath
+	}
+	name := safeStackConfirmationName(stack.Name)
+	stackPath := sanitizeTerminalLine(filepath.Join(expandUserPath(repositoryPath), "stacks", stack.Name))
+	want := "delete " + name
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("Remove stack %s?\n\n", name))
+	builder.WriteString(fmt.Sprintf("Local path: %s\n", stackPath))
+	builder.WriteString("This deletes the local stack directory, including Compose and application files. It does not immediately remove the remote deployment.\n\n")
+	builder.WriteString(fmt.Sprintf("Type %q to continue:\n", want))
+	builder.WriteString(model.stackDeleteInput.View())
+	return builder.String()
 }
 
 func (model profileSetupModel) pangolinRegistrationView(choice profileChoice) string {
@@ -3638,7 +4063,7 @@ func (model profileSetupModel) pangolinRegistrationStatusText(proxyComplete bool
 		builder.WriteString(setupWarningStyle.Render("Pangolin registration: unable to verify."))
 		if model.pangolinError != "" {
 			builder.WriteString("\n")
-			builder.WriteString(setupHelpStyle.Render(model.pangolinError))
+			builder.WriteString(setupHelpStyle.Render(sanitizeTerminalText(model.pangolinError)))
 		}
 	default:
 		if proxyComplete {
@@ -3664,7 +4089,7 @@ func (model profileSetupModel) pangolinRegistrationAccessText(choice profileChoi
 	if model.showPangolinAccess {
 		var builder strings.Builder
 		builder.WriteString("\n")
-		printPangolinAdminCredentials(&builder, choice.Profile, choice.Secrets)
+		printTerminalPangolinAdminCredentials(&builder, choice.Profile, choice.Secrets)
 		return builder.String()
 	}
 	return "\n" + setupHelpStyle.Render("Press p to reveal the saved Pangolin admin username and password.")
@@ -3679,8 +4104,26 @@ func (model profileSetupModel) pangolinInitialSetupAccessText(choice profileChoi
 	}
 	var builder strings.Builder
 	builder.WriteString("\n")
-	printPangolinInitialSetupAccess(&builder, choice.Profile.BaseDomain, choice.Secrets.PangolinSetupToken)
+	printTerminalPangolinInitialSetupAccess(&builder, choice.Profile.BaseDomain, choice.Secrets.PangolinSetupToken)
 	return builder.String()
+}
+
+func printTerminalPangolinAdminCredentials(output io.Writer, profile Profile, secrets ProfileSecrets) {
+	fmt.Fprintf(output, "Pangolin URL: https://pangolin.%s\n", sanitizeTerminalLine(profile.BaseDomain))
+	fmt.Fprintf(output, "Username: %s\n", sanitizeTerminalLine(firstNonEmpty(profile.PangolinAdminEmail, profile.LetsEncryptEmail)))
+	fmt.Fprintf(output, "Password: %s\n", terminalCredentialDisplay(secrets.PangolinAdminPassword))
+}
+
+func printTerminalPangolinInitialSetupAccess(output io.Writer, baseDomain, setupToken string) {
+	fmt.Fprintf(output, "Pangolin initial setup: https://pangolin.%s/auth/initial-setup\n", sanitizeTerminalLine(baseDomain))
+	fmt.Fprintf(output, "Setup token: %s\n", terminalCredentialDisplay(setupToken))
+}
+
+func terminalCredentialDisplay(value string) string {
+	if sanitizeTerminalLine(value) == value {
+		return value
+	}
+	return strconv.QuoteToASCII(value) + " (escaped; use pangolin-credentials for exact bytes)"
 }
 
 func (model profileSetupModel) inputView(advanced bool) string {
@@ -3799,12 +4242,12 @@ func (model profileSetupModel) profileReviewLine() string {
 func (model profileSetupModel) repositoryReviewLine() string {
 	switch model.repositoryMode {
 	case "existing":
-		return fmt.Sprintf("Use existing local checkout at %s.", strings.TrimSpace(model.repositoryInputs[0].Value()))
+		return fmt.Sprintf("Use existing local checkout at %s.", sanitizeTerminalLine(model.repositoryInputs[0].Value()))
 	case "github":
-		path := firstNonEmpty(strings.TrimSpace(model.repositoryInputs[0].Value()), "the profile default path under Servestead's config directory")
-		return fmt.Sprintf("Clone %s into %s, then use the committed configuration.", strings.TrimSpace(model.repositoryInputs[1].Value()), path)
+		path := firstNonEmpty(sanitizeTerminalLine(model.repositoryInputs[0].Value()), "the profile default path under Servestead's config directory")
+		return fmt.Sprintf("Clone %s into %s, then use the committed configuration.", sanitizeTerminalLine(model.repositoryInputs[1].Value()), path)
 	default:
-		path := strings.TrimSpace(model.repositoryInputs[0].Value())
+		path := sanitizeTerminalLine(model.repositoryInputs[0].Value())
 		if path == "" {
 			return "Create and commit a new local configuration repository at the profile default path under Servestead's config directory."
 		}
@@ -3813,9 +4256,10 @@ func (model profileSetupModel) repositoryReviewLine() string {
 }
 
 func reviewTargetLabel(options setupCLIOptions) string {
-	label := firstNonEmpty(options.Name, options.ProfileID, options.IP, "(unnamed profile)")
-	if options.IP != "" && label != options.IP {
-		return fmt.Sprintf("%s (%s)", label, options.IP)
+	label := sanitizeTerminalLine(firstNonEmpty(options.Name, options.ProfileID, options.IP, "(unnamed profile)"))
+	ip := sanitizeTerminalLine(options.IP)
+	if ip != "" && label != ip {
+		return fmt.Sprintf("%s (%s)", label, ip)
 	}
 	return label
 }
@@ -3829,12 +4273,46 @@ func (model profileSetupModel) deleteConfirmView() string {
 		return setupNoProfileSelectedView
 	}
 	profile := model.profiles[model.selectedIndex].Profile
+	name := safeProfileConfirmationName(profile)
+	want := "delete " + name
+	path := "unavailable"
+	if resolver, ok := model.profileStore.(interface {
+		ProfileDirectory(string) (string, error)
+	}); ok {
+		if resolved, err := resolver.ProfileDirectory(profile.ID); err == nil {
+			path = resolved
+		}
+	}
 	var builder strings.Builder
 	builder.WriteString("Delete saved profile?\n\n")
-	builder.WriteString(fmt.Sprintf("Profile: %s\n", firstNonEmpty(profile.Name, profile.IP)))
-	builder.WriteString(fmt.Sprintf("IP:      %s\n", profile.IP))
-	builder.WriteString("\nThis removes only local profile files, saved secrets, state, and run logs. It does not change the remote server.\n")
+	builder.WriteString(fmt.Sprintf("Profile: %s\n", name))
+	builder.WriteString(fmt.Sprintf("IP:      %s\n", sanitizeTerminalLine(profile.IP)))
+	builder.WriteString(fmt.Sprintf("Path:    %s\n", sanitizeTerminalLine(path)))
+	builder.WriteString("\nThis removes only local profile files, saved secrets, state, and run logs. It does not change the remote server.\n\n")
+	if model.deleteProfilePending {
+		builder.WriteString("Deleting local profile data...")
+		return builder.String()
+	}
+	builder.WriteString(fmt.Sprintf("Type %q to continue:\n", want))
+	builder.WriteString(model.deleteProfileInput.View())
 	return builder.String()
+}
+
+func safeProfileConfirmationName(profile Profile) string {
+	if name := sanitizeTerminalLine(profile.Name); name != "" {
+		return name
+	}
+	if address := sanitizeTerminalLine(profile.IP); address != "" {
+		return address
+	}
+	return "(unnamed profile)"
+}
+
+func safeStackConfirmationName(name string) string {
+	if safeName := sanitizeTerminalLine(name); safeName != "" {
+		return safeName
+	}
+	return "(unnamed stack)"
 }
 
 type profileSetupHelp struct {
@@ -3847,6 +4325,62 @@ type profileSetupHelp struct {
 	stackEditorFocus     int
 }
 
+type profileSetupHelpView struct {
+	base     profileSetupHelp
+	expanded bool
+	width    int
+}
+
+func (view profileSetupHelpView) ShortHelp() []key.Binding {
+	bindings := view.compactShortHelp(view.base.ShortHelp())
+	if !profileSetupScreenAcceptsText(view.base.screen) {
+		bindings = append(bindings, key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "more")))
+	}
+	return bindings
+}
+
+func (view profileSetupHelpView) FullHelp() [][]key.Binding {
+	bindings := append([]key.Binding(nil), view.base.ShortHelp()...)
+	if !profileSetupScreenAcceptsText(view.base.screen) {
+		label := "more"
+		if view.expanded {
+			label = "less"
+		}
+		bindings = append(bindings, key.NewBinding(key.WithKeys("?"), key.WithHelp("?", label)))
+	}
+	if view.width < 100 || len(bindings) < 6 {
+		return [][]key.Binding{bindings}
+	}
+	middle := (len(bindings) + 1) / 2
+	return [][]key.Binding{bindings[:middle], bindings[middle:]}
+}
+
+func (view profileSetupHelpView) compactShortHelp(bindings []key.Binding) []key.Binding {
+	if view.width <= 0 {
+		return bindings
+	}
+	reserve := 0
+	if !profileSetupScreenAcceptsText(view.base.screen) {
+		reserve = len(" • ? more")
+	}
+	available := max(1, view.width-reserve)
+	compact := make([]key.Binding, 0, len(bindings))
+	used := 0
+	for _, binding := range bindings {
+		help := binding.Help()
+		itemWidth := lipgloss.Width(help.Key) + 1 + lipgloss.Width(help.Desc)
+		if len(compact) > 0 {
+			itemWidth += len(" • ")
+		}
+		if used+itemWidth > available {
+			break
+		}
+		compact = append(compact, binding)
+		used += itemWidth
+	}
+	return compact
+}
+
 func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 	switch helpMap.screen {
 	case profileSetupScreenPicker:
@@ -3857,8 +4391,10 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 		}
 	case profileSetupScreenDashboard:
 		bindings := []key.Binding{
+			key.NewBinding(key.WithKeys("pgup", "pgdown"), key.WithHelp("pgup/pgdn", "scroll")),
 			key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "review")),
 			key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "run stage")),
+			key.NewBinding(key.WithKeys("h"), key.WithHelp("h", "history")),
 			key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "check Pangolin")),
 			key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "stage")),
 			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
@@ -3879,11 +4415,26 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 			bindings = append(bindings, key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "cloud")))
 		}
 		return bindings
+	case profileSetupScreenRunHistory:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "select")),
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "inspect")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+			key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
+		}
+	case profileSetupScreenRunDetail:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "scroll")),
+			key.NewBinding(key.WithKeys("pgup", "pgdown"), key.WithHelp("pgup/pgdn", "page")),
+			key.NewBinding(key.WithKeys("home", "end"), key.WithHelp("home/end", "jump")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+			key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
+		}
 	case profileSetupScreenGitHubToken:
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "save")),
-			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "store env")),
-			key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "remove")),
+			key.NewBinding(key.WithKeys(setupKeyCtrlE), key.WithHelp(setupKeyCtrlE, "store env")),
+			key.NewBinding(key.WithKeys(setupKeyCtrlX), key.WithHelp(setupKeyCtrlX, "remove")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		}
 	case profileSetupScreenIntake:
@@ -3942,12 +4493,14 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 	case profileSetupScreenStackEditor:
 		if helpMap.stackEditorFocus == 0 {
 			return []key.Binding{
+				key.NewBinding(key.WithKeys("pgup", "pgdown"), key.WithHelp("pgup/pgdn", "scroll")),
 				key.NewBinding(key.WithKeys(setupKeyCtrlS), key.WithHelp(setupKeyCtrlS, "save")),
 				key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "routes")),
 				key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 			}
 		}
 		return []key.Binding{
+			key.NewBinding(key.WithKeys("pgup", "pgdown"), key.WithHelp("pgup/pgdn", "scroll")),
 			key.NewBinding(key.WithKeys(setupKeyCtrlS), key.WithHelp(setupKeyCtrlS, "save")),
 			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add route")),
 			key.NewBinding(key.WithKeys("e", "enter"), key.WithHelp("e", "edit route")),
@@ -3987,13 +4540,13 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 		}
 	case profileSetupScreenStackReview:
 		return []key.Binding{
+			key.NewBinding(key.WithKeys("pgup", "pgdown"), key.WithHelp("pgup/pgdn", "scroll")),
 			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "save locally")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		}
 	case profileSetupScreenStackDeleteConfirm:
 		return []key.Binding{
-			key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "remove")),
-			key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "keep")),
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "remove")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		}
 	case profileSetupScreenStackDiff:
@@ -4023,6 +4576,11 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 	case profileSetupScreenCloudRunning:
 		return []key.Binding{
 			key.NewBinding(key.WithKeys(setupKeyCtrlC), key.WithHelp(setupKeyCtrlC, "cancel")),
+			key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "cancel")),
+		}
+	case profileSetupScreenCloudSaveRecovery:
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "retry local save")),
 		}
 	case profileSetupScreenReview:
 		return []key.Binding{
@@ -4035,10 +4593,8 @@ func (helpMap profileSetupHelp) ShortHelp() []key.Binding {
 		}
 	case profileSetupScreenDeleteConfirm:
 		return []key.Binding{
-			key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "delete")),
-			key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "keep")),
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "delete")),
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-			key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		}
 	default:
 		return nil
@@ -4110,6 +4666,8 @@ type fullRunModel struct {
 	config    setupConfig
 	inputs    []textinput.Model
 	focus     int
+	width     int
+	height    int
 	err       string
 	done      bool
 	cancelled bool
@@ -4122,7 +4680,12 @@ func newFullRunModel(config setupConfig) fullRunModel {
 		{label: setupLetsEncryptEmailLabel, placeholder: setupAdminEmailPlaceholder, value: config.LetsEncryptEmail},
 	})
 	inputs[0].Focus()
-	return fullRunModel{config: config, inputs: inputs}
+	return fullRunModel{
+		config: config,
+		inputs: inputs,
+		width:  profileSetupMinWidth,
+		height: profileSetupMinHeight,
+	}
 }
 
 func (model fullRunModel) Init() tea.Cmd {
@@ -4130,6 +4693,15 @@ func (model fullRunModel) Init() tea.Cmd {
 }
 
 func (model fullRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		model.width = size.Width
+		model.height = size.Height
+		fieldWidth := max(10, size.Width-34)
+		for index := range model.inputs {
+			model.inputs[index].SetWidth(fieldWidth)
+		}
+		return model, nil
+	}
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return model, nil
@@ -4138,6 +4710,11 @@ func (model fullRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case setupKeyCtrlC, "esc":
 		model.cancelled = true
 		return model, tea.Quit
+	}
+	if model.setupTerminalTooSmall() {
+		return model, nil
+	}
+	switch key.String() {
 	case "tab", "down":
 		model.inputs[model.focus].Blur()
 		model.focus = (model.focus + 1) % len(model.inputs)
@@ -4166,15 +4743,18 @@ func (model fullRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return model, tea.Quit
 	}
 	var cmd tea.Cmd
-	model.inputs[model.focus], cmd = model.inputs[model.focus].Update(key)
+	model.inputs[model.focus], cmd = updateSetupTextInput(model.inputs[model.focus], key)
 	return model, cmd
 }
 
 func (model fullRunModel) View() tea.View {
+	if model.setupTerminalTooSmall() {
+		return setupMinimumSizeView("Servestead full setup", model.width, model.height)
+	}
 	var builder strings.Builder
 	builder.WriteString(setupTitleStyle.Render("Servestead full setup"))
 	builder.WriteString("\n\n")
-	builder.WriteString(fmt.Sprintf("Profile target: %s\n", model.config.Host))
+	builder.WriteString(fmt.Sprintf("Profile target: %s\n", sanitizeTerminalLine(model.config.Host)))
 	builder.WriteString("Enter the values needed before the full setup run starts.\n\n")
 	for _, input := range model.inputs {
 		builder.WriteString(input.View())
@@ -4182,12 +4762,16 @@ func (model fullRunModel) View() tea.View {
 	}
 	if model.err != "" {
 		builder.WriteString("\n")
-		builder.WriteString(setupErrorStyle.Render(model.err))
+		builder.WriteString(setupErrorStyle.Render(sanitizeTerminalText(model.err)))
 		builder.WriteString("\n")
 	}
 	builder.WriteString("\n")
 	builder.WriteString(setupHelpStyle.Render("Enter advances. Tab changes field. Esc cancels."))
 	return altScreenView(builder.String())
+}
+
+func (model fullRunModel) setupTerminalTooSmall() bool {
+	return model.width < profileSetupMinWidth || model.height < profileSetupMinHeight
 }
 
 func (model fullRunModel) configFromInputs() (setupConfig, error) {
@@ -4211,6 +4795,16 @@ func prepareProfileSetup(options setupCLIOptions, store ProfileStore, output io.
 	if err != nil {
 		return Profile{}, ProfileState{}, setupConfig{}, err
 	}
+	return prepareResolvedProfileSetup(options, store, output, profile, state)
+}
+
+func prepareResolvedProfileSetup(
+	options setupCLIOptions,
+	store ProfileStore,
+	output io.Writer,
+	profile Profile,
+	state ProfileState,
+) (Profile, ProfileState, setupConfig, error) {
 	applySetupOptionsToProfile(&profile, options)
 
 	config, profile, err := completeProfileSetupConfig(profileSetupConfig(profile, options), profile, options, output)
@@ -4231,6 +4825,37 @@ func prepareProfileSetup(options setupCLIOptions, store ProfileStore, output io.
 		return Profile{}, ProfileState{}, setupConfig{}, err
 	}
 	return profile, state, config, nil
+}
+
+func prepareProfileSetupWithOperationLock(
+	options setupCLIOptions,
+	store ProfileStore,
+	output io.Writer,
+) (Profile, ProfileState, setupConfig, profileOperationLock, error) {
+	if options.IP == "" && options.ProfileID == "" {
+		return Profile{}, ProfileState{}, setupConfig{}, nil, errors.New("--ip is required for profile-aware setup")
+	}
+	profile, state, lock, err := resolveAndLockSetupProfile(options, store)
+	if err != nil {
+		return Profile{}, ProfileState{}, setupConfig{}, nil, err
+	}
+	preparedProfile, preparedState, config, err := prepareResolvedProfileSetup(options, store, output, profile, state)
+	if err != nil {
+		releaseProfileOperationLock(lock)
+		return Profile{}, ProfileState{}, setupConfig{}, nil, err
+	}
+	return preparedProfile, preparedState, config, lock, nil
+}
+
+func resolveAndLockSetupProfile(options setupCLIOptions, store ProfileStore) (Profile, ProfileState, profileOperationLock, error) {
+	if options.ProfileID != "" && !options.Fresh {
+		return lockAndLoadProfile(store, options.ProfileID)
+	}
+	profile, _, err := resolveSetupProfile(options, store)
+	if err != nil {
+		return Profile{}, ProfileState{}, nil, err
+	}
+	return lockAndLoadProfile(store, profile.ID)
 }
 
 func profileSetupConfig(profile Profile, options setupCLIOptions) setupConfig {
@@ -4283,6 +4908,16 @@ func prepareProfileStageSetup(options setupCLIOptions, store ProfileStore, stage
 	if err != nil {
 		return Profile{}, ProfileState{}, setupConfig{}, err
 	}
+	return prepareLoadedProfileStageSetup(options, store, stage, profile, state)
+}
+
+func prepareLoadedProfileStageSetup(
+	options setupCLIOptions,
+	store ProfileStore,
+	stage string,
+	profile Profile,
+	state ProfileState,
+) (Profile, ProfileState, setupConfig, error) {
 	applySetupOptionsToProfile(&profile, options)
 	config := profileStageSetupConfig(profile, options, stage)
 	if err := validateStageRunConfig(stage, config); err != nil {
@@ -4299,6 +4934,26 @@ func prepareProfileStageSetup(options setupCLIOptions, store ProfileStore, stage
 		return Profile{}, ProfileState{}, setupConfig{}, err
 	}
 	return profile, state, config, nil
+}
+
+func prepareProfileStageSetupWithOperationLock(
+	options setupCLIOptions,
+	store ProfileStore,
+	stage string,
+) (Profile, ProfileState, setupConfig, profileOperationLock, error) {
+	if options.ProfileID == "" {
+		return Profile{}, ProfileState{}, setupConfig{}, nil, errors.New("a saved profile is required for one-time stage runs")
+	}
+	profile, state, lock, err := lockAndLoadProfile(store, options.ProfileID)
+	if err != nil {
+		return Profile{}, ProfileState{}, setupConfig{}, nil, err
+	}
+	preparedProfile, preparedState, config, err := prepareLoadedProfileStageSetup(options, store, stage, profile, state)
+	if err != nil {
+		releaseProfileOperationLock(lock)
+		return Profile{}, ProfileState{}, setupConfig{}, nil, err
+	}
+	return preparedProfile, preparedState, config, lock, nil
 }
 
 func profileStageSetupConfig(profile Profile, options setupCLIOptions, stage string) setupConfig {
@@ -4605,7 +5260,10 @@ type tuiPresentedError struct {
 	err error
 }
 
-var errReturnToSetup = errors.New("return to setup")
+var (
+	errReturnToSetup = errors.New("return to setup")
+	errSetupQuit     = errors.New("setup quit")
+)
 
 func (presented tuiPresentedError) Error() string {
 	return presented.err.Error()
@@ -4615,7 +5273,31 @@ func (presented tuiPresentedError) Unwrap() error {
 	return presented.err
 }
 
-func runProfileSetupPlan(ctx context.Context, store ProfileStore, profile Profile, state ProfileState, config setupConfig, stdout, stderr io.Writer) error {
+func runProfileSetupPlan(
+	ctx context.Context,
+	store ProfileStore,
+	profile Profile,
+	state ProfileState,
+	config setupConfig,
+	stdout io.Writer,
+	stderr io.Writer,
+	heldLocks ...profileOperationLock,
+) error {
+	var heldLock profileOperationLock
+	if len(heldLocks) > 0 {
+		heldLock = heldLocks[0]
+	}
+	lockedRun, lock, err := lockProfileSetupPlanRun(profileSetupPlanRun{
+		store: store, profile: profile, state: state, config: config,
+		stdout: stdout, stderr: stderr, lock: heldLock,
+	})
+	if err != nil {
+		return err
+	}
+	defer releaseProfileOperationLock(lock)
+	profile = lockedRun.profile
+	state = lockedRun.state
+
 	fmt.Fprintln(stdout, setupSelectedPlanHeader)
 	fmt.Fprint(stdout, setupPlanSummary(config))
 	fmt.Fprintln(stdout)
@@ -4623,7 +5305,6 @@ func runProfileSetupPlan(ctx context.Context, store ProfileStore, profile Profil
 		return err
 	}
 	fmt.Fprintln(stdout, "Preparing the configuration repository before SSH execution...")
-	var err error
 	profile, config, err = prepareDeclarativeSetup(ctx, store, profile, state, config)
 	if err != nil {
 		return err
@@ -4639,10 +5320,11 @@ func runProfileSetupPlan(ctx context.Context, store ProfileStore, profile Profil
 	}
 
 	reporter := &profileRunReporter{
-		store:   store,
-		profile: profile,
-		state:   &state,
-		runID:   runID,
+		store:        store,
+		profile:      profile,
+		state:        &state,
+		runID:        runID,
+		secretValues: setupConfigSecretValues(config),
 	}
 
 	stageRun := setupStageRun{
@@ -4650,13 +5332,13 @@ func runProfileSetupPlan(ctx context.Context, store ProfileStore, profile Profil
 		reporter: reporter, stdout: stdout, stderr: stderr,
 	}
 	if err := runFullSetupStages(ctx, stageRun, completedStages); err != nil {
-		reporter.finishRun(runStatusFailed)
+		reporter.finishRun(profileRunStatusForError(err), err, setupStageForError(err))
 		if reporter.err != nil {
 			return reporter.err
 		}
 		return err
 	}
-	reporter.finishRun(runStatusComplete)
+	reporter.finishRun(runStatusComplete, nil, "")
 	if reporter.err != nil {
 		return reporter.err
 	}
@@ -4675,93 +5357,88 @@ type profileSetupPlanRun struct {
 	config  setupConfig
 	stdout  io.Writer
 	stderr  io.Writer
+	lock    profileOperationLock
+}
+
+func lockProfileSetupPlanRun(run profileSetupPlanRun) (profileSetupPlanRun, profileOperationLock, error) {
+	if run.lock != nil {
+		return run, run.lock, nil
+	}
+	profile, state, lock, err := lockAndLoadProfile(run.store, firstNonEmpty(run.profile.ID, run.config.ProfileID))
+	if err != nil {
+		return profileSetupPlanRun{}, nil, err
+	}
+	run.profile = profile
+	run.state = state
+	run.lock = lock
+	return run, lock, nil
 }
 
 func runProfileSetupPlanWithRunView(ctx context.Context, run profileSetupPlanRun, allowReturn bool) error {
-	var preparation bytes.Buffer
-	fmt.Fprintln(&preparation, setupSelectedPlanHeader)
-	fmt.Fprint(&preparation, setupPlanSummary(run.config))
-	fmt.Fprintln(&preparation)
-	if err := runPreflight(run.config, &preparation); err != nil {
-		return runProfileFailureView(newProfileFailureView(run, "", preparation.String(), err, allowReturn))
-	}
-	fmt.Fprintf(&preparation, "Preparing configuration repository: %s\n", firstNonEmpty(run.config.ConfigRepositoryPath, run.profile.ConfigRepositoryPath, "profile default"))
-	var err error
-	run.profile, run.config, err = prepareDeclarativeSetup(ctx, run.store, run.profile, run.state, run.config)
+	result, err := runProfileSetupWithRunView(ctx, run, "", allowReturn)
 	if err != nil {
-		return runProfileFailureView(newProfileFailureView(run, "", preparation.String(), err, allowReturn))
+		return err
 	}
-	fmt.Fprintf(&preparation, "Configuration repository ready: %s at %s\n", run.config.ConfigRepositoryPath, run.config.ConfigRepositoryCommit)
-
-	completedStages := completedSetupStages(run.state)
-	runID := newSetupRunID()
-	run.state.ActiveRunID = runID
-	run.state.Runs[runID] = newSetupRun(runID, completedStages)
-	if err := run.store.Save(run.profile, run.state); err != nil {
-		return runProfileFailureView(newProfileFailureView(run, "", preparation.String(), err, allowReturn))
-	}
-
-	profileReporter := &profileRunReporter{
-		store:   run.store,
-		profile: run.profile,
-		state:   &run.state,
-		runID:   runID,
-	}
-	runContext, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	messages := make(chan tea.Msg, 256)
-	liveReporter := profileRunUIReporter{messages: messages}
-	reporter := &synchronizedTaskReporter{reporters: []TaskReporter{profileReporter, liveReporter}}
-	model := newProfileRunModel(run.profile, run.config, runID, completedStages, "", messages, cancel)
-	model.allowReturn = allowReturn
-	appendProfileRunOutput(&model, preparation.String())
-	model.start = startProfileRunCommand(runContext, profileRunCommand{
-		stageRun: setupStageRun{
-			profile: run.profile, config: run.config, runID: runID,
-			reporter: reporter,
-		},
-		completedStages: completedStages,
-		profileReporter: profileReporter,
-		messages:        messages,
-	})
-	program := tea.NewProgram(model, tea.WithOutput(run.stderr))
-	finalModel, err := program.Run()
-	if err != nil {
-		return fmt.Errorf("run setup TUI: %w", err)
-	}
-	result, ok := finalModel.(profileRunModel)
-	if !ok {
-		return errors.New("setup run TUI returned an unexpected model")
-	}
-	if result.cancelled {
-		return errors.New("setup cancelled")
-	}
-	if result.returnToSetup {
-		return errReturnToSetup
-	}
-	if result.err != nil {
-		return tuiPresentedError{err: result.err}
-	}
-	if profileReporter.err != nil {
-		return tuiPresentedError{err: profileReporter.err}
-	}
-	printSSHLoginGuidance(run.stdout, run.config)
-	fmt.Fprintf(run.stdout, "\nProxy URL: https://pangolin.%s\n", run.config.BaseDomain)
-	fmt.Fprintf(run.stdout, "Beszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\nDockhand URL: https://dockhand.%s\n", run.config.BaseDomain, run.config.BaseDomain, run.config.BaseDomain)
-	fmt.Fprintln(run.stdout, requiredDNSGuidance(run.config.BaseDomain, run.config.Host))
-	fmt.Fprintf(run.stdout, "Retrieve Pangolin login with: servestead pangolin-credentials --profile %s\n", run.config.ProfileID)
+	printSSHLoginGuidance(run.stdout, result.config)
+	fmt.Fprintf(run.stdout, "\nProxy URL: https://pangolin.%s\n", result.config.BaseDomain)
+	fmt.Fprintf(run.stdout, "Beszel URL: https://beszel.%s\nDozzle URL: https://dozzle.%s\nDockhand URL: https://dockhand.%s\n", result.config.BaseDomain, result.config.BaseDomain, result.config.BaseDomain)
+	fmt.Fprintln(run.stdout, requiredDNSGuidance(result.config.BaseDomain, result.config.Host))
+	fmt.Fprintf(run.stdout, "Retrieve Pangolin login with: servestead pangolin-credentials --profile %s\n", result.config.ProfileID)
 	return nil
 }
 
+func runProfileSetupWithRunView(ctx context.Context, run profileSetupPlanRun, stage string, allowReturn bool) (profileRunModel, error) {
+	lockedRun, lock, err := lockProfileSetupPlanRun(run)
+	if err != nil {
+		return profileRunModel{}, err
+	}
+	lock = guardProfileOperationLock(lock)
+	defer releaseProfileOperationLock(lock)
+	lockedRun.lock = lock
+	run = lockedRun
+
+	runContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	messages := make(chan tea.Msg, 256)
+	model := newPreparingProfileRunModel(runContext, run, stage, messages, cancel, allowReturn)
+	program := tea.NewProgram(model, tea.WithOutput(run.stderr))
+	finalModel, err := program.Run()
+	if err != nil {
+		return profileRunModel{}, fmt.Errorf("run setup TUI: %w", err)
+	}
+	result, ok := finalModel.(profileRunModel)
+	if !ok {
+		return profileRunModel{}, errors.New("setup run TUI returned an unexpected model")
+	}
+	if result.returnToSetup {
+		return result, errReturnToSetup
+	}
+	if result.cancelled {
+		return result, errors.New("setup cancelled")
+	}
+	if result.err != nil {
+		return result, tuiPresentedError{err: result.err}
+	}
+	if result.profileReporter != nil && result.profileReporter.err != nil {
+		return result, tuiPresentedError{err: result.profileReporter.err}
+	}
+	return result, nil
+}
+
 func runProfileSetupStagePlan(ctx context.Context, run profileSetupPlanRun, stage string) error {
+	lockedRun, lock, err := lockProfileSetupPlanRun(run)
+	if err != nil {
+		return err
+	}
+	defer releaseProfileOperationLock(lock)
+	run = lockedRun
+
 	fmt.Fprintf(run.stdout, "Selected one-time stage: %s\n\n", profileRunStageLabel(stage))
 	if err := runPreflight(run.config, run.stdout); err != nil {
 		return err
 	}
 	if stage == "observability" || stage == "platform" || stage == "stacks" || strings.HasPrefix(stage, setupStageStackPrefix) {
 		fmt.Fprintln(run.stdout, "Preparing the configuration repository before SSH execution...")
-		var err error
 		run.profile, run.config, err = prepareDeclarativeSetup(ctx, run.store, run.profile, run.state, run.config)
 		if err != nil {
 			return err
@@ -4777,17 +5454,18 @@ func runProfileSetupStagePlan(ctx context.Context, run profileSetupPlanRun, stag
 	}
 
 	reporter := &profileRunReporter{
-		store:   run.store,
-		profile: run.profile,
-		state:   &run.state,
-		runID:   runID,
+		store:        run.store,
+		profile:      run.profile,
+		state:        &run.state,
+		runID:        runID,
+		secretValues: setupConfigSecretValues(run.config),
 	}
 	stageRun := setupStageRun{
 		profile: run.profile, config: run.config, runID: runID,
 		reporter: reporter, stdout: run.stdout, stderr: run.stderr,
 	}
 	if err := runSetupStage(ctx, stageRun, stage); err != nil {
-		reporter.finishRun(runStatusFailed)
+		reporter.finishRun(profileRunStatusForError(err), err, stage)
 		if reporter.err != nil {
 			return reporter.err
 		}
@@ -4796,7 +5474,7 @@ func runProfileSetupStagePlan(ctx context.Context, run profileSetupPlanRun, stag
 	if stage == "stacks" {
 		run.state.StackRepositoryCommit = run.config.ConfigRepositoryCommit
 	}
-	reporter.finishRun(runStatusComplete)
+	reporter.finishRun(runStatusComplete, nil, "")
 	if reporter.err != nil {
 		return reporter.err
 	}
@@ -4805,74 +5483,11 @@ func runProfileSetupStagePlan(ctx context.Context, run profileSetupPlanRun, stag
 }
 
 func runProfileSetupStagePlanWithRunView(ctx context.Context, run profileSetupPlanRun, stage string, allowReturn bool) error {
-	var preparation bytes.Buffer
-	fmt.Fprintf(&preparation, "Selected one-time stage: %s\n\n", profileRunStageLabel(stage))
-	if err := runPreflight(run.config, &preparation); err != nil {
-		return runProfileFailureView(newProfileFailureView(run, stage, preparation.String(), err, allowReturn))
-	}
-	if stage == "observability" || stage == "platform" || stage == "stacks" || strings.HasPrefix(stage, setupStageStackPrefix) {
-		fmt.Fprintf(&preparation, "Preparing configuration repository: %s\n", firstNonEmpty(run.config.ConfigRepositoryPath, run.profile.ConfigRepositoryPath, "profile default"))
-		var err error
-		run.profile, run.config, err = prepareDeclarativeSetup(ctx, run.store, run.profile, run.state, run.config)
-		if err != nil {
-			return runProfileFailureView(newProfileFailureView(run, stage, preparation.String(), err, allowReturn))
-		}
-		fmt.Fprintf(&preparation, "Configuration repository ready: %s at %s\n", run.config.ConfigRepositoryPath, run.config.ConfigRepositoryCommit)
-	}
-
-	runID := newSetupRunID()
-	run.state.ActiveRunID = runID
-	run.state.Runs[runID] = newSetupRunForStage(runID, stage, completedSetupStages(run.state))
-	if err := run.store.Save(run.profile, run.state); err != nil {
-		return runProfileFailureView(newProfileFailureView(run, stage, preparation.String(), err, allowReturn))
-	}
-
-	profileReporter := &profileRunReporter{
-		store:   run.store,
-		profile: run.profile,
-		state:   &run.state,
-		runID:   runID,
-	}
-	runContext, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	messages := make(chan tea.Msg, 256)
-	liveReporter := profileRunUIReporter{messages: messages}
-	reporter := &synchronizedTaskReporter{reporters: []TaskReporter{profileReporter, liveReporter}}
-	model := newProfileRunModel(run.profile, run.config, runID, completedSetupStages(run.state), stage, messages, cancel)
-	model.allowReturn = allowReturn
-	appendProfileRunOutput(&model, preparation.String())
-	model.start = startProfileStageRunCommand(runContext, profileRunCommand{
-		stageRun: setupStageRun{
-			profile: run.profile, config: run.config, runID: runID,
-			reporter: reporter,
-		},
-		stage:           stage,
-		profileReporter: profileReporter,
-		messages:        messages,
-	})
-	program := tea.NewProgram(model, tea.WithOutput(run.stderr))
-	finalModel, err := program.Run()
+	result, err := runProfileSetupWithRunView(ctx, run, stage, allowReturn)
 	if err != nil {
-		return fmt.Errorf("run setup TUI: %w", err)
+		return err
 	}
-	result, ok := finalModel.(profileRunModel)
-	if !ok {
-		return errors.New("setup run TUI returned an unexpected model")
-	}
-	if result.cancelled {
-		return errors.New("setup cancelled")
-	}
-	if result.returnToSetup {
-		return errReturnToSetup
-	}
-	if result.err != nil {
-		return tuiPresentedError{err: result.err}
-	}
-	if profileReporter.err != nil {
-		return tuiPresentedError{err: profileReporter.err}
-	}
-	printStageCompletionGuidance(run.stdout, run.config, stage)
+	printStageCompletionGuidance(run.stdout, result.config, stage)
 	return nil
 }
 
@@ -4965,7 +5580,7 @@ func runFullSetupStages(ctx context.Context, run setupStageRun, completedStages 
 	}
 	for _, stage := range stages {
 		if err := runFullSetupStage(stage, completedStages, run.stdout); err != nil {
-			return err
+			return setupStageExecutionError{stage: stage.key, err: err}
 		}
 	}
 	return runFullConfiguredStackStages(ctx, run, completedStages)
@@ -5005,6 +5620,27 @@ type fullSetupStage struct {
 	run  func() error
 }
 
+type setupStageExecutionError struct {
+	stage string
+	err   error
+}
+
+func (failure setupStageExecutionError) Error() string {
+	return failure.err.Error()
+}
+
+func (failure setupStageExecutionError) Unwrap() error {
+	return failure.err
+}
+
+func setupStageForError(err error) string {
+	var failure setupStageExecutionError
+	if errors.As(err, &failure) {
+		return failure.stage
+	}
+	return ""
+}
+
 func runFullSetupStage(stage fullSetupStage, completedStages map[string]bool, stdout io.Writer) error {
 	if completedStages[stage.key] {
 		fmt.Fprintln(setupStageWriter(stdout, stage.key, "stdout"), stage.skip)
@@ -5021,7 +5657,7 @@ func runFullConfiguredStackStages(ctx context.Context, run setupStageRun, comple
 			continue
 		}
 		if err := runConfiguredStackStage(ctx, run, stack); err != nil {
-			return err
+			return setupStageExecutionError{stage: stackStage, err: err}
 		}
 	}
 	return nil
@@ -5272,24 +5908,65 @@ func (reporter *synchronizedTaskReporter) Report(event TaskEvent) {
 }
 
 type profileRunUIReporter struct {
+	mu       sync.Mutex
 	messages chan<- tea.Msg
+	dropped  uint64
 }
 
-func (reporter profileRunUIReporter) Report(event TaskEvent) {
+func (reporter *profileRunUIReporter) Report(event TaskEvent) {
+	reporter.mu.Lock()
+	defer reporter.mu.Unlock()
 	message := profileRunEventMsg{event: event}
 	if event.Type == TaskLogLine {
+		if !reporter.flushDroppedLogMarker(event, false) {
+			reporter.dropped++
+			return
+		}
 		select {
 		case reporter.messages <- message:
 		default:
+			reporter.dropped++
 		}
 		return
 	}
+	reporter.flushDroppedLogMarker(event, true)
 	reporter.messages <- message
+}
+
+func (reporter *profileRunUIReporter) flushDroppedLogMarker(event TaskEvent, wait bool) bool {
+	if reporter.dropped == 0 {
+		return true
+	}
+	noun := "lines"
+	if reporter.dropped == 1 {
+		noun = "line"
+	}
+	marker := profileRunEventMsg{event: TaskEvent{
+		Type:   TaskLogLine,
+		RunID:  event.RunID,
+		Stage:  event.Stage,
+		Stream: "servestead",
+		Line:   fmt.Sprintf("[%d live log %s omitted; see saved run history]", reporter.dropped, noun),
+		Time:   event.Time,
+	}}
+	if wait {
+		reporter.messages <- marker
+		reporter.dropped = 0
+		return true
+	}
+	select {
+	case reporter.messages <- marker:
+		reporter.dropped = 0
+		return true
+	default:
+		return false
+	}
 }
 
 type profileRunOutput struct {
 	reporter TaskReporter
 	runID    string
+	writers  *profileRunWriterSet
 }
 
 func (output profileRunOutput) Write(data []byte) (int, error) {
@@ -5298,30 +5975,119 @@ func (output profileRunOutput) Write(data []byte) (int, error) {
 }
 
 func (output profileRunOutput) WriterForStage(stage string, stream string) io.Writer {
-	return &profileRunLogWriter{
-		reporter: output.reporter,
-		runID:    output.runID,
-		stage:    stage,
-		stream:   stream,
+	if output.writers == nil {
+		return &profileRunLogWriter{reporter: output.reporter, runID: output.runID, stage: stage, stream: stream}
+	}
+	return output.writers.writer(output.reporter, output.runID, stage, stream)
+}
+
+func newProfileRunOutput(reporter TaskReporter, runID string) profileRunOutput {
+	return profileRunOutput{
+		reporter: reporter,
+		runID:    runID,
+		writers:  &profileRunWriterSet{writers: map[string]*profileRunLogWriter{}},
+	}
+}
+
+func (output profileRunOutput) Flush() {
+	if output.writers != nil {
+		output.writers.flush()
+	}
+}
+
+type profileRunWriterSet struct {
+	mu      sync.Mutex
+	writers map[string]*profileRunLogWriter
+}
+
+func (set *profileRunWriterSet) writer(reporter TaskReporter, runID, stage, stream string) *profileRunLogWriter {
+	key := stage + "\x00" + stream
+	set.mu.Lock()
+	defer set.mu.Unlock()
+	if writer := set.writers[key]; writer != nil {
+		return writer
+	}
+	writer := &profileRunLogWriter{reporter: reporter, runID: runID, stage: stage, stream: stream}
+	set.writers[key] = writer
+	return writer
+}
+
+func (set *profileRunWriterSet) flush() {
+	set.mu.Lock()
+	writers := make([]*profileRunLogWriter, 0, len(set.writers))
+	for _, writer := range set.writers {
+		writers = append(writers, writer)
+	}
+	set.mu.Unlock()
+	for _, writer := range writers {
+		writer.Flush()
 	}
 }
 
 type profileRunLogWriter struct {
-	reporter TaskReporter
-	runID    string
-	stage    string
-	stream   string
-	partial  string
+	mu            sync.Mutex
+	reporter      TaskReporter
+	runID         string
+	stage         string
+	stream        string
+	partial       []byte
+	lineTruncated bool
 }
 
+const (
+	profileRunLogLineByteLimit       = 64 * 1024
+	profileRunLogPersistByteLimit    = 8 * 1024 * 1024
+	profileRunLogPersistEventLimit   = 10_000
+	profileRunLogDisplayColumnLimit  = 4096
+	profileRunLogLineTruncatedMarker = "[line omitted: exceeded 64 KiB]"
+	profileRunLogPersistenceMarker   = "[additional log output omitted after the saved-run limit]"
+)
+
 func (writer *profileRunLogWriter) Write(data []byte) (int, error) {
-	text := writer.partial + string(data)
-	lines := strings.Split(text, "\n")
-	writer.partial = lines[len(lines)-1]
-	for _, line := range lines[:len(lines)-1] {
-		writer.reportLine(line)
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	written := len(data)
+	for len(data) > 0 {
+		newline := bytes.IndexByte(data, '\n')
+		if newline < 0 {
+			writer.appendFragment(data)
+			break
+		}
+		writer.appendFragment(data[:newline])
+		writer.finishLine()
+		data = data[newline+1:]
 	}
-	return len(data), nil
+	return written, nil
+}
+
+func (writer *profileRunLogWriter) Flush() {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if len(writer.partial) == 0 && !writer.lineTruncated {
+		return
+	}
+	writer.finishLine()
+}
+
+func (writer *profileRunLogWriter) appendFragment(fragment []byte) {
+	remaining := profileRunLogLineByteLimit - len(writer.partial)
+	if remaining <= 0 {
+		writer.lineTruncated = writer.lineTruncated || len(fragment) > 0
+		return
+	}
+	if len(fragment) > remaining {
+		writer.partial = append(writer.partial, fragment[:remaining]...)
+		writer.lineTruncated = true
+		return
+	}
+	writer.partial = append(writer.partial, fragment...)
+}
+
+func (writer *profileRunLogWriter) finishLine() {
+	line := boundedProfileRunLogLine(writer.partial, writer.lineTruncated)
+	writer.partial = writer.partial[:0]
+	writer.lineTruncated = false
+	writer.reportLine(line)
 }
 
 func (writer *profileRunLogWriter) reportLine(line string) {
@@ -5338,13 +6104,130 @@ func (writer *profileRunLogWriter) reportLine(line string) {
 	})
 }
 
+func boundedProfileRunLogLine(line []byte, truncated bool) string {
+	text := strings.ToValidUTF8(string(line), "�")
+	if truncated || len(text) > profileRunLogLineByteLimit {
+		return profileRunLogLineTruncatedMarker
+	}
+	return text
+}
+
 type profileRunEventMsg struct {
 	event TaskEvent
 }
 
 type profileRunFinishedMsg struct {
-	err error
+	err    error
+	status string
+	stage  string
 }
+
+type profileRunPreparationRequest struct {
+	run   profileSetupPlanRun
+	stage string
+}
+
+type profileRunPreparedMsg struct {
+	run                          profileSetupPlanRun
+	stage                        string
+	output                       string
+	secretValues                 []string
+	repositoryPreparationStarted bool
+	repositoryPrepared           bool
+	err                          error
+}
+
+var runProfilePreparation = defaultRunProfilePreparation
+
+func startProfileRunPreparationCommand(ctx context.Context, request profileRunPreparationRequest) tea.Cmd {
+	return func() tea.Msg {
+		return runProfilePreparation(ctx, request)
+	}
+}
+
+func defaultRunProfilePreparation(ctx context.Context, request profileRunPreparationRequest) (result profileRunPreparedMsg) {
+	result.run = request.run
+	result.stage = request.stage
+	result.secretValues = setupConfigSecretValues(request.run.config)
+	var output strings.Builder
+	defer func() {
+		result.output = output.String()
+	}()
+
+	if request.stage == "" {
+		fmt.Fprintln(&output, setupSelectedPlanHeader)
+		fmt.Fprint(&output, setupPlanSummary(request.run.config))
+		fmt.Fprintln(&output)
+	} else {
+		fmt.Fprintf(&output, "Selected one-time stage: %s\n\n", profileRunStageLabel(request.stage))
+	}
+	if err := ctx.Err(); err != nil {
+		result.err = err
+		return result
+	}
+	if err := runPreflight(request.run.config, &output); err != nil {
+		result.err = err
+		return result
+	}
+	if err := ctx.Err(); err != nil {
+		result.err = err
+		return result
+	}
+	if request.stage != "" && !stageUsesRepository(request.stage) {
+		return result
+	}
+	if request.run.store == nil {
+		result.err = errors.New(setupProfileStoreUnavailable)
+		return result
+	}
+
+	profileSecrets, err := request.run.store.LoadSecrets(request.run.profile.ID)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	result.secretValues = append(result.secretValues, profileSecretValues(profileSecrets)...)
+	if token, _ := effectiveGitHubToken(profileSecrets); token != "" {
+		result.secretValues = append(result.secretValues, token)
+	}
+
+	fmt.Fprintf(&output, "Preparing configuration repository: %s\n", firstNonEmpty(
+		request.run.config.ConfigRepositoryPath,
+		request.run.profile.ConfigRepositoryPath,
+		"profile default",
+	))
+	result.repositoryPreparationStarted = true
+	preparedProfile, preparedConfig, err := prepareDeclarativeSetup(
+		ctx,
+		request.run.store,
+		request.run.profile,
+		request.run.state,
+		request.run.config,
+	)
+	result.run.profile = preparedProfile
+	result.run.config = preparedConfig
+	result.secretValues = append(result.secretValues, setupConfigSecretValues(preparedConfig)...)
+	if err != nil {
+		if ctx.Err() != nil {
+			result.err = ctx.Err()
+		} else {
+			result.err = err
+		}
+		return result
+	}
+	result.repositoryPrepared = true
+	if err := ctx.Err(); err != nil {
+		result.err = err
+		return result
+	}
+	fmt.Fprintf(&output, "Configuration repository ready: %s at %s\n", preparedConfig.ConfigRepositoryPath, preparedConfig.ConfigRepositoryCommit)
+	return result
+}
+
+const (
+	profileRunMinWidth  = 64
+	profileRunMinHeight = 21
+)
 
 type profileRunStageView struct {
 	Key       string
@@ -5356,33 +6239,40 @@ type profileRunStageView struct {
 }
 
 type profileRunModel struct {
-	profile        Profile
-	config         setupConfig
-	runID          string
-	messages       <-chan tea.Msg
-	start          tea.Cmd
-	cancel         context.CancelFunc
-	spinner        spinner.Model
-	progress       progress.Model
-	logViewport    viewport.Model
-	stages         []profileRunStageView
-	totalTasks     int
-	completedTasks int
-	currentStage   string
-	currentTask    string
-	logLines       []string
-	stageFilter    string
-	runLabel       string
-	width          int
-	height         int
-	done           bool
-	cancelled      bool
-	allowReturn    bool
-	returnToSetup  bool
-	err            error
+	profile         Profile
+	config          setupConfig
+	runID           string
+	messages        chan tea.Msg
+	start           tea.Cmd
+	runContext      context.Context
+	cancel          context.CancelFunc
+	profileReporter *profileRunReporter
+	operationLock   profileOperationLock
+	spinner         spinner.Model
+	progress        progress.Model
+	logViewport     viewport.Model
+	stages          []profileRunStageView
+	totalTasks      int
+	completedTasks  int
+	currentStage    string
+	currentTask     string
+	logLines        []string
+	pendingLogLines int
+	secretValues    []string
+	stageFilter     string
+	runLabel        string
+	width           int
+	height          int
+	preparing       bool
+	remoteStarted   bool
+	done            bool
+	cancelled       bool
+	allowReturn     bool
+	returnToSetup   bool
+	err             error
 }
 
-func newProfileRunModel(profile Profile, config setupConfig, runID string, completedStages map[string]bool, stageFilter string, messages <-chan tea.Msg, cancel context.CancelFunc) profileRunModel {
+func newProfileRunModel(profile Profile, config setupConfig, runID string, completedStages map[string]bool, stageFilter string, messages chan tea.Msg, cancel context.CancelFunc) profileRunModel {
 	stages, totalTasks, completedTasks := profileRunStageViews(config, completedStages, stageFilter)
 	runSpinner := spinner.New()
 	runSpinner.Spinner = spinner.Dot
@@ -5398,11 +6288,39 @@ func newProfileRunModel(profile Profile, config setupConfig, runID string, compl
 		stages:         stages,
 		totalTasks:     totalTasks,
 		completedTasks: completedTasks,
+		secretValues:   setupConfigSecretValues(config),
 		stageFilter:    stageFilter,
 		runLabel:       profileRunLabel(stageFilter),
 		width:          92,
 		height:         28,
+		remoteStarted:  true,
 	}
+}
+
+func newPreparingProfileRunModel(
+	ctx context.Context,
+	run profileSetupPlanRun,
+	stage string,
+	messages chan tea.Msg,
+	cancel context.CancelFunc,
+	allowReturn bool,
+) profileRunModel {
+	model := newProfileRunModel(run.profile, run.config, "preparation", completedSetupStages(run.state), stage, messages, cancel)
+	model.allowReturn = allowReturn
+	model.preparing = true
+	model.remoteStarted = false
+	model.runContext = ctx
+	model.operationLock = run.lock
+	model.start = startProfileRunPreparationCommand(ctx, profileRunPreparationRequest{run: run, stage: stage})
+	model.appendRunLog(profileRunPreparationStartedLine(stage))
+	return model
+}
+
+func profileRunPreparationStartedLine(stage string) string {
+	if stage == "" || stageUsesRepository(stage) {
+		return "Starting local preflight and configuration repository preparation before SSH execution."
+	}
+	return "Starting local preflight before SSH execution."
 }
 
 func profileRunStageViews(config setupConfig, completedStages map[string]bool, stageFilter string) ([]profileRunStageView, int, int) {
@@ -5543,7 +6461,14 @@ func (model profileRunModel) Init() tea.Cmd {
 	if model.done {
 		return nil
 	}
-	return tea.Batch(model.start, model.spinner.Tick, waitForProfileRunMessage(model.messages))
+	commands := []tea.Cmd{model.spinner.Tick}
+	if model.start != nil {
+		commands = append(commands, model.start)
+	}
+	if !model.preparing && model.messages != nil {
+		commands = append(commands, waitForProfileRunMessage(model.messages))
+	}
+	return tea.Batch(commands...)
 }
 
 func (model profileRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -5557,6 +6482,8 @@ func (model profileRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case profileRunEventMsg:
 		model.applyTaskEvent(msg.event)
 		return model, waitForProfileRunMessage(model.messages)
+	case profileRunPreparedMsg:
+		return model.updatePrepared(msg)
 	case profileRunFinishedMsg:
 		return model.updateFinished(msg)
 	}
@@ -5564,25 +6491,41 @@ func (model profileRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (model profileRunModel) updateWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
+	followLogs := model.logViewport.AtBottom()
 	model.width = msg.Width
 	model.height = msg.Height
-	model.progress.SetWidth(clampInt(msg.Width-12, 24, 72))
+	model.progress.SetWidth(clampInt(msg.Width-26, 24, 60))
 	model.logViewport.SetWidth(clampInt(msg.Width-4, 40, 100))
-	model.logViewport.SetHeight(clampInt(msg.Height-16, 6, 18))
+	model.logViewport.SetHeight(clampInt(msg.Height-len(model.stages)-13, 3, 18))
+	if followLogs || model.logViewport.AtBottom() {
+		model.logViewport.GotoBottom()
+		model.pendingLogLines = 0
+	}
 	return model, nil
 }
 
 func (model profileRunModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "end":
+		model.logViewport.GotoBottom()
+		model.pendingLogLines = 0
+		return model, nil
+	case "up", "k", "down", "j", "pgup", "pgdown":
+		var cmd tea.Cmd
+		model.logViewport, cmd = model.logViewport.Update(msg)
+		if model.logViewport.AtBottom() {
+			model.pendingLogLines = 0
+		}
+		return model, cmd
+	}
 	if model.done {
 		return model.updateDoneKey(msg)
 	}
 	switch msg.String() {
-	case "q", setupKeyCtrlC:
-		return model.cancelRun(msg.String() == "q")
-	case "up", "k", "down", "j", "pgup", "pgdown":
-		var cmd tea.Cmd
-		model.logViewport, cmd = model.logViewport.Update(msg)
-		return model, cmd
+	case setupKeyCtrlC:
+		return model.cancelRun()
+	case "q":
+		return model, nil
 	default:
 		return model, nil
 	}
@@ -5602,14 +6545,18 @@ func (model profileRunModel) updateDoneKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	}
 }
 
-func (model profileRunModel) cancelRun(quit bool) (tea.Model, tea.Cmd) {
+func (model profileRunModel) cancelRun() (tea.Model, tea.Cmd) {
+	if model.cancelled {
+		return model, nil
+	}
 	if model.cancel != nil {
 		model.cancel()
 	}
 	model.cancelled = true
-	model.appendRunLog("Cancelling setup run...")
-	if quit {
-		return model, tea.Quit
+	if model.preparing {
+		model.appendRunLog("Cancelling local preparation before SSH execution...")
+	} else {
+		model.appendRunLog("Cancellation requested. The active remote task may have applied partially; wait for it to stop, then review the saved run before retrying.")
 	}
 	return model, nil
 }
@@ -5624,7 +6571,24 @@ func (model profileRunModel) updateSpinner(msg spinner.TickMsg) (tea.Model, tea.
 }
 
 func (model profileRunModel) updateFinished(msg profileRunFinishedMsg) (tea.Model, tea.Cmd) {
+	releaseProfileOperationLock(model.operationLock)
+	model.operationLock = nil
 	model.done = true
+	if msg.stage != "" {
+		model.setStageStatus(msg.stage, msg.status)
+	}
+	model.clearCurrentTask(model.currentStage)
+	if errors.Is(msg.err, context.Canceled) {
+		model.cancelled = true
+		model.err = nil
+		if model.remoteStarted {
+			model.appendRunLog("Run cancelled. The active remote task may have applied partially; review the saved run and remote state before retrying.")
+		} else {
+			model.appendRunLog("Run cancelled before remote SSH execution started.")
+		}
+		return model, nil
+	}
+	model.cancelled = false
 	model.err = msg.err
 	if msg.err != nil {
 		model.appendRunLog("Run failed: " + msg.err.Error())
@@ -5632,6 +6596,98 @@ func (model profileRunModel) updateFinished(msg profileRunFinishedMsg) (tea.Mode
 	}
 	model.appendRunLog("Run complete.")
 	return model, nil
+}
+
+func (model profileRunModel) updatePrepared(msg profileRunPreparedMsg) (tea.Model, tea.Cmd) {
+	if !model.preparing || msg.stage != model.stageFilter {
+		return model, nil
+	}
+	model.preparing = false
+	model.start = nil
+	model.profile = msg.run.profile
+	model.config = msg.run.config
+	model.secretValues = append(setupConfigSecretValues(msg.run.config), msg.secretValues...)
+	appendProfileRunOutput(&model, msg.output)
+	if model.cancelled {
+		if msg.err != nil && !errors.Is(msg.err, context.Canceled) {
+			return model.updateFinished(profileRunFinishedMsg{err: msg.err})
+		}
+		model.appendRepositoryCancellationNotice(msg)
+		return model.updateFinished(profileRunFinishedMsg{err: context.Canceled})
+	}
+	if msg.err != nil {
+		if errors.Is(msg.err, context.Canceled) {
+			model.appendRepositoryCancellationNotice(msg)
+		}
+		return model.updateFinished(profileRunFinishedMsg{err: msg.err})
+	}
+	model.remoteStarted = true
+
+	completedStages := completedSetupStages(msg.run.state)
+	model.stages, model.totalTasks, model.completedTasks = profileRunStageViews(msg.run.config, completedStages, model.stageFilter)
+	model.logViewport.SetHeight(clampInt(model.height-len(model.stages)-13, 3, 18))
+	model.currentStage = ""
+	model.currentTask = ""
+	model.runID = newSetupRunID()
+	if msg.run.state.Runs == nil {
+		msg.run.state.Runs = map[string]SetupRun{}
+	}
+	msg.run.state.ActiveRunID = model.runID
+	if model.stageFilter == "" {
+		msg.run.state.Runs[model.runID] = newSetupRun(model.runID, completedStages)
+	} else {
+		msg.run.state.Runs[model.runID] = newSetupRunForStage(model.runID, model.stageFilter, completedStages)
+	}
+
+	if model.messages == nil {
+		model.messages = make(chan tea.Msg, 256)
+	}
+	profileReporter := &profileRunReporter{
+		store:        msg.run.store,
+		profile:      msg.run.profile,
+		state:        &msg.run.state,
+		runID:        model.runID,
+		secretValues: model.secretValues,
+	}
+	model.profileReporter = profileReporter
+	liveReporter := &profileRunUIReporter{messages: model.messages}
+	reporter := &synchronizedTaskReporter{reporters: []TaskReporter{profileReporter, liveReporter}}
+	command := profileRunCommand{
+		stageRun: setupStageRun{
+			profile:  msg.run.profile,
+			config:   msg.run.config,
+			runID:    model.runID,
+			reporter: reporter,
+		},
+		completedStages: completedStages,
+		stage:           model.stageFilter,
+		profileReporter: profileReporter,
+		messages:        model.messages,
+		initialize:      true,
+		operationLock:   model.operationLock,
+	}
+	runContext := model.runContext
+	if runContext == nil {
+		runContext = context.Background()
+	}
+	var start tea.Cmd
+	if model.stageFilter == "" {
+		start = startProfileRunCommand(runContext, command)
+	} else {
+		start = startProfileStageRunCommand(runContext, command)
+	}
+	return model, tea.Batch(start, waitForProfileRunMessage(model.messages))
+}
+
+func (model *profileRunModel) appendRepositoryCancellationNotice(msg profileRunPreparedMsg) {
+	if !msg.repositoryPreparationStarted {
+		return
+	}
+	if msg.repositoryPrepared {
+		model.appendRunLog("Local repository preparation completed. No remote SSH commands started.")
+		return
+	}
+	model.appendRunLog("Local repository preparation stopped. Review the local configuration repository before retrying; no remote SSH commands started.")
 }
 
 func waitForProfileRunMessage(messages <-chan tea.Msg) tea.Cmd {
@@ -5650,16 +6706,27 @@ type profileRunCommand struct {
 	stage           string
 	profileReporter *profileRunReporter
 	messages        chan<- tea.Msg
+	initialize      bool
+	operationLock   profileOperationLock
 }
 
 func startProfileRunCommand(ctx context.Context, command profileRunCommand) tea.Cmd {
 	return func() tea.Msg {
 		go func() {
-			output := profileRunOutput{reporter: command.stageRun.reporter, runID: command.stageRun.runID}
+			if err := command.initializeRun(ctx); err != nil {
+				command.sendFinished(err, profileRunStatusForError(err), "")
+				return
+			}
+			if err := ctx.Err(); err != nil {
+				command.finish(err)
+				return
+			}
+			output := newProfileRunOutput(command.stageRun.reporter, command.stageRun.runID)
 			stageRun := command.stageRun
 			stageRun.stdout = output
 			stageRun.stderr = output
 			err := runFullSetupStages(ctx, stageRun, command.completedStages)
+			output.Flush()
 			command.finish(err)
 		}()
 		return nil
@@ -5669,37 +6736,67 @@ func startProfileRunCommand(ctx context.Context, command profileRunCommand) tea.
 func startProfileStageRunCommand(ctx context.Context, command profileRunCommand) tea.Cmd {
 	return func() tea.Msg {
 		go func() {
-			output := profileRunOutput{reporter: command.stageRun.reporter, runID: command.stageRun.runID}
+			if err := command.initializeRun(ctx); err != nil {
+				command.sendFinished(err, profileRunStatusForError(err), "")
+				return
+			}
+			if err := ctx.Err(); err != nil {
+				command.finishStage(err)
+				return
+			}
+			output := newProfileRunOutput(command.stageRun.reporter, command.stageRun.runID)
 			stageRun := command.stageRun
 			stageRun.stdout = output
 			stageRun.stderr = output
 			err := runSetupStage(ctx, stageRun, command.stage)
+			output.Flush()
 			command.finishStage(err)
 		}()
 		return nil
 	}
 }
 
-func (command profileRunCommand) finish(err error) {
-	if err != nil {
-		command.profileReporter.finishRun(runStatusFailed)
-	} else {
-		command.profileReporter.finishRun(runStatusComplete)
+func (command profileRunCommand) initializeRun(ctx context.Context) error {
+	if !command.initialize {
+		return nil
 	}
-	command.sendFinished(command.preferredError(err))
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if command.profileReporter == nil || command.profileReporter.store == nil || command.profileReporter.state == nil {
+		return errors.New(setupProfileStoreUnavailable)
+	}
+	return command.profileReporter.store.Save(command.profileReporter.profile, *command.profileReporter.state)
+}
+
+func (command profileRunCommand) finish(err error) {
+	status := profileRunStatusForError(err)
+	stage := command.profileReporter.finishRun(status, err, setupStageForError(err))
+	command.sendFinished(command.preferredError(err), status, stage)
 }
 
 func (command profileRunCommand) finishStage(err error) {
 	if err != nil {
-		command.profileReporter.finishRun(runStatusFailed)
-		command.sendFinished(command.preferredError(err))
+		status := profileRunStatusForError(err)
+		stage := command.profileReporter.finishRun(status, err, command.stage)
+		command.sendFinished(command.preferredError(err), status, stage)
 		return
 	}
 	if command.stage == "stacks" {
 		command.profileReporter.state.StackRepositoryCommit = command.stageRun.config.ConfigRepositoryCommit
 	}
-	command.profileReporter.finishRun(runStatusComplete)
-	command.sendFinished(command.preferredError(nil))
+	command.profileReporter.finishRun(runStatusComplete, nil, "")
+	command.sendFinished(command.preferredError(nil), runStatusComplete, "")
+}
+
+func profileRunStatusForError(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return runStatusCancelled
+	}
+	if err != nil {
+		return runStatusFailed
+	}
+	return runStatusComplete
 }
 
 func (command profileRunCommand) preferredError(err error) error {
@@ -5709,8 +6806,9 @@ func (command profileRunCommand) preferredError(err error) error {
 	return err
 }
 
-func (command profileRunCommand) sendFinished(err error) {
-	command.messages <- profileRunFinishedMsg{err: err}
+func (command profileRunCommand) sendFinished(err error, status string, stage string) {
+	releaseProfileOperationLock(command.operationLock)
+	command.messages <- profileRunFinishedMsg{err: err, status: status, stage: stage}
 	close(command.messages)
 }
 
@@ -5731,16 +6829,26 @@ func (model *profileRunModel) applyTaskEvent(event TaskEvent) {
 	case TaskSucceeded:
 		model.completedTasks++
 		model.incrementStageCompleted(event.Stage)
+		model.clearCurrentTask(event.Stage)
 	case TaskFailed:
 		model.setStageStatus(event.Stage, stageStatusFailed)
-		model.currentStage = event.Stage
-		model.currentTask = event.TaskName
 		model.appendRunLog(fmt.Sprintf("%s failed: %s", event.TaskName, event.Error))
+		model.clearCurrentTask(event.Stage)
+	case TaskCancelled:
+		model.setStageStatus(event.Stage, stageStatusCancelled)
+		model.appendRunLog(fmt.Sprintf("%s cancelled.", event.TaskName))
+		model.clearCurrentTask(event.Stage)
 	case TaskRunCompleted:
 		model.setStageStatus(event.Stage, stageStatusComplete)
-		model.clearStageCurrent(event.Stage)
+		model.clearCurrentTask(event.Stage)
 		model.appendRunLog(fmt.Sprintf("%s complete.", profileRunStageLabel(event.Stage)))
 	}
+}
+
+func (model *profileRunModel) clearCurrentTask(stage string) {
+	model.clearStageCurrent(stage)
+	model.currentStage = ""
+	model.currentTask = ""
 }
 
 func (model *profileRunModel) setStageStatus(stage string, status string) {
@@ -5783,61 +6891,157 @@ func (model *profileRunModel) incrementStageCompleted(stage string) {
 
 func (model *profileRunModel) appendRunLog(line string) {
 	line = strings.TrimSpace(line)
+	line = maskSecretValues(line, model.secretValues)
+	line = ansi.Truncate(line, profileRunLogDisplayColumnLimit, profileRunLogLineTruncatedMarker)
 	if line == "" {
 		return
 	}
+	followLogs := model.logViewport.AtBottom()
+	offset := model.logViewport.YOffset()
 	model.logLines = append(model.logLines, line)
+	removed := 0
 	if len(model.logLines) > 200 {
+		removed = len(model.logLines) - 200
 		model.logLines = model.logLines[len(model.logLines)-200:]
 	}
 	model.logViewport.SetContent(strings.Join(model.logLines, "\n"))
-	model.logViewport.GotoBottom()
+	if followLogs {
+		model.logViewport.GotoBottom()
+		model.pendingLogLines = 0
+		return
+	}
+	model.logViewport.SetYOffset(max(0, offset-removed))
+	model.pendingLogLines++
 }
 
 func (model profileRunModel) View() tea.View {
+	minimumHeight := model.minimumHeight()
+	if model.width < profileRunMinWidth || model.height < minimumHeight {
+		return model.minimumSizeView(minimumHeight)
+	}
+
 	var builder strings.Builder
 	builder.WriteString(setupTitleStyle.Render("Servestead setup run"))
 	builder.WriteString("\n")
-	builder.WriteString(setupHelpStyle.Render(fmt.Sprintf("%s (%s)", firstNonEmpty(model.profile.Name, model.profile.IP), model.profile.IP)))
+	builder.WriteString(setupHelpStyle.Render(fmt.Sprintf("%s (%s)", sanitizeTerminalLine(firstNonEmpty(model.profile.Name, model.profile.IP)), sanitizeTerminalLine(model.profile.IP))))
 	builder.WriteString("\n\n")
 
-	status := model.spinner.View() + " Running " + model.runLabel
-	if model.done && model.err == nil {
-		status = "Complete"
-	} else if model.done {
-		status = "Failed"
-	} else if model.cancelled {
-		status = model.spinner.View() + " Cancelling setup"
-	}
-	builder.WriteString(status)
+	builder.WriteString(model.statusLabel())
 	builder.WriteString("\n")
 	builder.WriteString(model.progress.ViewAs(model.taskProgress()))
 	builder.WriteString(fmt.Sprintf("  Tasks: %d / %d\n", model.completedTasks, model.totalTasks))
 	builder.WriteString(fmt.Sprintf("Current: %s\n\n", model.currentTaskLabel()))
 
+	builder.WriteString(model.stagesView())
+	builder.WriteString("\n")
+	builder.WriteString(model.logHeading())
+	builder.WriteString("\n")
+	builder.WriteString(model.logViewport.View())
+	builder.WriteString("\n\n")
+	builder.WriteString(model.footerView())
+	return altScreenView(fitTerminalWidth(builder.String(), model.width))
+}
+
+func (model profileRunModel) statusLabel() string {
+	switch {
+	case model.done && model.cancelled:
+		return "Cancelled"
+	case model.done && model.err == nil:
+		return "Complete"
+	case model.done:
+		return "Failed"
+	case model.cancelled:
+		return model.spinner.View() + " Cancelling setup"
+	case model.preparing:
+		return model.spinner.View() + " Preparing " + model.runLabel
+	default:
+		return model.spinner.View() + " Running " + model.runLabel
+	}
+}
+
+func (model profileRunModel) stagesView() string {
+	var builder strings.Builder
 	builder.WriteString("Stages\n")
 	for _, stage := range model.stages {
-		builder.WriteString(fmt.Sprintf("  %-10s %-9s %2d/%-2d", stage.Label, stage.Status, stage.Completed, stage.Total))
+		builder.WriteString(fmt.Sprintf("  %-10s %-9s %2d/%-2d", sanitizeTerminalLine(stage.Label), sanitizeTerminalLine(stage.Status), stage.Completed, stage.Total))
 		if stage.Current != "" {
-			builder.WriteString("  " + stage.Current)
+			builder.WriteString("  " + sanitizeTerminalLine(stage.Current))
 		}
 		builder.WriteString("\n")
 	}
-	builder.WriteString("\nLogs\n")
-	builder.WriteString(model.logViewport.View())
-	builder.WriteString("\n\n")
-	if model.done {
-		if model.err != nil {
-			builder.WriteString(setupErrorStyle.Render(model.err.Error()))
-			builder.WriteString("\n")
+	return builder.String()
+}
+
+func (model profileRunModel) logHeading() string {
+	if model.pendingLogLines == 0 {
+		return "Logs"
+	}
+	lineLabel := "line"
+	if model.pendingLogLines != 1 {
+		lineLabel = "lines"
+	}
+	return fmt.Sprintf("Logs (%d new %s, End to follow)", model.pendingLogLines, lineLabel)
+}
+
+func (model profileRunModel) footerView() string {
+	var builder strings.Builder
+	if model.done && model.err != nil {
+		builder.WriteString(setupErrorStyle.Render(maskSecretValues(model.err.Error(), model.secretValues)))
+		builder.WriteString("\n")
+	}
+	builder.WriteString(setupHelpStyle.Render(model.helpText()))
+	return builder.String()
+}
+
+func (model profileRunModel) helpText() string {
+	if !model.done {
+		if model.preparing {
+			return "Ctrl+C requests cancellation before SSH starts.\nq exits after the run. j/k or up/down scrolls logs; End follows."
 		}
+		return "Ctrl+C requests cancellation; remote changes may be partial.\nq exits after the run. j/k or up/down scrolls logs; End follows."
+	}
+	scrollHelp := "j/k or up/down scroll logs. End follows.\n"
+	if model.cancelled {
+		exitHelp := "esc/q exits."
 		if model.allowReturn {
-			builder.WriteString(setupHelpStyle.Render("esc returns to setup. q exits."))
-		} else {
-			builder.WriteString(setupHelpStyle.Render("esc/q exits. Run setup again to retry failed stages."))
+			exitHelp = "esc returns to setup. q exits."
 		}
-	} else {
-		builder.WriteString(setupHelpStyle.Render("q quits. Ctrl+C cancels. j/k or up/down scroll logs."))
+		return scrollHelp + "Review the saved run and remote state before retrying. " + exitHelp
+	}
+	if model.allowReturn {
+		return scrollHelp + "esc returns to setup. q exits."
+	}
+	if model.err != nil {
+		return scrollHelp + "esc/q exits. Run setup again to retry."
+	}
+	return scrollHelp + "esc/q exits."
+}
+
+func (model profileRunModel) minimumHeight() int {
+	return profileRunMinHeight + max(0, len(model.stages)-len(setupStageOrder))
+}
+
+func (model profileRunModel) minimumSizeView(minimumHeight int) tea.View {
+	var builder strings.Builder
+	builder.WriteString(setupTitleStyle.Render("Servestead setup run"))
+	builder.WriteString("\n\n")
+	builder.WriteString(setupErrorStyle.Render("Terminal too small"))
+	builder.WriteString("\n")
+	builder.WriteString(fmt.Sprintf("Resize to at least %d x %d.\n", profileRunMinWidth, minimumHeight))
+	builder.WriteString(fmt.Sprintf("Current size: %d x %d.\n\n", model.width, model.height))
+	switch {
+	case model.done && model.cancelled:
+		builder.WriteString("Run cancelled. Remote work may have been partially applied. Resize to review results before retrying.\nq exits.")
+	case model.done && model.err != nil:
+		builder.WriteString("Run failed. Resize to view results.\nq exits.")
+	case model.done:
+		builder.WriteString("Run complete. Resize to view results.\nq exits.")
+	case model.cancelled:
+		builder.WriteString("Cancellation is in progress.")
+	case model.preparing:
+		builder.WriteString("Preparation active. Ctrl+C requests cancellation before SSH execution starts.")
+	default:
+		builder.WriteString("Run active. Ctrl+C requests cancellation; remote work may already be partially applied.")
 	}
 	return altScreenView(builder.String())
 }
@@ -5850,16 +7054,28 @@ func (model profileRunModel) taskProgress() float64 {
 }
 
 func (model profileRunModel) currentTaskLabel() string {
-	if model.currentTask == "" {
-		if model.done && model.err != nil {
-			return "stopped before remote execution"
+	if model.preparing {
+		if model.cancelled {
+			return "waiting for local preparation to stop"
 		}
+		if model.stageFilter == "" || stageUsesRepository(model.stageFilter) {
+			return "local preflight and configuration repository"
+		}
+		return "local preflight checks"
+	}
+	if model.currentTask == "" {
 		if model.done {
-			return "complete"
+			return "none"
+		}
+		if model.cancelled {
+			return "waiting for active task to stop"
+		}
+		if model.completedTasks > 0 {
+			return "waiting for next remote task"
 		}
 		return "waiting for first remote task"
 	}
-	return fmt.Sprintf("%s - %s", profileRunStageLabel(model.currentStage), model.currentTask)
+	return fmt.Sprintf("%s - %s", sanitizeTerminalLine(profileRunStageLabel(model.currentStage)), sanitizeTerminalLine(model.currentTask))
 }
 
 func profileRunStageLabel(stage string) string {
@@ -5880,7 +7096,7 @@ func profileRunStageLabel(stage string) string {
 		return "Sync stacks"
 	default:
 		if strings.HasPrefix(stage, setupStageStackPrefix) {
-			return "Stack " + strings.TrimPrefix(stage, setupStageStackPrefix)
+			return "Stack " + sanitizeTerminalLine(strings.TrimPrefix(stage, setupStageStackPrefix))
 		}
 		return "Run"
 	}
@@ -5922,16 +7138,32 @@ func completedSetupStages(state ProfileState) map[string]bool {
 }
 
 type profileRunReporter struct {
-	store   ProfileStore
-	profile Profile
-	state   *ProfileState
-	runID   string
-	err     error
+	store                   ProfileStore
+	profile                 Profile
+	state                   *ProfileState
+	runID                   string
+	secretValues            []string
+	lastStage               string
+	persistedLogBytes       int
+	persistedLogEvents      int
+	logPersistenceTruncated bool
+	err                     error
 }
 
 func (reporter *profileRunReporter) Report(event TaskEvent) {
 	if reporter.err != nil {
 		return
+	}
+	event.Line = maskSecretValues(event.Line, reporter.secretValues)
+	event.Error = maskSecretValues(event.Error, reporter.secretValues)
+	if event.Type == TaskLogLine {
+		event.Line = sanitizeTerminalLine(boundedProfileRunLogLine([]byte(event.Line), false))
+		if !reporter.acceptPersistedLogEvent(event) {
+			return
+		}
+	}
+	if event.Stage != "" {
+		reporter.lastStage = event.Stage
 	}
 	if err := reporter.store.AppendRunEvent(reporter.profile.ID, reporter.runID, event); err != nil {
 		reporter.err = err
@@ -5956,6 +7188,11 @@ func (reporter *profileRunReporter) Report(event TaskEvent) {
 		stage.LastEnded = event.Time
 		stage.LastError = event.Error
 		run.Status = runStatusFailed
+	case TaskCancelled:
+		stage.Status = stageStatusCancelled
+		stage.LastEnded = event.Time
+		stage.LastError = ""
+		run.Status = runStatusCancelled
 	}
 	run.Stages[event.Stage] = stage
 	reporter.state.Runs[reporter.runID] = run
@@ -5964,17 +7201,141 @@ func (reporter *profileRunReporter) Report(event TaskEvent) {
 	}
 }
 
-func (reporter *profileRunReporter) finishRun(status string) {
+func (reporter *profileRunReporter) acceptPersistedLogEvent(event TaskEvent) bool {
+	eventSize := 256 + len(event.RunID) + len(event.Stage) + len(event.Stream) + len(event.TaskName) + len(event.Line)
+	if reporter.persistedLogEvents < profileRunLogPersistEventLimit &&
+		reporter.persistedLogBytes+eventSize <= profileRunLogPersistByteLimit {
+		reporter.persistedLogEvents++
+		reporter.persistedLogBytes += eventSize
+		return true
+	}
+	if reporter.logPersistenceTruncated {
+		return false
+	}
+	reporter.logPersistenceTruncated = true
+	marker := event
+	marker.Line = profileRunLogPersistenceMarker
+	marker.Time = time.Now().UTC()
+	if err := reporter.store.AppendRunEvent(reporter.profile.ID, reporter.runID, marker); err != nil {
+		reporter.err = err
+	}
+	return false
+}
+
+func (reporter *profileRunReporter) finishRun(status string, runErr error, preferredStage string) string {
 	if reporter.err != nil {
-		return
+		return ""
 	}
 	run := reporter.state.Runs[reporter.runID]
+	terminalStage := ""
+	if status == runStatusFailed || status == runStatusCancelled {
+		terminalStage = terminalStageForRun(run, status, preferredStage, reporter.lastStage)
+		if err := reporter.recordTerminalStage(&run, status, terminalStage, runErr); err != nil {
+			reporter.err = err
+			return terminalStage
+		}
+	}
 	run.Status = status
 	run.UpdatedAt = time.Now().UTC()
 	reporter.state.Runs[reporter.runID] = run
 	if err := reporter.store.Save(reporter.profile, *reporter.state); err != nil {
 		reporter.err = err
 	}
+	return terminalStage
+}
+
+func (reporter *profileRunReporter) recordTerminalStage(run *SetupRun, status, stageName string, runErr error) error {
+	if stageName == "" {
+		return nil
+	}
+	wantedStatus := stageStatusFailed
+	eventType := TaskFailed
+	errorText := ""
+	if runErr != nil {
+		errorText = maskSecretValues(runErr.Error(), reporter.secretValues)
+	}
+	if status == runStatusCancelled {
+		wantedStatus = stageStatusCancelled
+		eventType = TaskCancelled
+		errorText = ""
+	}
+	stage := run.Stages[stageName]
+	if stage.Status == wantedStatus {
+		if wantedStatus == stageStatusFailed && stage.LastError == "" {
+			stage.LastError = errorText
+			run.Stages[stageName] = stage
+		}
+		return nil
+	}
+	now := time.Now().UTC()
+	event := TaskEvent{
+		Type:     eventType,
+		RunID:    reporter.runID,
+		Stage:    stageName,
+		TaskName: profileRunStageLabel(stageName),
+		Error:    errorText,
+		Time:     now,
+	}
+	if err := reporter.store.AppendRunEvent(reporter.profile.ID, reporter.runID, event); err != nil {
+		return err
+	}
+	stage.Status = wantedStatus
+	stage.LastEnded = now
+	stage.LastError = errorText
+	run.Stages[stageName] = stage
+	return nil
+}
+
+func terminalStageForRun(run SetupRun, status string, preferredStage string, lastStage string) string {
+	ordered := orderedSetupRunStages(run)
+	wantedStatus := stageStatusFailed
+	if status == runStatusCancelled {
+		wantedStatus = stageStatusCancelled
+	}
+	if last, ok := run.Stages[lastStage]; lastStage != "" && ok && last.Status == wantedStatus {
+		return lastStage
+	}
+	for _, stage := range ordered {
+		if run.Stages[stage].Status == wantedStatus {
+			return stage
+		}
+	}
+	if _, ok := run.Stages[preferredStage]; preferredStage != "" && ok {
+		return preferredStage
+	}
+	for _, stage := range ordered {
+		if run.Stages[stage].Status == stageStatusRunning {
+			return stage
+		}
+	}
+	if _, ok := run.Stages[lastStage]; lastStage != "" && ok {
+		return lastStage
+	}
+	for _, stage := range ordered {
+		if run.Stages[stage].Status == stageStatusPending {
+			return stage
+		}
+	}
+	return ""
+}
+
+func orderedSetupRunStages(run SetupRun) []string {
+	ordered := make([]string, 0, len(run.Stages))
+	seen := map[string]bool{}
+	for _, stage := range setupStageOrder {
+		if _, ok := run.Stages[stage]; ok {
+			ordered = append(ordered, stage)
+			seen[stage] = true
+		}
+	}
+	var extra []string
+	for stage := range run.Stages {
+		if !seen[stage] {
+			extra = append(extra, stage)
+		}
+	}
+	sort.Strings(extra)
+	return append(ordered, extra...)
 }
 
 func runSetupPlan(ctx context.Context, config setupConfig, stdout, stderr io.Writer) error {
@@ -6160,10 +7521,13 @@ type setupModel struct {
 	mode      setupMode
 	inputs    []textinput.Model
 	focus     int
+	width     int
+	height    int
 	err       string
 	config    setupConfig
 	done      bool
 	cancelled bool
+	quit      bool
 }
 
 var (
@@ -6179,8 +7543,19 @@ func altScreenView(content string) tea.View {
 	return view
 }
 
+func fitTerminalWidth(content string, width int) string {
+	if width <= 0 {
+		return content
+	}
+	return lipgloss.NewStyle().Width(width).Render(content)
+}
+
 func newSetupModel() setupModel {
-	return setupModel{step: setupStepMode}
+	return setupModel{
+		step:   setupStepMode,
+		width:  profileSetupMinWidth,
+		height: profileSetupMinHeight,
+	}
 }
 
 func (model setupModel) Init() tea.Cmd {
@@ -6188,6 +7563,15 @@ func (model setupModel) Init() tea.Cmd {
 }
 
 func (model setupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		model.width = size.Width
+		model.height = size.Height
+		fieldWidth := max(10, size.Width-34)
+		for index := range model.inputs {
+			model.inputs[index].SetWidth(fieldWidth)
+		}
+		return model, nil
+	}
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return model, nil
@@ -6199,7 +7583,7 @@ func (model setupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return model, tea.Quit
 	case "q":
 		if model.step != setupStepInput {
-			model.cancelled = true
+			model.quit = true
 			return model, tea.Quit
 		}
 	case "esc":
@@ -6216,6 +7600,9 @@ func (model setupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		model.err = ""
+		return model, nil
+	}
+	if model.setupTerminalTooSmall() {
 		return model, nil
 	}
 
@@ -6250,6 +7637,10 @@ func (model setupModel) updateMode(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return model, nil
 		}
 		model.inputs = setupInputs(model.mode)
+		fieldWidth := max(10, model.width-34)
+		for index := range model.inputs {
+			model.inputs[index].SetWidth(fieldWidth)
+		}
 		model.focus = 0
 		model.inputs[0].Focus()
 		model.step = setupStepInput
@@ -6282,7 +7673,7 @@ func (model setupModel) updateInput(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
-	model.inputs[model.focus], cmd = model.inputs[model.focus].Update(key)
+	model.inputs[model.focus], cmd = updateSetupTextInput(model.inputs[model.focus], key)
 	return model, cmd
 }
 
@@ -6319,6 +7710,9 @@ func (model setupModel) updateConfirm(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (model setupModel) View() tea.View {
+	if model.setupTerminalTooSmall() {
+		return setupMinimumSizeView("Servestead setup", model.width, model.height)
+	}
 	var builder strings.Builder
 	builder.WriteString(setupTitleStyle.Render("Servestead setup"))
 	builder.WriteString("\n\n")
@@ -6331,6 +7725,22 @@ func (model setupModel) View() tea.View {
 	case setupStepConfirm:
 		builder.WriteString(model.confirmStepView())
 	}
+	return altScreenView(builder.String())
+}
+
+func (model setupModel) setupTerminalTooSmall() bool {
+	return model.width < profileSetupMinWidth || model.height < profileSetupMinHeight
+}
+
+func setupMinimumSizeView(title string, width, height int) tea.View {
+	var builder strings.Builder
+	builder.WriteString(setupTitleStyle.Render(title))
+	builder.WriteString("\n\n")
+	builder.WriteString(setupErrorStyle.Render("Terminal too small"))
+	builder.WriteString("\n")
+	builder.WriteString(fmt.Sprintf("Resize to at least %d x %d.\n", profileSetupMinWidth, profileSetupMinHeight))
+	builder.WriteString(fmt.Sprintf("Current size: %d x %d.\n", width, height))
+	builder.WriteString("\nCtrl+C cancels. Resize to continue.")
 	return altScreenView(builder.String())
 }
 
@@ -6364,11 +7774,11 @@ func (model setupModel) inputStepView() string {
 	}
 	if model.err != "" {
 		builder.WriteString("\n")
-		builder.WriteString(setupErrorStyle.Render(model.err))
+		builder.WriteString(setupErrorStyle.Render(sanitizeTerminalText(model.err)))
 		builder.WriteString("\n")
 	}
 	builder.WriteString("\n")
-	builder.WriteString(setupHelpStyle.Render("Enter advances. Tab changes field. Esc goes back. q quits."))
+	builder.WriteString(setupHelpStyle.Render("Enter advances. Tab changes field. Esc goes back."))
 	return builder.String()
 }
 
@@ -6478,15 +7888,46 @@ func newSetupInputs(fields []setupInputField) []textinput.Model {
 		input := textinput.New()
 		input.Prompt = field.label + ": "
 		input.Placeholder = field.placeholder
-		input.SetValue(field.value)
 		input.CharLimit = 256
 		input.SetWidth(72)
 		if field.secret {
 			input.EchoMode = textinput.EchoPassword
 		}
+		input.SetValue(field.value)
+		input = sanitizeSetupTextInput(input)
 		inputs = append(inputs, input)
 	}
 	return inputs
+}
+
+func updateSetupTextInput(input textinput.Model, msg tea.Msg) (textinput.Model, tea.Cmd) {
+	input, command := input.Update(msg)
+	return sanitizeSetupTextInput(input), command
+}
+
+func sanitizeSetupTextInput(input textinput.Model) textinput.Model {
+	if input.EchoMode != textinput.EchoNormal {
+		return input
+	}
+	value := []rune(input.Value())
+	cursor := input.Position()
+	sanitized := make([]rune, 0, len(value))
+	removedBeforeCursor := 0
+	for index, character := range value {
+		if unicode.Is(unicode.Cf, character) {
+			if index < cursor {
+				removedBeforeCursor++
+			}
+			continue
+		}
+		sanitized = append(sanitized, character)
+	}
+	if len(sanitized) == len(value) {
+		return input
+	}
+	input.SetValue(string(sanitized))
+	input.SetCursor(cursor - removedBeforeCursor)
+	return input
 }
 
 func (model setupModel) configFromInputs() (setupConfig, error) {
@@ -6621,53 +8062,61 @@ func expandUserPath(path string) string {
 }
 
 func setupPlanSummary(config setupConfig) string {
+	host := sanitizeTerminalLine(config.Host)
+	initialSSHUser := sanitizeTerminalLine(config.InitialSSHUser)
+	adminUser := sanitizeTerminalLine(config.AdminUser)
+	privateKeyPath := sanitizeTerminalLine(config.PrivateKeyPath)
+	adminPublicKeyPath := sanitizeTerminalLine(config.AdminPublicKeyPath)
+	baseDomain := sanitizeTerminalLine(config.BaseDomain)
+	profileID := sanitizeTerminalLine(firstNonEmpty(config.ProfileID, "(unsaved)"))
+	repositoryPath := sanitizeTerminalLine(firstNonEmpty(config.ConfigRepositoryPath, "the profile's default repository"))
 	switch config.Mode {
 	case setupModeProviderKey:
 		return fmt.Sprintf(
 			"- Generate the Servestead ED25519 keypair at %s.\n- Print the public key and provider registration guidance.\n",
-			config.ProviderKeyPath,
+			sanitizeTerminalLine(config.ProviderKeyPath),
 		)
 	case setupModeDoctor:
 		return "- Run local preflight checks.\n"
 	case setupModeBootstrapHarden:
 		return fmt.Sprintf(
 			"- Connect to %s as %s with %s.\n- Install %s using %s.\n- Harden the server as %s.\n",
-			config.Host,
-			config.InitialSSHUser,
-			config.PrivateKeyPath,
-			config.AdminUser,
-			config.AdminPublicKeyPath,
-			config.AdminUser,
+			host,
+			initialSSHUser,
+			privateKeyPath,
+			adminUser,
+			adminPublicKeyPath,
+			adminUser,
 		)
 	case setupModeHardenOnly:
-		return fmt.Sprintf("- Harden %s as %s using %s.\n", config.Host, config.AdminUser, config.PrivateKeyPath)
+		return fmt.Sprintf("- Harden %s as %s using %s.\n", host, adminUser, privateKeyPath)
 	case setupModeNetwork:
 		return fmt.Sprintf(
 			"- Connect to %s as %s with %s.\n- Configure Docker networking and UFW policy.\n",
-			config.Host,
-			config.AdminUser,
-			config.PrivateKeyPath,
+			host,
+			adminUser,
+			privateKeyPath,
 		)
 	case setupModeProxy:
 		return fmt.Sprintf(
 			"- Connect to %s as %s with %s.\n- Deploy Traefik, Pangolin, Gerbil, Newt, Beszel, Dozzle, and Dockhand for %s.\n- %s.\n",
-			config.Host,
-			config.AdminUser,
-			config.PrivateKeyPath,
-			config.BaseDomain,
-			requiredDNSGuidance(config.BaseDomain, config.Host),
+			host,
+			adminUser,
+			privateKeyPath,
+			baseDomain,
+			sanitizeTerminalLine(requiredDNSGuidance(config.BaseDomain, config.Host)),
 		)
 	case setupModeFullRun:
 		return fmt.Sprintf(
 			"- Use profile %s for %s.\n- Connect first as %s, create or update %s, then harden the server.\n- Configure Docker networking and UFW as %s.\n- Deploy Traefik, Pangolin, Gerbil, Newt, Beszel, Dozzle, and Dockhand for %s.\n- Deploy committed observability configuration from %s.\n- Pangolin and observability secrets are generated, saved, and reused without printing them.\n- %s.\n",
-			firstNonEmpty(config.ProfileID, "(unsaved)"),
-			config.Host,
-			config.InitialSSHUser,
-			config.AdminUser,
-			config.AdminUser,
-			config.BaseDomain,
-			firstNonEmpty(config.ConfigRepositoryPath, "the profile's default repository"),
-			requiredDNSGuidance(config.BaseDomain, config.Host),
+			profileID,
+			host,
+			initialSSHUser,
+			adminUser,
+			adminUser,
+			baseDomain,
+			repositoryPath,
+			sanitizeTerminalLine(requiredDNSGuidance(config.BaseDomain, config.Host)),
 		)
 	default:
 		return "- Unknown plan.\n"

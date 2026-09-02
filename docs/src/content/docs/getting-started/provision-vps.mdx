@@ -1,75 +1,62 @@
 ---
-title: Provision With DigitalOcean
-description: Choose between the concise browser form and the guided Terminal UI before creating a billable Droplet.
+title: Provision with DigitalOcean
+description: Use the guided provider catalog and typed confirmation before creating a billable Droplet.
 ---
 
-import UiScreenshot from '../../../components/UiScreenshot.astro';
-import profileWorkspace from '../../../assets/screenshots/profile-workspace.jpg';
-
-Servestead can create one Ubuntu DigitalOcean Droplet, wait for its public IPv4 address, and save it as a local profile. Provisioning and server setup are separate actions: the new Droplet is not bootstrapped or hardened until you review and run setup.
+Servestead can create one Ubuntu DigitalOcean Droplet, wait for its public IPv4 address, and save it as a local profile. Provisioning and server setup are separate actions. The new Droplet is not bootstrapped or hardened until you review and run setup.
 
 :::caution[Provisioning is billable]
-Submitting a provisioning action calls the DigitalOcean API and creates a real Droplet. The browser form does not load live prices or add a separate confirmation screen. Use the guided Terminal UI when you want catalog details and an explicit typed confirmation before creation.
+The final provisioning confirmation calls the DigitalOcean API and creates a real Droplet. Read the displayed region, size, image, and price before entering the exact confirmation phrase.
 :::
 
-## Choose the Right Provisioning Path
-
-| Path | Best when | Guardrails |
-| --- | --- | --- |
-| **Profiles → New DigitalOcean profile** | You already know the region, size, image slugs, and SSH key identifier. | Concise form; submission creates the Droplet immediately. |
-| **`servestead setup` Terminal UI** | You want guided catalog selection. | Loads regions, sizes, Ubuntu images, SSH keys, hourly/monthly prices, and requires an exact confirmation phrase. |
-
-The **Provision a new DigitalOcean VPS** card in the browser Setup Workbench currently directs you to the existing Terminal UI path. Browser provisioning itself is under **Profiles**.
-
-## Browser Path
-
-<UiScreenshot
-  src={profileWorkspace}
-  alt="Servestead Profiles workspace with a collapsed New DigitalOcean profile form"
-  caption="Open New DigitalOcean profile from Profiles when you already know the exact provider slugs and SSH key identifier."
-/>
-
-1. Launch Servestead Web and open **Profiles**.
-2. Expand **New DigitalOcean profile**.
-3. Enter a short-lived API token, Droplet name, region slug, size slug, image slug, and SSH key ID or fingerprint.
-4. Verify every value before selecting **Provision profile**. Submission creates the billable Droplet.
-5. Wait for the new profile to appear, then select **Setup** and complete the profile, GitOps, and review steps.
-
-Defaults shown by the browser form are:
-
-| Setting | Value |
-| --- | --- |
-| Region | `nyc3` |
-| Size | `s-1vcpu-1gb` |
-| Image | `ubuntu-24-04-x64` |
-
-### Expected Result
-
-The profile appears with DigitalOcean cloud metadata and a public IPv4 address. Setup remains incomplete until you explicitly review and run it.
-
-## Guided Terminal UI Path
+## Guided provisioning
 
 ```sh
 ./bin/servestead setup
 ```
 
-Choose **Provision a new DigitalOcean VPS**. The Terminal UI loads live provider choices and prices, offers to upload the local public key when needed, and requires the exact displayed confirmation phrase.
+Choose **Provision a new DigitalOcean VPS**. The flow asks for a token, Droplet name, and local Servestead key before it loads:
 
-You can provide the token for the current session through a masked prompt or the environment:
+- Available regions.
+- Sizes with CPU, memory, disk, hourly price, and monthly price.
+- Supported Ubuntu images.
+- Existing DigitalOcean SSH keys, plus an option to upload the matching local public key.
+
+The review screen requires the exact displayed phrase. After DigitalOcean assigns an address, Servestead saves the cloud metadata and opens the new profile dashboard. If local persistence fails after creation, retrying saves the already-created Droplet instead of creating another one.
+
+You can provide the token for the current session through the masked prompt or the environment:
 
 ```sh
 export DIGITALOCEAN_ACCESS_TOKEN='...'
 ./bin/servestead setup
 ```
 
-The token is not saved in the profile metadata or profile secrets.
+Servestead does not save the token in profile metadata or profile secrets.
 
-## Restart or Destroy
+## Run server setup
 
-Open the selected profile, choose **Cloud**, and provide a DigitalOcean token for the action.
+Provisioning stops after it saves the profile. From the dashboard, select Bootstrap, Harden, or Platform with `j` and `k`, then press `r`. Use `v` to review the full setup plan when you want to run the complete sequence.
 
-- **Restart** requests a Droplet reboot.
-- **Destroy** requires the exact displayed phrase and permanently deletes the remote Droplet.
-- Destroy keeps the local profile, secrets, state, and logs; the profile is marked as destroyed.
+## Restart or destroy the Droplet
 
-Delete unused Droplets in DigitalOcean when testing is complete.
+From a DigitalOcean-backed profile, press `o`.
+
+- `r` requests a Droplet restart after confirmation.
+- `d` opens the destroy review and requires its exact displayed phrase.
+- Destroying the Droplet keeps the local profile, secrets, state, and logs. The profile records the cloud resource as destroyed.
+- `ctrl+c` requests cancellation while a provider action is running.
+
+Delete unused Droplets when testing is complete.
+
+## Direct command
+
+Use the direct command only when you already know the provider identifiers and your automation supplies its own review boundary:
+
+```sh
+./bin/servestead provision \
+  --provider digitalocean \
+  --name production-vps \
+  --ssh-key provider-key-id-or-fingerprint
+```
+
+Its defaults are region `nyc3`, size `s-1vcpu-1gb`, and image `ubuntu-24-04-x64`. The command creates a billable Droplet and prints its address. It does not save a completed setup plan.

@@ -135,6 +135,69 @@ func TestAgeProviderDeletesStackSecrets(t *testing.T) {
 	}
 }
 
+func TestAgeProviderRejectsManagedSecretSymlink(t *testing.T) {
+	operations := []struct {
+		name string
+		run  func(SecretProvider, StackSecretRef) error
+	}{
+		{name: "get", run: func(provider SecretProvider, ref StackSecretRef) error {
+			_, err := provider.GetStackSecrets(context.Background(), ref)
+			return err
+		}},
+		{name: "list", run: func(provider SecretProvider, ref StackSecretRef) error {
+			_, err := provider.ListStackSecretKeys(context.Background(), ref)
+			return err
+		}},
+		{name: "put", run: func(provider SecretProvider, ref StackSecretRef) error {
+			return provider.PutStackSecrets(context.Background(), ref, SecretSet{"API_KEY": "replacement"})
+		}},
+		{name: "delete", run: func(provider SecretProvider, ref StackSecretRef) error {
+			return provider.DeleteStackSecrets(context.Background(), ref, nil)
+		}},
+	}
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			provider, ref, target, encrypted := newSymlinkedAgeSecretFixture(t)
+			err := operation.run(provider, ref)
+			if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+				t.Fatalf("expected secret symlink rejection, got %v", err)
+			}
+			data, readErr := os.ReadFile(target)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !bytes.Equal(data, encrypted) {
+				t.Fatal("secret operation followed the managed symlink")
+			}
+		})
+	}
+}
+
+func newSymlinkedAgeSecretFixture(t *testing.T) (SecretProvider, StackSecretRef, string, []byte) {
+	t.Helper()
+	provider := newAgeSecretProvider()
+	ref := newAgeProviderTestRef(t)
+	if err := provider.PutStackSecrets(context.Background(), ref, SecretSet{"API_KEY": "original"}); err != nil {
+		t.Fatal(err)
+	}
+	path, err := stackSecretPath(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), stackSecretFilename)
+	if err := os.Rename(path, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("cannot create secret symlink: %v", err)
+	}
+	return provider, ref, target, encrypted
+}
+
 func TestAgeProviderRejectsInvalidInputs(t *testing.T) {
 	provider := newAgeSecretProvider()
 	ref := newAgeProviderTestRef(t)

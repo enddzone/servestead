@@ -1,37 +1,56 @@
 ---
-title: Access and Secrets
-description: Understand which credentials the browser manages, where secrets live, and how to handle stack encryption safely.
+title: Access and secrets
+description: Understand terminal credential controls, local secret storage, and stack encryption recovery.
 ---
 
-Servestead separates profile credentials, encrypted application values, and remote service secrets. Use the browser for status and deliberate profile updates; use the CLI for stack `.env` import and age-key recovery.
+Servestead separates profile credentials, encrypted application values, provider tokens, and remote service secrets.
 
-## Browser Access Workspace
+## Pangolin access in the terminal UI
 
-Open **Profiles**, select a profile, and choose **Access**.
+The profile dashboard reports Pangolin registration without showing saved credentials. Press `p` only when you need the initial setup URL or administrator username and password. The value remains visible in the terminal until you hide it or leave the screen.
 
-The workspace shows whether the GitHub PAT and Pangolin administrator password are configured without displaying either value. It can:
+If an existing Pangolin installation needs credentials for a Platform retry, press `a` and enter its administrator email and password in the masked advanced fields. On a saved profile, `ctrl+s` saves the update without starting a run.
 
-- Reveal the saved GitHub PAT or Pangolin password once in the current session.
-- Update or remove the profile's GitHub PAT.
-- Update the Pangolin administrator email and password.
+You can also print saved credentials directly:
 
-Only reveal a value when you need to use it. Clear the browser view or close the local Servestead session when you are finished.
+```sh
+./bin/servestead pangolin-credentials --profile <profile-id>
+```
 
-## Where Secrets Live
+## GitHub token
+
+Press `g` from the profile dashboard. The token screen reports whether a profile token or `SERVESTEAD_GITHUB_TOKEN` is active.
+
+- Paste a token and press `enter` to save it in the profile.
+- Press `ctrl+e` to copy the current `SERVESTEAD_GITHUB_TOKEN` value into the profile.
+- Press `ctrl+x` to remove the saved profile token.
+
+Prefer a fine-grained token limited to the configuration repository with read-only Contents access. Give it an expiration you can rotate.
+
+The direct alternatives are:
+
+```sh
+./bin/servestead github-token set --profile <profile-id> --file ./github-token.txt
+./bin/servestead github-token status --profile <profile-id>
+./bin/servestead github-token remove --profile <profile-id>
+```
+
+## Where secrets live
 
 | Secret | Storage and use |
 | --- | --- |
-| GitHub PAT | Owner-only local profile secrets; sent over SSH stdin for Git checkout when needed. |
+| GitHub PAT | Owner-only local profile secrets. Servestead sends it over SSH stdin for Git checkout when needed. |
 | Pangolin administrator password | Owner-only local profile secrets. |
-| Pangolin server and Newt credentials | Local profile secrets and the remote platform configuration. |
+| Pangolin server and Newt credentials | Local profile secrets and remote platform configuration. |
 | Application environment values | SOPS-compatible age-encrypted `servestead.secrets.yaml` in the configuration repository. |
 | Observability environment values | Remote `/etc/servestead/observability.env`, mode `0600`. |
+| DigitalOcean API token | Environment or masked field for the current action. It is not saved in the profile. |
 
-Do not commit populated plaintext `.env` files. Commit an `.env.example` when operators need to know the required variable names.
+Do not commit populated plaintext `.env` files.
 
-## Import Stack Secrets
+## Import stack secrets directly
 
-The browser stack editor manages Compose and public-resource metadata, but it does not import a new `.env` file. Use the CLI:
+The terminal stack flow can import an environment file during add or edit. The direct commands are useful for repeatable updates:
 
 ```sh
 ./bin/servestead stack env set \
@@ -39,8 +58,6 @@ The browser stack editor manages Compose and public-resource metadata, but it do
   --stack <name> \
   --file /path/to/.env
 ```
-
-Remove a stack's encrypted environment values with:
 
 ```sh
 ./bin/servestead stack env remove \
@@ -50,7 +67,7 @@ Remove a stack's encrypted environment values with:
 
 Servestead decrypts values locally for deployment, transmits them over SSH stdin for the remote task, and does not write a populated stack `.env` file on the server.
 
-## Back Up the Age Identity
+## Back up the age identity
 
 The profile's age identity is required to recover encrypted stack values. Export it before deleting a profile or moving operation to another machine:
 
@@ -73,6 +90,6 @@ SOPS_AGE_KEY_FILE=/path/to/stack-secret-key.txt \
   sops -d stacks/<name>/servestead.secrets.yaml
 ```
 
-:::caution[The browser is local, not secret-free]
-The Servestead UI is loopback-only and masks credentials by default, but an explicit reveal renders the value in the page. Treat the machine and active browser session as part of the trust boundary.
+:::caution[Terminal output can contain a revealed secret]
+Servestead masks stored values and redacts known secrets from run history. An explicit credential reveal or direct credential command still prints the value. Clear scrollback or close the terminal when your environment requires it.
 :::

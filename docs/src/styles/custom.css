@@ -285,36 +285,6 @@ header.header {
   line-height: 1.5;
 }
 
-.hero > .hero-html {
-  width: 100%;
-  max-width: 46rem;
-  margin: 0;
-}
-
-.hero-product-shot {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  border: 1px solid var(--sv-border);
-  border-radius: 0.9rem;
-  background: var(--sv-crust);
-  box-shadow: 0 28px 90px rgb(0 0 0 / 28%), 0 0 70px var(--sv-glow);
-}
-
-.hero-product-shot img {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-
-.hero-product-shot figcaption {
-  padding: 0.7rem 0.9rem 0.8rem;
-  border-top: 1px solid var(--sv-border);
-  color: var(--sl-color-gray-3);
-  font-size: var(--sl-text-xs);
-  line-height: 1.45;
-}
-
 .sl-markdown-content .workflow-strip {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -430,21 +400,6 @@ header.header {
 
 .sl-markdown-content th {
   color: var(--sl-color-white);
-}
-
-@media (min-width: 50rem) {
-  .hero {
-    grid-template-columns: minmax(20rem, 0.9fr) minmax(28rem, 1.35fr);
-    padding-block: clamp(3rem, 7vw, 6rem);
-  }
-
-  .hero > .hero-html {
-    order: 2;
-  }
-
-  .hero > .stack {
-    order: 1;
-  }
 }
 
 @media (max-width: 62rem) {

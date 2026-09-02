@@ -89,8 +89,14 @@ func TestProfileDashboardHighlightsIncompletePangolinAndRevealsSetupToken(t *tes
 	model.selectedIndex = 0
 	model.refreshDashboard()
 	model.screen = profileSetupScreenDashboard
+	_ = model.checkPangolinRegistration()
 
-	updated, _ := model.Update(pangolinRegistrationStatusMsg{profileID: pangolinRegistrationTestProfileID, complete: false})
+	updated, _ := model.Update(pangolinRegistrationStatusMsg{
+		requestID:  model.pangolinRequestID,
+		profileID:  pangolinRegistrationTestProfileID,
+		baseDomain: pangolinRegistrationTestDomain,
+		complete:   false,
+	})
 	model = updated.(profileSetupModel)
 	view := model.View().Content
 	for _, expected := range []string{
@@ -152,8 +158,14 @@ func TestProfileDashboardRevealsPangolinCredentialsWhenRegistrationComplete(t *t
 	model.selectedIndex = 0
 	model.refreshDashboard()
 	model.screen = profileSetupScreenDashboard
+	_ = model.checkPangolinRegistration()
 
-	updated, _ := model.Update(pangolinRegistrationStatusMsg{profileID: pangolinRegistrationTestProfileID, complete: true})
+	updated, _ := model.Update(pangolinRegistrationStatusMsg{
+		requestID:  model.pangolinRequestID,
+		profileID:  pangolinRegistrationTestProfileID,
+		baseDomain: pangolinRegistrationTestDomain,
+		complete:   true,
+	})
 	model = updated.(profileSetupModel)
 	updated, _ = model.updateProfileDashboard(keyRunes("p"))
 	view := updated.(profileSetupModel).View().Content
@@ -204,5 +216,36 @@ func TestProfileDashboardChecksPangolinBeforeRetryingProxy(t *testing.T) {
 	}
 	if model.pangolinStatus != pangolinRegistrationChecking {
 		t.Fatalf("unexpected status: %s", model.pangolinStatus)
+	}
+}
+
+func TestPangolinRegistrationIgnoresStaleResponses(t *testing.T) {
+	model := newProfileSetupModel([]profileChoice{{
+		Profile: Profile{ID: pangolinRegistrationTestProfileID, BaseDomain: pangolinRegistrationTestDomain},
+		State:   ProfileState{Runs: map[string]SetupRun{}},
+	}})
+	model.selectedIndex = 0
+	model.advanced[4].SetValue("keep-current-password")
+	_ = model.checkPangolinRegistration()
+	firstRequestID := model.pangolinRequestID
+	_ = model.checkPangolinRegistration()
+	latestRequestID := model.pangolinRequestID
+
+	updated, _ := model.Update(pangolinRegistrationStatusMsg{
+		requestID:  latestRequestID,
+		profileID:  pangolinRegistrationTestProfileID,
+		baseDomain: pangolinRegistrationTestDomain,
+		complete:   false,
+	})
+	model = updated.(profileSetupModel)
+	updated, _ = model.Update(pangolinRegistrationStatusMsg{
+		requestID:  firstRequestID,
+		profileID:  pangolinRegistrationTestProfileID,
+		baseDomain: pangolinRegistrationTestDomain,
+		complete:   true,
+	})
+	model = updated.(profileSetupModel)
+	if model.pangolinStatus != pangolinRegistrationIncomplete || model.advanced[4].Value() != "keep-current-password" {
+		t.Fatalf("stale registration result overwrote current state: status=%s password=%q", model.pangolinStatus, model.advanced[4].Value())
 	}
 }

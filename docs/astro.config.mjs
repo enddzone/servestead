@@ -35,7 +35,7 @@ export default defineConfig({
       },
       sidebar: [
         {
-          label: 'Start Here',
+          label: 'Start here',
           items: [
             { label: 'Overview', slug: 'getting-started' },
             { label: 'Requirements', slug: 'getting-started/prerequisites' },
@@ -45,15 +45,15 @@ export default defineConfig({
           ],
         },
         {
-          label: 'Servestead Web',
+          label: 'Terminal workflow',
           items: [
-            { label: 'Command Center', slug: 'guides/command-center' },
-            { label: 'Setup Workbench', slug: 'guides/guided-setup' },
-            { label: 'Profiles and diagnostics', slug: 'guides/profiles-and-diagnostics' },
+            { label: 'Profile dashboard', slug: 'guides/command-center' },
+            { label: 'Guided setup', slug: 'guides/guided-setup' },
+            { label: 'Profiles and run history', slug: 'guides/profiles-and-diagnostics' },
           ],
         },
         {
-          label: 'Deploy and Operate',
+          label: 'Deploy and operate',
           items: [
             { label: 'DNS and proxy', slug: 'guides/dns-and-proxy' },
             { label: 'Add an application stack', slug: 'guides/add-stack' },
@@ -65,8 +65,8 @@ export default defineConfig({
         {
           label: 'Reference',
           items: [
-            { label: 'CLI commands', slug: 'reference/commands' },
             { label: 'Terminal UI', slug: 'reference/terminal-ui' },
+            { label: 'CLI commands', slug: 'reference/commands' },
             { label: 'Security model', slug: 'reference/security-model' },
           ],
         },

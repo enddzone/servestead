@@ -1,55 +1,47 @@
 ---
-title: Start With Servestead
-description: Follow the browser-first path from a fresh Ubuntu VPS to a healthy, Git-backed environment.
+title: Start with Servestead
+description: Follow the terminal workflow from a fresh Ubuntu VPS to a working Git-backed environment.
 ---
 
-import UiScreenshot from '../../../components/UiScreenshot.astro';
-import setupWorkbench from '../../../assets/screenshots/setup-workbench.jpg';
+Servestead guides the full server setup in your terminal. You provide the server and repository details, review the plan, then follow each local and remote task as it runs.
 
-The recommended Servestead path is a short, reviewed workflow in your browser. You provide the server and repository details; Servestead shows the complete plan before it prepares files or opens an SSH connection.
+## Before you begin
 
-## Before You Begin
+Prepare the [local, server, SSH, domain, and DNS requirements](prerequisites/), then [build and launch Servestead](build/).
 
-Have the [local, server, SSH, domain, and DNS requirements](prerequisites/) ready, then [build and launch Servestead Web](build/).
-
-## Choose a Starting Point
+## Choose a starting point
 
 <div class="setup-path">
   <div class="path-card">
     <h3>Connect an existing VPS</h3>
     <p>You already have a fresh Ubuntu server, its public address, and SSH key access. This is the clearest first run.</p>
-    <p><a href="existing-vps/">Connect an existing VPS →</a></p>
+    <p><a href="existing-vps/">Connect an existing VPS</a></p>
   </div>
   <div class="path-card">
     <h3>Provision with DigitalOcean</h3>
-    <p>Create a billable Droplet profile from Profiles, or use the Terminal UI for guided catalog and price selection.</p>
-    <p><a href="provision-vps/">Choose a provisioning path →</a></p>
+    <p>Create a billable Droplet through the guided provider catalog, then review server setup separately.</p>
+    <p><a href="provision-vps/">Provision a VPS</a></p>
   </div>
 </div>
 
-<UiScreenshot
-  src={setupWorkbench}
-  alt="Servestead Setup Workbench with five steps and existing VPS, DigitalOcean, and saved-profile choices"
-  caption="The Setup Workbench makes the five-step sequence visible before any server work begins."
-/>
+## The terminal workflow
 
-## The Browser Workflow
+1. Run `servestead setup`.
+2. Choose an existing profile, **Set up a new server profile**, or **Provision a new DigitalOcean VPS**.
+3. Enter the profile, SSH, domain, and certificate values Servestead needs.
+4. Create a local configuration repository, use an existing checkout, or clone a GitHub repository.
+5. Read the full review screen. Servestead has not prepared the repository or opened an SSH connection yet.
+6. Press `r` to start. Follow stage progress and logs in the run view.
+7. Return to the saved profile and press `h` when you need the persisted run history and redacted log detail.
 
-1. Open **Setup** and choose **Connect existing VPS**, or resume a saved profile.
-2. Enter the profile name, server address, SSH key path, base domain, and certificate email.
-3. Choose whether Servestead should create a local repository, use an existing checkout, or clone GitHub.
-4. Read **Review and confirm**. Repository preparation and SSH execution have not started yet.
-5. Select **Run after review** and follow the live status and logs.
-6. Open **Profiles** after completion to verify setup, GitOps, recent runs, and diagnostics.
+### Expected result
 
-### Expected Result
+The profile dashboard shows completed setup stages and a known repository path. Pangolin and the observability services run on the VPS, while the configuration repository records the deployment input.
 
-The active profile reports a healthy or completed setup state, the configuration repository has a clear Git status, and the Command Center names the next useful action.
-
-:::tip[Simple by default, details when needed]
-The primary screens lead with one status and one next action. Expand profile metadata, repository actions, diffs, advanced setup fields, or diagnostics only when the task requires them.
+:::caution[Start with a disposable VPS]
+Servestead changes SSH access, firewall policy, packages, Docker networking, reverse-proxy configuration, and cloud resources. Learn the workflow on a fresh server before using it on a machine that holds important data.
 :::
 
-## Terminal Alternatives
+## Direct commands
 
-Use `servestead setup` for the full-screen Terminal UI, including guided DigitalOcean catalog selection. Use `servestead setup --ip <address>` for a direct interactive run, or add `--yes` only when every required value is supplied for automation. See [Terminal UI](../reference/terminal-ui/) and [CLI commands](../reference/commands/).
+Use `servestead setup --ip <address>` for an interactive run that starts from a known address. Add `--yes` only after supplying every required value for automation. See [CLI commands](../reference/commands/) for the one-stage and recovery commands.

@@ -46,18 +46,19 @@ func runSecretsInit(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, _, err := store.Load(profileID); err != nil {
-		return fmt.Errorf("load profile: %w", err)
-	}
-	secrets, err := store.LoadSecrets(profileID)
+	var recipient string
+	var created bool
+	_, err = mutateProfileSecretsWhenIdle(
+		store,
+		profileID,
+		"cannot initialize stack secrets while this profile's setup run is active",
+		func(secrets *ProfileSecrets) error {
+			var mutationErr error
+			recipient, created, mutationErr = secrets.EnsureStackSecretIdentity()
+			return mutationErr
+		},
+	)
 	if err != nil {
-		return err
-	}
-	recipient, created, err := secrets.EnsureStackSecretIdentity()
-	if err != nil {
-		return err
-	}
-	if err := store.SaveSecrets(profileID, secrets); err != nil {
 		return err
 	}
 	if created {
@@ -161,18 +162,18 @@ func runSecretsImportKey(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, _, err := store.Load(profileID); err != nil {
-		return fmt.Errorf("load profile: %w", err)
-	}
-	secrets, err := store.LoadSecrets(profileID)
+	var recipient string
+	_, err = mutateProfileSecretsWhenIdle(
+		store,
+		profileID,
+		"cannot import a stack secret identity while this profile's setup run is active",
+		func(secrets *ProfileSecrets) error {
+			var mutationErr error
+			recipient, mutationErr = secrets.SetStackSecretIdentity(string(data))
+			return mutationErr
+		},
+	)
 	if err != nil {
-		return err
-	}
-	recipient, err := secrets.SetStackSecretIdentity(string(data))
-	if err != nil {
-		return err
-	}
-	if err := store.SaveSecrets(profileID, secrets); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "Imported stack secret identity.\nRecipient: %s\n", recipient)

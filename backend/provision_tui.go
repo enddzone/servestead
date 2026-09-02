@@ -32,6 +32,8 @@ const (
 	provisionScreenSSHKey
 	provisionScreenReview
 	provisionScreenCreating
+	provisionScreenSavingProfile
+	provisionScreenSaveRecovery
 	provisionScreenDone
 )
 
@@ -42,29 +44,36 @@ type provisionInputConfig struct {
 }
 
 type digitalOceanProvisionModel struct {
-	ctx                 context.Context // NOSONAR: Bubble Tea's Update method has no context parameter; this is the program-scoped cancellation context.
-	store               ProfileStore
-	screen              provisionScreen
-	inputs              []textinput.Model
-	focus               int
-	catalog             cloudCatalog
-	localPublicKey      string
-	localKeyFingerprint string
-	regionList          list.Model
-	sizeList            list.Model
-	imageList           list.Model
-	keyList             list.Model
-	selectedRegion      cloudRegion
-	selectedSize        cloudSize
-	selectedImage       cloudImage
-	selectedKey         provisionSSHKeyChoice
-	confirmInput        textinput.Model
-	createdProfile      Profile
-	err                 string
-	width               int
-	height              int
-	done                bool
-	cancelled           bool
+	ctx                  context.Context // NOSONAR: Bubble Tea's Update method has no context parameter; this is the program-scoped cancellation context.
+	store                ProfileStore
+	screen               provisionScreen
+	inputs               []textinput.Model
+	focus                int
+	catalog              cloudCatalog
+	localPublicKey       string
+	localKeyFingerprint  string
+	regionList           list.Model
+	sizeList             list.Model
+	imageList            list.Model
+	keyList              list.Model
+	selectedRegion       cloudRegion
+	selectedSize         cloudSize
+	selectedImage        cloudImage
+	selectedKey          provisionSSHKeyChoice
+	confirmInput         textinput.Model
+	createdProfile       Profile
+	pendingProfile       Profile
+	operationCancel      context.CancelFunc
+	cancelling           bool
+	notice               string
+	err                  string
+	width                int
+	height               int
+	done                 bool
+	quit                 bool
+	returnToSetup        bool
+	cancelled            bool
+	remoteOutcomeUnknown bool
 }
 
 type provisionCatalogMsg struct {
@@ -75,6 +84,13 @@ type provisionCatalogMsg struct {
 }
 
 type provisionCreateMsg struct {
+	profile              Profile
+	uploadedKey          cloudSSHKey
+	remoteOutcomeUnknown bool
+	err                  error
+}
+
+type provisionSaveMsg struct {
 	profile Profile
 	err     error
 }
@@ -134,6 +150,8 @@ func (model digitalOceanProvisionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd)
 		return model.updateCatalog(msg)
 	case provisionCreateMsg:
 		return model.updateCreatedProfile(msg)
+	case provisionSaveMsg:
+		return model.updateSavedProfile(msg)
 	case tea.KeyMsg:
 		return model.updateKey(msg)
 	default:
@@ -144,11 +162,22 @@ func (model digitalOceanProvisionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd)
 func (model digitalOceanProvisionModel) updateWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	model.width = msg.Width
 	model.height = msg.Height
+	inputWidth := max(10, msg.Width-24)
+	for index := range model.inputs {
+		model.inputs[index].SetWidth(inputWidth)
+	}
+	model.confirmInput.SetWidth(max(10, msg.Width-22))
 	model.resizeLists()
 	return model, nil
 }
 
 func (model digitalOceanProvisionModel) updateCatalog(msg provisionCatalogMsg) (tea.Model, tea.Cmd) {
+	wasCancelling := model.cancelling
+	model.finishOperation()
+	if wasCancelling {
+		model.cancelled = true
+		return model, tea.Quit
+	}
 	if msg.err != nil {
 		model.screen = provisionScreenInput
 		model.err = msg.err.Error()
@@ -170,33 +199,132 @@ func (model digitalOceanProvisionModel) updateCatalog(msg provisionCatalogMsg) (
 }
 
 func (model digitalOceanProvisionModel) updateCreatedProfile(msg provisionCreateMsg) (tea.Model, tea.Cmd) {
+	wasCancelling := model.cancelling
+	model.finishOperation()
+	if msg.uploadedKey.ID != 0 || msg.uploadedKey.Fingerprint != "" {
+		model.selectedKey = provisionSSHKeyChoice{Key: msg.uploadedKey}
+	}
 	if msg.err != nil {
+		if msg.profile.Cloud != nil && msg.profile.Cloud.ResourceID != "" {
+			model.pendingProfile = msg.profile
+			model.screen = provisionScreenSavingProfile
+			model.err = ""
+			model.notice = fmt.Sprintf(
+				"DigitalOcean created Droplet %s, but Servestead stopped while waiting for its IPv4 address: %v. Saving a recovery profile without calling DigitalOcean again.",
+				msg.profile.Cloud.ResourceID,
+				msg.err,
+			)
+			return model, model.saveProvisionedProfile(msg.profile)
+		}
+		if msg.remoteOutcomeUnknown || wasCancelling {
+			model.cancelled = wasCancelling
+			model.remoteOutcomeUnknown = true
+			model.err = "Servestead did not receive a definitive response from DigitalOcean after sending a create request. The remote outcome is unknown; check DigitalOcean for a new SSH key or billable Droplet before retrying."
+			return model, tea.Quit
+		}
 		model.screen = provisionScreenReview
 		model.err = msg.err.Error()
+		model.confirmInput.SetValue("")
 		model.confirmInput.Focus()
 		return model, nil
 	}
+	model.pendingProfile = msg.profile
+	model.screen = provisionScreenSavingProfile
+	model.err = ""
+	if wasCancelling {
+		model.notice = "Cancellation was requested, but DigitalOcean created the Droplet. Servestead is saving its local profile now."
+	}
+	return model, model.saveProvisionedProfile(msg.profile)
+}
+
+func (model digitalOceanProvisionModel) updateSavedProfile(msg provisionSaveMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		model.screen = provisionScreenSaveRecovery
+		model.err = fmt.Sprintf("save local profile: %v", msg.err)
+		return model, nil
+	}
 	model.createdProfile = msg.profile
+	model.pendingProfile = Profile{}
 	model.done = true
+	model.err = ""
 	model.screen = provisionScreenDone
 	return model, nil
 }
 
 func (model digitalOceanProvisionModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if model.provisionTerminalTooSmall() {
+		if updated, cmd, handled := model.updateGlobalKey(msg); handled {
+			return updated, cmd
+		}
+		return model, nil
+	}
+	// Ctrl+C remains a global cancellation key while a list filter owns normal
+	// text input. The list deliberately owns q and Esc until filtering ends.
+	if msg.String() == "ctrl+c" {
+		if updated, cmd, handled := model.updateGlobalKey(msg); handled {
+			return updated, cmd
+		}
+	}
+	if model.activeListIsFiltering() {
+		return model.updateScreenKey(msg)
+	}
 	if updated, cmd, handled := model.updateGlobalKey(msg); handled {
 		return updated, cmd
 	}
 	return model.updateScreenKey(msg)
 }
 
+func (model digitalOceanProvisionModel) provisionTerminalTooSmall() bool {
+	return model.width > 0 && (model.width < profileSetupMinWidth || model.height < profileSetupMinHeight)
+}
+
+func (model digitalOceanProvisionModel) activeListIsFiltering() bool {
+	switch model.screen {
+	case provisionScreenRegion:
+		return model.regionList.FilterState() == list.Filtering
+	case provisionScreenSize:
+		return model.sizeList.FilterState() == list.Filtering
+	case provisionScreenImage:
+		return model.imageList.FilterState() == list.Filtering
+	case provisionScreenSSHKey:
+		return model.keyList.FilterState() == list.Filtering
+	default:
+		return false
+	}
+}
+
 func (model digitalOceanProvisionModel) updateGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	switch msg.String() {
 	case "ctrl+c":
+		if model.screen == provisionScreenDone {
+			model.quit = true
+			return model, tea.Quit, true
+		}
+		if model.providerOperationBusy() {
+			model.requestOperationCancellation()
+			return model, nil, true
+		}
+		if model.screen == provisionScreenSavingProfile || model.screen == provisionScreenSaveRecovery {
+			model.err = "The Droplet exists. Finish saving its local recovery profile before exiting."
+			return model, nil, true
+		}
 		model.cancelled = true
 		return model, tea.Quit, true
 	case "q":
 		return model.updateQuitKey()
 	case "esc":
+		if model.providerOperationBusy() {
+			model.requestOperationCancellation()
+			return model, nil, true
+		}
+		if model.screen == provisionScreenSavingProfile || model.screen == provisionScreenSaveRecovery {
+			model.err = "The Droplet exists. Save its local profile before going back."
+			return model, nil, true
+		}
+		if model.screen == provisionScreenInput {
+			model.returnToSetup = true
+			return model, tea.Quit, true
+		}
 		model.goBack()
 		model.err = ""
 		return model, nil, true
@@ -207,9 +335,22 @@ func (model digitalOceanProvisionModel) updateGlobalKey(msg tea.KeyMsg) (tea.Mod
 
 func (model digitalOceanProvisionModel) updateQuitKey() (tea.Model, tea.Cmd, bool) {
 	if model.screen == provisionScreenDone {
+		model.quit = true
 		return model, tea.Quit, true
 	}
-	if model.screen != provisionScreenInput && model.screen != provisionScreenReview && model.screen != provisionScreenCreating {
+	if model.providerOperationBusy() {
+		model.requestOperationCancellation()
+		return model, nil, true
+	}
+	if model.screen == provisionScreenSavingProfile {
+		model.err = "The Droplet exists. Wait for the local profile save to finish."
+		return model, nil, true
+	}
+	if model.screen == provisionScreenSaveRecovery {
+		model.err = "The Droplet exists. Press Enter to retry saving its local recovery profile before exiting."
+		return model, nil, true
+	}
+	if model.screen != provisionScreenInput && model.screen != provisionScreenReview {
 		model.cancelled = true
 		return model, tea.Quit, true
 	}
@@ -230,6 +371,13 @@ func (model digitalOceanProvisionModel) updateScreenKey(msg tea.KeyMsg) (tea.Mod
 		return model.updateSSHKey(msg)
 	case provisionScreenReview:
 		return model.updateReview(msg)
+	case provisionScreenSaveRecovery:
+		if msg.String() == "enter" {
+			model.err = ""
+			model.screen = provisionScreenSavingProfile
+			return model, model.saveProvisionedProfile(model.pendingProfile)
+		}
+		return model, nil
 	case provisionScreenDone:
 		if msg.String() == "enter" {
 			return model, tea.Quit
@@ -269,10 +417,11 @@ func (model digitalOceanProvisionModel) updateInput(key tea.KeyMsg) (tea.Model, 
 		}
 		model.err = ""
 		model.screen = provisionScreenLoading
-		return model, model.loadCatalog(config)
+		operationCtx := model.beginOperation()
+		return model, model.loadCatalog(operationCtx, config)
 	}
 	var cmd tea.Cmd
-	model.inputs[model.focus], cmd = model.inputs[model.focus].Update(key)
+	model.inputs[model.focus], cmd = updateSetupTextInput(model.inputs[model.focus], key)
 	return model, cmd
 }
 
@@ -396,11 +545,13 @@ func (model digitalOceanProvisionModel) updateReview(key tea.KeyMsg) (tea.Model,
 		}
 		model.confirmInput.Blur()
 		model.err = ""
+		model.notice = ""
 		model.screen = provisionScreenCreating
-		return model, model.createDroplet(config)
+		operationCtx := model.beginOperation()
+		return model, model.createDroplet(operationCtx, config)
 	}
 	var cmd tea.Cmd
-	model.confirmInput, cmd = model.confirmInput.Update(key)
+	model.confirmInput, cmd = updateSetupTextInput(model.confirmInput, key)
 	return model, cmd
 }
 
@@ -419,7 +570,7 @@ func (model *digitalOceanProvisionModel) goBack() {
 	case provisionScreenReview:
 		model.confirmInput.Blur()
 		model.screen = provisionScreenSSHKey
-	case provisionScreenCreating:
+	case provisionScreenCreating, provisionScreenSavingProfile, provisionScreenSaveRecovery:
 		return
 	case provisionScreenDone:
 		return
@@ -427,8 +578,8 @@ func (model *digitalOceanProvisionModel) goBack() {
 }
 
 func (model *digitalOceanProvisionModel) resizeLists() {
-	width := max(40, model.width-4)
-	height := max(8, model.height-9)
+	width := max(20, model.width-4)
+	height := max(4, model.height-9)
 	model.regionList.SetSize(width, height)
 	model.sizeList.SetSize(width, height)
 	model.imageList.SetSize(width, height)
@@ -448,6 +599,9 @@ func (model digitalOceanProvisionModel) inputConfig() (provisionInputConfig, err
 	if strings.ContainsAny(name, "\r\n") {
 		return provisionInputConfig{}, errors.New("Droplet name must not contain newlines")
 	}
+	if sanitizeTerminalLine(name) != name {
+		return provisionInputConfig{}, errors.New("Droplet name must not contain terminal control characters")
+	}
 	if privateKey == "" {
 		return provisionInputConfig{}, errors.New("Servestead private key path is required")
 	}
@@ -458,13 +612,47 @@ func (model digitalOceanProvisionModel) inputConfigName() string {
 	return strings.TrimSpace(model.inputs[1].Value())
 }
 
-func (model digitalOceanProvisionModel) loadCatalog(config provisionInputConfig) tea.Cmd {
+func (model *digitalOceanProvisionModel) beginOperation() context.Context {
+	base := model.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	operationCtx, cancel := context.WithCancel(base)
+	model.operationCancel = cancel
+	model.cancelling = false
+	return operationCtx
+}
+
+func (model *digitalOceanProvisionModel) finishOperation() {
+	if model.operationCancel != nil {
+		model.operationCancel()
+	}
+	model.operationCancel = nil
+	model.cancelling = false
+}
+
+func (model digitalOceanProvisionModel) providerOperationBusy() bool {
+	return model.screen == provisionScreenLoading || model.screen == provisionScreenCreating
+}
+
+func (model *digitalOceanProvisionModel) requestOperationCancellation() {
+	if model.cancelling {
+		return
+	}
+	model.cancelling = true
+	model.err = ""
+	if model.operationCancel != nil {
+		model.operationCancel()
+	}
+}
+
+func (model digitalOceanProvisionModel) loadCatalog(ctx context.Context, config provisionInputConfig) tea.Cmd {
 	return func() tea.Msg {
 		publicKey, fingerprint, err := readProvisionPublicKey(config.PrivateKeyPath)
 		if err != nil {
 			return provisionCatalogMsg{err: err}
 		}
-		catalog, err := newProvisionCloudProvider(config.Token).Catalog(model.ctx)
+		catalog, err := newProvisionCloudProvider(config.Token).Catalog(ctx)
 		return provisionCatalogMsg{
 			catalog:     catalog,
 			publicKey:   publicKey,
@@ -474,19 +662,24 @@ func (model digitalOceanProvisionModel) loadCatalog(config provisionInputConfig)
 	}
 }
 
-func (model digitalOceanProvisionModel) createDroplet(config provisionInputConfig) tea.Cmd {
+func (model digitalOceanProvisionModel) createDroplet(ctx context.Context, config provisionInputConfig) tea.Cmd {
 	return func() tea.Msg {
 		provider := newProvisionCloudProvider(config.Token)
 		keyReference := model.selectedKeyReference()
+		var uploadedKey cloudSSHKey
 		if model.selectedKey.Upload {
 			keyName := provisionSSHKeyName(config.PrivateKeyPath)
-			key, err := provider.CreateSSHKey(model.ctx, keyName, model.localPublicKey)
+			key, err := provider.CreateSSHKey(ctx, keyName, model.localPublicKey)
 			if err != nil {
-				return provisionCreateMsg{err: fmt.Errorf("upload DigitalOcean SSH key: %w", err)}
+				return provisionCreateMsg{
+					remoteOutcomeUnknown: cloudMutationOutcomeUnknown(err),
+					err:                  fmt.Errorf("upload DigitalOcean SSH key: %w", err),
+				}
 			}
+			uploadedKey = key
 			keyReference = strconv.Itoa(key.ID)
 		}
-		created, err := provider.Create(model.ctx, provisionConfig{
+		created, err := provider.Create(ctx, provisionConfig{
 			Name:   config.Name,
 			Region: model.selectedRegion.Slug,
 			Size:   model.selectedSize.Slug,
@@ -494,13 +687,30 @@ func (model digitalOceanProvisionModel) createDroplet(config provisionInputConfi
 			SSHKey: keyReference,
 		})
 		if err != nil {
-			return provisionCreateMsg{err: fmt.Errorf("create DigitalOcean Droplet: %w", err)}
+			message := provisionCreateMsg{
+				uploadedKey:          uploadedKey,
+				remoteOutcomeUnknown: cloudMutationOutcomeUnknown(err),
+				err:                  fmt.Errorf("create DigitalOcean Droplet: %w", err),
+			}
+			if created.ID != "" {
+				message.profile = newProvisionedDigitalOceanProfile(config, model, created)
+			}
+			return message
 		}
-		profile, err := saveProvisionedDigitalOceanProfile(model.store, config, model, created)
-		if err != nil {
-			return provisionCreateMsg{err: err}
+		return provisionCreateMsg{
+			profile:     newProvisionedDigitalOceanProfile(config, model, created),
+			uploadedKey: uploadedKey,
 		}
-		return provisionCreateMsg{profile: profile}
+	}
+}
+
+func (model digitalOceanProvisionModel) saveProvisionedProfile(profile Profile) tea.Cmd {
+	return func() tea.Msg {
+		if model.store == nil {
+			return provisionSaveMsg{profile: profile, err: errors.New("profile store is unavailable")}
+		}
+		saved, err := model.store.Create(profile)
+		return provisionSaveMsg{profile: saved, err: err}
 	}
 }
 
@@ -512,10 +722,20 @@ func (model digitalOceanProvisionModel) selectedKeyReference() string {
 }
 
 func (model digitalOceanProvisionModel) View() tea.View {
+	if model.provisionTerminalTooSmall() {
+		return altScreenView(fmt.Sprintf(
+			"Provision a DigitalOcean VPS\n\nTerminal too small: %dx%d\nResize to at least %dx%d to continue.",
+			model.width,
+			model.height,
+			profileSetupMinWidth,
+			profileSetupMinHeight,
+		))
+	}
 	var builder strings.Builder
 	builder.WriteString(setupTitleStyle.Render("Provision a DigitalOcean VPS"))
 	builder.WriteString("\n")
-	builder.WriteString(setupHelpStyle.Render("This creates one billable Droplet. Bootstrap and hardening remain separate setup actions."))
+	tagline := "This creates one billable Droplet. Bootstrap and hardening remain separate setup actions."
+	builder.WriteString(setupHelpStyle.Render(truncateForTable(tagline, max(1, model.width))))
 	builder.WriteString("\n\n")
 
 	switch model.screen {
@@ -526,54 +746,77 @@ func (model digitalOceanProvisionModel) View() tea.View {
 			builder.WriteString("\n")
 		}
 	case provisionScreenLoading:
-		builder.WriteString("Loading DigitalOcean regions, sizes, images, and SSH keys...\n")
+		if model.cancelling {
+			builder.WriteString("Cancelling the DigitalOcean catalog request...\n")
+		} else {
+			builder.WriteString("Loading DigitalOcean regions, sizes, images, and SSH keys...\n")
+		}
 	case provisionScreenRegion:
 		builder.WriteString("Choose a region. Press / to filter.\n\n")
 		builder.WriteString(model.regionList.View())
 	case provisionScreenSize:
-		builder.WriteString(fmt.Sprintf("Region: %s (%s)\n", model.selectedRegion.Name, model.selectedRegion.Slug))
+		builder.WriteString(fmt.Sprintf("Region: %s (%s)\n", sanitizeTerminalLine(model.selectedRegion.Name), sanitizeTerminalLine(model.selectedRegion.Slug)))
 		builder.WriteString("Choose a size. Prices come from the DigitalOcean API. Press / to filter.\n\n")
 		builder.WriteString(model.sizeList.View())
 	case provisionScreenImage:
-		builder.WriteString(fmt.Sprintf("Region: %s • Size: %s\n", model.selectedRegion.Slug, model.selectedSize.Slug))
+		builder.WriteString(fmt.Sprintf("Region: %s • Size: %s\n", sanitizeTerminalLine(model.selectedRegion.Slug), sanitizeTerminalLine(model.selectedSize.Slug)))
 		builder.WriteString("Choose an Ubuntu image. Press / to filter.\n\n")
 		builder.WriteString(model.imageList.View())
 	case provisionScreenSSHKey:
-		builder.WriteString(fmt.Sprintf("Local key fingerprint: %s\n", model.localKeyFingerprint))
+		builder.WriteString(fmt.Sprintf("Local key fingerprint: %s\n", sanitizeTerminalLine(model.localKeyFingerprint)))
 		builder.WriteString("Choose an existing provider key or upload the local public key.\n\n")
 		builder.WriteString(model.keyList.View())
 	case provisionScreenReview:
 		builder.WriteString(model.provisionReviewView())
 	case provisionScreenCreating:
-		builder.WriteString("Creating the Droplet and waiting for its public IPv4 address...\n")
+		if model.cancelling {
+			builder.WriteString("Cancellation requested. Waiting for DigitalOcean to confirm whether the Droplet was created...\n")
+		} else {
+			builder.WriteString("Creating the Droplet and waiting for its public IPv4 address...\n")
+		}
+	case provisionScreenSavingProfile:
+		builder.WriteString(fmt.Sprintf("Droplet %s exists. Saving its local Servestead profile...\n", sanitizeTerminalLine(model.pendingProfile.Cloud.ResourceID)))
+	case provisionScreenSaveRecovery:
+		builder.WriteString("DigitalOcean created the Droplet, but Servestead could not save its local profile.\n\n")
+		builder.WriteString(fmt.Sprintf("Droplet ID: %s\n", sanitizeTerminalLine(model.pendingProfile.Cloud.ResourceID)))
+		builder.WriteString(fmt.Sprintf("IPv4:       %s\n\n", sanitizeTerminalLine(model.pendingProfile.IP)))
+		builder.WriteString("Press Enter to retry the local save. DigitalOcean will not be called again.\n")
 	case provisionScreenDone:
-		builder.WriteString(fmt.Sprintf("Droplet created and saved as profile %s.\n\n", firstNonEmpty(model.createdProfile.Name, model.createdProfile.ID)))
-		builder.WriteString(fmt.Sprintf("IPv4: %s\n", model.createdProfile.IP))
+		builder.WriteString(fmt.Sprintf("Droplet created and saved as profile %s.\n\n", sanitizeTerminalLine(firstNonEmpty(model.createdProfile.Name, model.createdProfile.ID))))
+		builder.WriteString(fmt.Sprintf("IPv4: %s\n", sanitizeTerminalLine(firstNonEmpty(model.createdProfile.IP, "not available yet"))))
+		if model.createdProfile.IP == "" {
+			builder.WriteString("Enter the Droplet's public IPv4 address in profile settings before running setup.\n")
+		}
 		builder.WriteString("Press Enter to open the profile dashboard.\n")
 	}
 	if model.err != "" {
 		builder.WriteString("\n")
-		builder.WriteString(setupErrorStyle.Render(model.err))
+		builder.WriteString(setupErrorStyle.Render(sanitizeTerminalText(model.err)))
+		builder.WriteString("\n")
+	}
+	if model.notice != "" {
+		builder.WriteString("\n")
+		builder.WriteString(setupWarningStyle.Render(sanitizeTerminalText(model.notice)))
 		builder.WriteString("\n")
 	}
 	builder.WriteString("\n")
 	builder.WriteString(setupHelpStyle.Render(model.provisionHelpText()))
-	return altScreenView(builder.String())
+	return altScreenView(fitTerminalWidth(builder.String(), model.width))
 }
 
 func (model digitalOceanProvisionModel) provisionReviewView() string {
 	keyLabel := "upload local public key"
 	if !model.selectedKey.Upload {
-		keyLabel = fmt.Sprintf("%s (%s)", firstNonEmpty(model.selectedKey.Key.Name, "unnamed key"), firstNonEmpty(model.selectedKey.Key.Fingerprint, strconv.Itoa(model.selectedKey.Key.ID)))
+		keyLabel = fmt.Sprintf("%s (%s)", sanitizeTerminalLine(firstNonEmpty(model.selectedKey.Key.Name, "unnamed key")), sanitizeTerminalLine(firstNonEmpty(model.selectedKey.Key.Fingerprint, strconv.Itoa(model.selectedKey.Key.ID))))
 	}
-	name := model.inputConfigName()
+	name := sanitizeTerminalLine(model.inputConfigName())
 	expected := provisionConfirmPhrase(name)
 	var builder strings.Builder
 	builder.WriteString("Review billable Droplet:\n\n")
 	builder.WriteString(fmt.Sprintf("Name:   %s\n", name))
-	builder.WriteString(fmt.Sprintf("Region: %s (%s)\n", model.selectedRegion.Name, model.selectedRegion.Slug))
-	builder.WriteString(fmt.Sprintf("Size:   %s - %d vCPU, %d MiB RAM, %d GiB disk\n", model.selectedSize.Slug, model.selectedSize.VCPUs, model.selectedSize.MemoryMB, model.selectedSize.DiskGB))
-	builder.WriteString(fmt.Sprintf("Image:  %s\n", model.selectedImage.Slug))
+	builder.WriteString(fmt.Sprintf("Region: %s (%s)\n", sanitizeTerminalLine(model.selectedRegion.Name), sanitizeTerminalLine(model.selectedRegion.Slug)))
+	builder.WriteString(fmt.Sprintf("Size:   %s - %d vCPU, %d MiB RAM, %d GiB disk\n", sanitizeTerminalLine(model.selectedSize.Slug), model.selectedSize.VCPUs, model.selectedSize.MemoryMB, model.selectedSize.DiskGB))
+	builder.WriteString(fmt.Sprintf("Image:  %s\n", sanitizeTerminalLine(model.selectedImage.Slug)))
 	builder.WriteString(fmt.Sprintf("SSH:    %s\n", keyLabel))
 	builder.WriteString(fmt.Sprintf("Cost:   $%.2f/month, $%.5f/hour\n\n", model.selectedSize.PriceMonthly, model.selectedSize.PriceHourly))
 	builder.WriteString("This creates one DigitalOcean Droplet. It does not bootstrap, harden, configure DNS, or deploy apps.\n")
@@ -587,13 +830,20 @@ func (model digitalOceanProvisionModel) provisionHelpText() string {
 	case provisionScreenInput:
 		return "Enter advances. Tab changes field. Esc goes back. Ctrl+C cancels."
 	case provisionScreenLoading, provisionScreenCreating:
-		return "Waiting for DigitalOcean. Ctrl+C cancels."
+		if model.cancelling {
+			return "Cancellation requested. Waiting for DigitalOcean to respond."
+		}
+		return "Waiting for DigitalOcean. Ctrl+C, q, or Esc requests cancellation."
+	case provisionScreenSavingProfile:
+		return "Saving the local profile. Please wait."
+	case provisionScreenSaveRecovery:
+		return "Enter retries the local save only. Exiting stays locked until the recovery profile is saved."
 	case provisionScreenRegion, provisionScreenSize, provisionScreenImage, provisionScreenSSHKey:
 		return "j/k selects. / filters. Enter chooses. Esc goes back. q cancels."
 	case provisionScreenReview:
 		return "Enter creates after exact confirmation. Esc goes back. Ctrl+C cancels."
 	case provisionScreenDone:
-		return "Enter opens the saved profile dashboard."
+		return "Enter opens the saved profile dashboard. q or Ctrl+C exits setup."
 	default:
 		return "Ctrl+C cancels."
 	}
@@ -607,6 +857,7 @@ func newProvisionList(title string, items []list.Item) list.Model {
 	model.SetShowStatusBar(false)
 	model.SetFilteringEnabled(true)
 	model.DisableQuitKeybindings()
+	model.SetShowHelp(false)
 	return model
 }
 
@@ -616,7 +867,7 @@ func provisionRegionItems(catalog cloudCatalog) []list.Item {
 	for index, region := range regions {
 		items = append(items, provisionListItem{
 			index:       index,
-			title:       fmt.Sprintf("%s (%s)", region.Name, region.Slug),
+			title:       fmt.Sprintf("%s (%s)", sanitizeTerminalLine(region.Name), sanitizeTerminalLine(region.Slug)),
 			description: fmt.Sprintf("%d available size(s)", len(region.Sizes)),
 		})
 	}
@@ -629,7 +880,7 @@ func provisionSizeItems(catalog cloudCatalog, region string) []list.Item {
 	for index, size := range sizes {
 		items = append(items, provisionListItem{
 			index:       index,
-			title:       fmt.Sprintf("%s - $%.2f/month", size.Slug, size.PriceMonthly),
+			title:       fmt.Sprintf("%s - $%.2f/month", sanitizeTerminalLine(size.Slug), size.PriceMonthly),
 			description: fmt.Sprintf("%d vCPU, %d MiB RAM, %d GiB disk, %.2f TiB transfer, $%.5f/hour", size.VCPUs, size.MemoryMB, size.DiskGB, size.TransferTB, size.PriceHourly),
 		})
 	}
@@ -642,8 +893,8 @@ func provisionImageItems(catalog cloudCatalog, region string, diskGB int) []list
 	for index, image := range images {
 		items = append(items, provisionListItem{
 			index:       index,
-			title:       firstNonEmpty(image.Slug, image.Name),
-			description: fmt.Sprintf("%s image, min disk %d GiB", firstNonEmpty(image.Distribution, "Ubuntu"), image.MinDiskGB),
+			title:       sanitizeTerminalLine(firstNonEmpty(image.Slug, image.Name)),
+			description: fmt.Sprintf("%s image, min disk %d GiB", sanitizeTerminalLine(firstNonEmpty(image.Distribution, "Ubuntu")), image.MinDiskGB),
 		})
 	}
 	return items
@@ -663,8 +914,8 @@ func provisionSSHKeyItems(catalog cloudCatalog, publicKey, fingerprint string) [
 		}
 		items = append(items, provisionListItem{
 			index:       index,
-			title:       firstNonEmpty(choice.Key.Name, "unnamed DigitalOcean key"),
-			description: fmt.Sprintf("ID %d - %s", choice.Key.ID, choice.Key.Fingerprint),
+			title:       sanitizeTerminalLine(firstNonEmpty(choice.Key.Name, "unnamed DigitalOcean key")),
+			description: fmt.Sprintf("ID %d - %s", choice.Key.ID, sanitizeTerminalLine(choice.Key.Fingerprint)),
 		})
 	}
 	return items
@@ -768,7 +1019,7 @@ func provisionSelectDefaultImage(model *list.Model) {
 }
 
 func provisionConfirmPhrase(name string) string {
-	return "provision " + strings.TrimSpace(name)
+	return "provision " + sanitizeTerminalLine(name)
 }
 
 func readProvisionPublicKey(privateKeyPath string) (string, string, error) {
@@ -801,18 +1052,30 @@ func normalizeAuthorizedKey(value string) string {
 }
 
 func saveProvisionedDigitalOceanProfile(store ProfileStore, config provisionInputConfig, model digitalOceanProvisionModel, created server) (Profile, error) {
+	return store.Create(newProvisionedDigitalOceanProfile(config, model, created))
+}
+
+func newProvisionedDigitalOceanProfile(config provisionInputConfig, model digitalOceanProvisionModel, created server) Profile {
 	cloudCreatedAt := time.Now().UTC()
 	if created.CreatedAt != "" {
 		if parsed, err := time.Parse(time.RFC3339, created.CreatedAt); err == nil {
 			cloudCreatedAt = parsed
 		}
 	}
-	profile, err := store.Create(Profile{
+	now := time.Now().UTC()
+	profileIdentity := created.IPv4
+	if profileIdentity == "" {
+		profileIdentity = digitalOceanProviderName + "-" + created.ID
+	}
+	return Profile{
+		ID:             newProfileID(profileIdentity, now),
 		Name:           firstNonEmpty(created.Name, config.Name),
 		IP:             created.IPv4,
 		InitialSSHUser: "root",
 		AdminUser:      "servestead",
 		PrivateKeyPath: config.PrivateKeyPath,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 		Cloud: &ProfileCloud{
 			Provider:     digitalOceanProviderName,
 			ResourceID:   created.ID,
@@ -824,9 +1087,5 @@ func saveProvisionedDigitalOceanProfile(store ProfileStore, config provisionInpu
 			PriceHourly:  model.selectedSize.PriceHourly,
 			CreatedAt:    cloudCreatedAt,
 		},
-	})
-	if err != nil {
-		return Profile{}, err
 	}
-	return profile, nil
 }

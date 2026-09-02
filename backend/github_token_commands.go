@@ -70,15 +70,7 @@ func runGitHubTokenSet(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, _, err := store.Load(profileID); err != nil {
-		return fmt.Errorf("load profile: %w", err)
-	}
-	secrets, err := store.LoadSecrets(profileID)
-	if err != nil {
-		return err
-	}
-	secrets.GitHubToken = token
-	if err := store.SaveSecrets(profileID, secrets); err != nil {
+	if _, err := saveProfileGitHubToken(store, profileID, token); err != nil {
 		return err
 	}
 	fmt.Fprintln(stdout, "Stored GitHub token for profile.")
@@ -125,15 +117,7 @@ func runGitHubTokenRemove(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, _, err := store.Load(profileID); err != nil {
-		return fmt.Errorf("load profile: %w", err)
-	}
-	secrets, err := store.LoadSecrets(profileID)
-	if err != nil {
-		return err
-	}
-	secrets.GitHubToken = ""
-	if err := store.SaveSecrets(profileID, secrets); err != nil {
+	if _, err := saveProfileGitHubToken(store, profileID, ""); err != nil {
 		return err
 	}
 	fmt.Fprintln(stdout, "Removed stored GitHub token for profile.")

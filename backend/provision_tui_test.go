@@ -44,6 +44,115 @@ func TestProvisionTUIHandlesInitialResizeBeforeCatalog(t *testing.T) {
 	}
 }
 
+func TestProvisionListFilterReceivesQuitAndEscapeKeysFirst(t *testing.T) {
+	model := newDigitalOceanProvisionModel(context.Background(), newFileProfileStore(t.TempDir()))
+	model.screen = provisionScreenRegion
+	model.regionList = newProvisionList("DigitalOcean regions", []list.Item{
+		provisionListItem{index: 0, title: "New York", description: "nyc3"},
+	})
+
+	updated, _ := model.Update(keyRunes("/"))
+	result := updated.(digitalOceanProvisionModel)
+	if result.regionList.FilterState() != list.Filtering {
+		t.Fatal("/ did not focus the region filter")
+	}
+	updated, _ = result.Update(keyRunes("q"))
+	result = updated.(digitalOceanProvisionModel)
+	if result.screen != provisionScreenRegion || result.cancelled || result.regionList.FilterInput.Value() != "q" {
+		t.Fatalf("q bypassed the active filter: screen=%d cancelled=%v filter=%q", result.screen, result.cancelled, result.regionList.FilterInput.Value())
+	}
+	updated, _ = result.Update(keyCode(tea.KeyEsc))
+	result = updated.(digitalOceanProvisionModel)
+	if result.screen != provisionScreenRegion || result.cancelled || result.regionList.FilterState() == list.Filtering {
+		t.Fatalf("Esc did not clear the active filter in place: screen=%d cancelled=%v filterState=%d", result.screen, result.cancelled, result.regionList.FilterState())
+	}
+}
+
+func TestProvisionListFilterKeepsCtrlCGlobal(t *testing.T) {
+	model := newDigitalOceanProvisionModel(context.Background(), newFileProfileStore(t.TempDir()))
+	model.screen = provisionScreenRegion
+	model.regionList = newProvisionList("DigitalOcean regions", []list.Item{
+		provisionListItem{index: 0, title: "New York", description: "nyc3"},
+	})
+
+	updated, _ := model.Update(keyRunes("/"))
+	result := updated.(digitalOceanProvisionModel)
+	if result.regionList.FilterState() != list.Filtering {
+		t.Fatal("/ did not focus the region filter")
+	}
+	updated, command := result.Update(keyCtrl('c'))
+	result = updated.(digitalOceanProvisionModel)
+	if command == nil || !result.cancelled {
+		t.Fatalf("ctrl+c was swallowed by the active list filter: cancelled=%v command=%v", result.cancelled, command)
+	}
+}
+
+func TestProvisionTUIShowsMinimumTerminalSizeGuard(t *testing.T) {
+	model := newDigitalOceanProvisionModel(context.Background(), newFileProfileStore(t.TempDir()))
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	view := updated.(digitalOceanProvisionModel).View().Content
+	if !strings.Contains(view, "Terminal too small: 40x12") || !strings.Contains(view, "80x24") {
+		t.Fatalf("small terminal guard missing:\n%s", view)
+	}
+}
+
+func TestProvisionReviewSanitizesNamesAndCatalogFields(t *testing.T) {
+	model := newDigitalOceanProvisionModel(context.Background(), newFileProfileStore(t.TempDir()))
+	model.inputs[0].SetValue("token")
+	model.inputs[1].SetValue("prod\u202eowned")
+	model.selectedRegion = cloudRegion{Name: "New\x1b[31m York", Slug: "nyc3\x1b]0;owned\a"}
+	model.selectedSize = cloudSize{Slug: "small\x1b[31m", VCPUs: 1, MemoryMB: 1024, DiskGB: 25}
+	model.selectedImage = cloudImage{Slug: "ubuntu\x1b]0;owned\a"}
+	model.selectedKey = provisionSSHKeyChoice{Key: cloudSSHKey{Name: "operator\x1b[31m", Fingerprint: "aa:bb\x1b]0;owned\a"}}
+
+	view := model.provisionReviewView()
+	if strings.Contains(view, "\u202e") || strings.Contains(view, "\x1b]0;owned") || strings.Contains(view, "\x1b[31m") {
+		t.Fatalf("provision review rendered terminal controls:\n%s", view)
+	}
+	for _, expected := range []string{"Name:   prodowned", "New York", "small", "ubuntu", "operator", "aa:bb"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("sanitized provision review missing %q:\n%s", expected, view)
+		}
+	}
+	if _, err := model.inputConfig(); err == nil || !strings.Contains(err.Error(), "terminal control") {
+		t.Fatalf("Droplet name control characters were accepted: %v", err)
+	}
+}
+
+func TestProvisionVisibleInputsRemoveUnicodeFormatCharacters(t *testing.T) {
+	model := newDigitalOceanProvisionModel(context.Background(), newFileProfileStore(t.TempDir()))
+	model.focus = 1
+	model.inputs[1].SetValue("")
+	model.inputs[1].Focus()
+	updated, _ := model.updateInput(keyRunes("prod\u202eowned"))
+	model = updated.(digitalOceanProvisionModel)
+	if model.inputs[1].Value() != "prodowned" || strings.Contains(model.inputs[1].View(), "\u202e") {
+		t.Fatalf("provision input retained a Unicode format control: value=%q view=%q", model.inputs[1].Value(), model.inputs[1].View())
+	}
+
+	model.confirmInput.SetValue("")
+	model.confirmInput.Focus()
+	updated, _ = model.updateReview(keyRunes("create\u2066 now"))
+	model = updated.(digitalOceanProvisionModel)
+	if model.confirmInput.Value() != "create now" || strings.Contains(model.confirmInput.View(), "\u2066") {
+		t.Fatalf("provision confirmation retained a Unicode format control: value=%q view=%q", model.confirmInput.Value(), model.confirmInput.View())
+	}
+}
+
+func TestProvisionMinimumSizeGuardBlocksHiddenCreateConfirmation(t *testing.T) {
+	model := newDigitalOceanProvisionModel(context.Background(), newFileProfileStore(t.TempDir()))
+	model.screen = provisionScreenReview
+	model.confirmInput.SetValue(provisionConfirmPhrase(model.inputConfigName()))
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	result := updated.(digitalOceanProvisionModel)
+
+	updated, command := result.Update(keyCode(tea.KeyEnter))
+	result = updated.(digitalOceanProvisionModel)
+	if command != nil || result.screen != provisionScreenReview || result.operationCancel != nil {
+		t.Fatalf("small-terminal Enter triggered hidden Droplet creation: %+v", result)
+	}
+}
+
 func TestProvisionTUIHandlesMessages(t *testing.T) {
 	model := newDigitalOceanProvisionModel(context.Background(), newFileProfileStore(t.TempDir()))
 	updated, command := model.Update(struct{}{})
@@ -60,8 +169,14 @@ func TestProvisionTUIHandlesMessages(t *testing.T) {
 
 	updated, command = model.Update(provisionCreateMsg{profile: Profile{ID: provisionTestProfileID, IP: provisionTestIPv4}})
 	result = updated.(digitalOceanProvisionModel)
+	if command == nil || result.done || result.screen != provisionScreenSavingProfile || result.pendingProfile.ID != provisionTestProfileID {
+		t.Fatalf("created Droplet message did not begin local persistence: %+v", result)
+	}
+
+	updated, command = result.Update(provisionSaveMsg{profile: result.pendingProfile})
+	result = updated.(digitalOceanProvisionModel)
 	if command != nil || !result.done || result.screen != provisionScreenDone || result.createdProfile.ID != provisionTestProfileID {
-		t.Fatalf("created profile message returned unexpected result: %+v", result)
+		t.Fatalf("saved profile message returned unexpected result: %+v", result)
 	}
 }
 
@@ -71,6 +186,16 @@ func TestProvisionTUIHandlesGlobalKeys(t *testing.T) {
 	result := updated.(digitalOceanProvisionModel)
 	if !handled || command == nil || !result.cancelled {
 		t.Fatalf("ctrl+c did not cancel: handled=%v result=%+v", handled, result)
+	}
+
+	model = newDigitalOceanProvisionModel(context.Background(), newFileProfileStore(t.TempDir()))
+	updated, command, handled = model.updateGlobalKey(keyCode(tea.KeyEsc))
+	result = updated.(digitalOceanProvisionModel)
+	if !handled || command == nil || !result.returnToSetup || result.cancelled {
+		t.Fatalf("root Esc did not return to setup: handled=%v result=%+v", handled, result)
+	}
+	if _, err := profileFromProvisionResult(result); !errors.Is(err, errReturnToSetup) {
+		t.Fatalf("root Esc result did not propagate return-to-setup: %v", err)
 	}
 
 	model.screen = provisionScreenRegion
@@ -83,8 +208,11 @@ func TestProvisionTUIHandlesGlobalKeys(t *testing.T) {
 	model.screen = provisionScreenDone
 	updated, command, handled = model.updateGlobalKey(keyRunes("q"))
 	result = updated.(digitalOceanProvisionModel)
-	if !handled || command == nil || result.cancelled {
+	if !handled || command == nil || result.cancelled || !result.quit {
 		t.Fatalf("q did not quit done screen cleanly: handled=%v result=%+v", handled, result)
+	}
+	if _, err := profileFromProvisionResult(result); !errors.Is(err, errSetupQuit) {
+		t.Fatalf("done-screen quit would reopen the dashboard: %v", err)
 	}
 
 	model.screen = provisionScreenRegion
@@ -216,6 +344,11 @@ func confirmProvisionCreate(t *testing.T, model digitalOceanProvisionModel) digi
 	if !strings.Contains(model.View().Content, "Creating the Droplet") {
 		t.Fatalf("creating view missing wait message:\n%s", model.View().Content)
 	}
+	updated, command = model.Update(command())
+	model = updated.(digitalOceanProvisionModel)
+	if model.screen != provisionScreenSavingProfile || command == nil {
+		t.Fatalf("created Droplet should begin local profile save: screen=%d command=%v err=%q", model.screen, command, model.err)
+	}
 	updated, _ = model.Update(command())
 	model = updated.(digitalOceanProvisionModel)
 	if !model.done || model.screen != provisionScreenDone {
@@ -268,7 +401,7 @@ func TestProvisionTUIUsesExistingSSHKeyReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalogMessage := model.loadCatalog(config)().(provisionCatalogMsg)
+	catalogMessage := model.loadCatalog(context.Background(), config)().(provisionCatalogMsg)
 	updated, _ := model.Update(catalogMessage)
 	model = updated.(digitalOceanProvisionModel)
 	for step := 0; model.screen != provisionScreenReview && step < 4; step++ {
@@ -390,6 +523,9 @@ func assertProvisionHelpText(t *testing.T, model digitalOceanProvisionModel) {
 		provisionScreenImage,
 		provisionScreenSSHKey,
 		provisionScreenReview,
+		provisionScreenCreating,
+		provisionScreenSavingProfile,
+		provisionScreenSaveRecovery,
 		provisionScreenDone,
 		provisionScreen(99),
 	} {
@@ -566,7 +702,7 @@ func TestProvisionPublicKeyAndNameHelpers(t *testing.T) {
 	}
 }
 
-func TestProvisionCreateDropletReportsProviderAndStoreErrors(t *testing.T) {
+func TestProvisionCreateDropletReportsProviderErrorsAndPreservesProfileData(t *testing.T) {
 	privateKeyPath := writeProvisionTestKeypair(t)
 	config := provisionInputConfig{Token: "token", Name: provisionTestDropletName, PrivateKeyPath: privateKeyPath}
 	model := digitalOceanProvisionModel{
@@ -581,31 +717,246 @@ func TestProvisionCreateDropletReportsProviderAndStoreErrors(t *testing.T) {
 
 	fake := &recordingCloudProvider{keyErr: errors.New("key rejected")}
 	restore := replaceProvisionCloudProvider(fake)
-	message := model.createDroplet(config)().(provisionCreateMsg)
+	message := model.createDroplet(context.Background(), config)().(provisionCreateMsg)
 	restore()
 	if message.err == nil || !strings.Contains(message.err.Error(), "upload DigitalOcean SSH key") {
 		t.Fatalf("unexpected key upload error: %v", message.err)
 	}
+	if !message.remoteOutcomeUnknown {
+		t.Fatal("transport-like SSH key upload error was treated as safe to retry")
+	}
 
 	fake = &recordingCloudProvider{createdKey: cloudSSHKey{ID: 5}, createErr: errors.New("quota exceeded")}
 	restore = replaceProvisionCloudProvider(fake)
-	message = model.createDroplet(config)().(provisionCreateMsg)
+	message = model.createDroplet(context.Background(), config)().(provisionCreateMsg)
 	restore()
 	if message.err == nil || !strings.Contains(message.err.Error(), "create DigitalOcean Droplet") {
 		t.Fatalf("unexpected droplet create error: %v", message.err)
+	}
+	if message.profile.ID != "" {
+		t.Fatalf("provider rejection without a Droplet ID produced a recovery profile: %+v", message.profile)
+	}
+	if !message.remoteOutcomeUnknown {
+		t.Fatal("transport-like create error without a Droplet ID was treated as safe to retry")
+	}
+	updated, quitCommand := model.Update(message)
+	unknown := updated.(digitalOceanProvisionModel)
+	if quitCommand == nil || !unknown.remoteOutcomeUnknown || !strings.Contains(unknown.err, "check DigitalOcean") {
+		t.Fatalf("ambiguous create result did not stop retry: command=%v model=%+v", quitCommand, unknown)
+	}
+
+	fake = &recordingCloudProvider{
+		created:   server{ID: "84", Name: provisionTestDropletName},
+		createErr: context.Canceled,
+	}
+	restore = replaceProvisionCloudProvider(fake)
+	message = model.createDroplet(context.Background(), config)().(provisionCreateMsg)
+	restore()
+	if !errors.Is(message.err, context.Canceled) || message.profile.Cloud == nil || message.profile.Cloud.ResourceID != "84" || message.profile.IP != "" {
+		t.Fatalf("IPv4 wait cancellation lost the created Droplet: %+v", message)
+	}
+	if !strings.HasPrefix(message.profile.ID, "digitalocean-84-") {
+		t.Fatalf("recovery profile ID is not based on the Droplet identity: %q", message.profile.ID)
 	}
 
 	model.selectedKey = provisionSSHKeyChoice{Key: cloudSSHKey{Fingerprint: "aa:bb"}}
 	if model.selectedKeyReference() != "aa:bb" {
 		t.Fatalf("fingerprint should be used when key has no ID: %q", model.selectedKeyReference())
 	}
-	model.store = failingCreateProfileStore{err: errors.New("disk full")}
 	fake = &recordingCloudProvider{created: server{ID: "84", IPv4: provisionTestIPv4}}
 	restore = replaceProvisionCloudProvider(fake)
-	message = model.createDroplet(config)().(provisionCreateMsg)
+	message = model.createDroplet(context.Background(), config)().(provisionCreateMsg)
 	restore()
-	if message.err == nil || !strings.Contains(message.err.Error(), "disk full") {
-		t.Fatalf("unexpected profile save error: %v", message.err)
+	if message.err != nil || message.profile.Cloud == nil || message.profile.Cloud.ResourceID != "84" {
+		t.Fatalf("provider success should preserve unsaved profile data: message=%+v", message)
+	}
+}
+
+func TestProvisionSaveFailureRetriesLocallyWithoutCreatingAnotherDroplet(t *testing.T) {
+	model, _, fake, restore := newProvisionHappyPathFixture(t)
+	defer restore()
+	store := &failOnceCreateProfileStore{
+		ProfileStore: newFileProfileStore(t.TempDir()),
+		err:          errors.New("disk full"),
+	}
+	model.store = store
+	model = loadProvisionCatalog(t, model)
+	model = completeProvisionSelections(t, model)
+	model, createCommand := startProvisionCreateWithoutDuplicates(t, model)
+	model, saveCommand := applyProvisionCreateWithoutDuplicates(t, model, createCommand, fake)
+	model = applyFailedProvisionSave(t, model, saveCommand)
+	firstProfileID := model.pendingProfile.ID
+	model = retryProvisionSaveLocally(t, model, fake)
+
+	if store.calls != 2 || len(store.attempts) != 2 || store.attempts[0].ID != store.attempts[1].ID {
+		t.Fatalf("local save retries did not preserve identity: calls=%d attempts=%+v", store.calls, store.attempts)
+	}
+	if !model.done || model.screen != provisionScreenDone || model.createdProfile.ID != firstProfileID {
+		t.Fatalf("local retry did not finish with the preserved profile: screen=%d profile=%+v", model.screen, model.createdProfile)
+	}
+	if fake.createCalls != 1 || fake.keyCalls != 1 {
+		t.Fatalf("successful local retry duplicated provider work: createCalls=%d keyCalls=%d", fake.createCalls, fake.keyCalls)
+	}
+}
+
+func TestProvisionSaveRecoveryLocksExitUntilDropletIsRecorded(t *testing.T) {
+	model := digitalOceanProvisionModel{
+		screen: provisionScreenSaveRecovery,
+		pendingProfile: Profile{
+			ID: "digitalocean-84-recovery",
+			IP: provisionTestIPv4,
+			Cloud: &ProfileCloud{
+				Provider:   digitalOceanProviderName,
+				ResourceID: "84",
+			},
+		},
+	}
+
+	for _, key := range []tea.KeyMsg{keyRunes("q"), keyCtrl('c'), keyCode(tea.KeyEsc)} {
+		updated, command := model.Update(key)
+		result := updated.(digitalOceanProvisionModel)
+		if command != nil || result.cancelled || result.screen != provisionScreenSaveRecovery {
+			t.Fatalf("%s escaped save recovery: command=%v model=%+v", key.String(), command, result)
+		}
+		if !strings.Contains(result.err, "Droplet exists") {
+			t.Fatalf("%s did not explain the recovery lock: %q", key.String(), result.err)
+		}
+	}
+}
+
+func TestProvisionPartialCreateSavesRecoveryProfileWithoutRetryingProvider(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	model := newDigitalOceanProvisionModel(context.Background(), store)
+	model.screen = provisionScreenCreating
+	model.cancelling = true
+	partial := newProvisionedDigitalOceanProfile(
+		provisionInputConfig{Name: provisionTestDropletName, PrivateKeyPath: "/tmp/servestead"},
+		model,
+		server{ID: "84", Name: provisionTestDropletName},
+	)
+
+	updated, saveCommand := model.Update(provisionCreateMsg{profile: partial, err: context.Canceled})
+	model = updated.(digitalOceanProvisionModel)
+	if saveCommand == nil || model.cancelled || model.screen != provisionScreenSavingProfile || model.pendingProfile.Cloud.ResourceID != "84" {
+		t.Fatalf("partial create did not enter local recovery save: command=%v model=%+v", saveCommand, model)
+	}
+	if !strings.Contains(model.notice, "created Droplet 84") || !strings.Contains(model.notice, "without calling DigitalOcean again") {
+		t.Fatalf("partial create recovery notice = %q", model.notice)
+	}
+
+	updated, command := model.Update(saveCommand())
+	model = updated.(digitalOceanProvisionModel)
+	if command != nil || !model.done || model.createdProfile.Cloud.ResourceID != "84" || model.createdProfile.IP != "" {
+		t.Fatalf("partial recovery profile was not saved: command=%v model=%+v", command, model)
+	}
+	profiles, err := store.List()
+	if err != nil || len(profiles) != 1 || profiles[0].ID != model.createdProfile.ID {
+		t.Fatalf("saved recovery profile list = %+v, err=%v", profiles, err)
+	}
+}
+
+func startProvisionCreateWithoutDuplicates(t *testing.T, model digitalOceanProvisionModel) (digitalOceanProvisionModel, tea.Cmd) {
+	t.Helper()
+	model.confirmInput.SetValue(provisionConfirmPhrase(provisionTestDropletName))
+	updated, createCommand := model.Update(keyCode(tea.KeyEnter))
+	model = updated.(digitalOceanProvisionModel)
+	if model.screen != provisionScreenCreating || createCommand == nil {
+		t.Fatalf("confirmed review did not start provider creation: screen=%d command=%v", model.screen, createCommand)
+	}
+	updated, duplicateCommand := model.Update(keyCode(tea.KeyEnter))
+	model = updated.(digitalOceanProvisionModel)
+	if duplicateCommand != nil || model.screen != provisionScreenCreating {
+		t.Fatalf("enter while creating should not start a duplicate action: screen=%d command=%v", model.screen, duplicateCommand)
+	}
+	return model, createCommand
+}
+
+func applyProvisionCreateWithoutDuplicates(t *testing.T, model digitalOceanProvisionModel, createCommand tea.Cmd, fake *recordingCloudProvider) (digitalOceanProvisionModel, tea.Cmd) {
+	t.Helper()
+	updated, saveCommand := model.Update(createCommand())
+	model = updated.(digitalOceanProvisionModel)
+	if model.screen != provisionScreenSavingProfile || saveCommand == nil || fake.createCalls != 1 {
+		t.Fatalf("provider success did not start one local save: screen=%d command=%v createCalls=%d", model.screen, saveCommand, fake.createCalls)
+	}
+	updated, duplicateCommand := model.Update(keyCode(tea.KeyEnter))
+	model = updated.(digitalOceanProvisionModel)
+	if duplicateCommand != nil || model.screen != provisionScreenSavingProfile {
+		t.Fatalf("enter while saving should not start a duplicate action: screen=%d command=%v", model.screen, duplicateCommand)
+	}
+	return model, saveCommand
+}
+
+func applyFailedProvisionSave(t *testing.T, model digitalOceanProvisionModel, saveCommand tea.Cmd) digitalOceanProvisionModel {
+	t.Helper()
+	updated, _ := model.Update(saveCommand())
+	model = updated.(digitalOceanProvisionModel)
+	if model.screen != provisionScreenSaveRecovery || model.pendingProfile.Cloud == nil || model.pendingProfile.Cloud.ResourceID != "84" || model.pendingProfile.IP != provisionTestIPv4 {
+		t.Fatalf("save failure did not preserve created resource data: screen=%d profile=%+v err=%q", model.screen, model.pendingProfile, model.err)
+	}
+	if !containsAll(model.View().Content, "Droplet ID: 84", provisionTestIPv4, "DigitalOcean will not be called again") {
+		t.Fatalf("save recovery view missing resource and retry guidance:\n%s", model.View().Content)
+	}
+	return model
+}
+
+func retryProvisionSaveLocally(t *testing.T, model digitalOceanProvisionModel, fake *recordingCloudProvider) digitalOceanProvisionModel {
+	t.Helper()
+	updated, retryCommand := model.Update(keyCode(tea.KeyEnter))
+	model = updated.(digitalOceanProvisionModel)
+	if model.screen != provisionScreenSavingProfile || retryCommand == nil {
+		t.Fatalf("recovery enter did not retry local persistence: screen=%d command=%v", model.screen, retryCommand)
+	}
+	if fake.createCalls != 1 || fake.keyCalls != 1 {
+		t.Fatalf("local retry called DigitalOcean again: createCalls=%d keyCalls=%d", fake.createCalls, fake.keyCalls)
+	}
+	updated, _ = model.Update(retryCommand())
+	return updated.(digitalOceanProvisionModel)
+}
+
+func TestProvisionCancellationReachesDelayedProvider(t *testing.T) {
+	fake := newDelayedCloudProvider("create")
+	restore := replaceProvisionCloudProvider(fake)
+	defer restore()
+
+	model := newDigitalOceanProvisionModel(context.Background(), newFileProfileStore(t.TempDir()))
+	model.inputs[0].SetValue("token")
+	model.inputs[1].SetValue(provisionTestDropletName)
+	model.inputs[2].SetValue("/tmp/servestead")
+	model.selectedRegion = cloudRegion{Slug: "nyc3"}
+	model.selectedSize = cloudSize{Slug: provisionTestSize}
+	model.selectedImage = cloudImage{Slug: provisionTestImage}
+	model.selectedKey = provisionSSHKeyChoice{Key: cloudSSHKey{ID: 12}}
+	model.confirmInput.SetValue(provisionConfirmPhrase(provisionTestDropletName))
+	model.screen = provisionScreenReview
+
+	updated, command := model.Update(keyCode(tea.KeyEnter))
+	model = updated.(digitalOceanProvisionModel)
+	if model.screen != provisionScreenCreating || command == nil {
+		t.Fatalf("creation did not start: screen=%d command=%v", model.screen, command)
+	}
+	result := make(chan tea.Msg, 1)
+	go func() { result <- command() }()
+	waitForTestSignal(t, fake.started, "provider create start")
+
+	updated, duplicateCommand := model.Update(keyCode(tea.KeyEnter))
+	model = updated.(digitalOceanProvisionModel)
+	if duplicateCommand != nil || fake.calls != 1 {
+		t.Fatalf("busy creation accepted a duplicate action: command=%v calls=%d", duplicateCommand, fake.calls)
+	}
+	updated, cancelCommand := model.Update(keyRunes("q"))
+	model = updated.(digitalOceanProvisionModel)
+	if cancelCommand != nil || !model.cancelling || model.cancelled {
+		t.Fatalf("q should request provider cancellation without exiting early: command=%v model=%+v", cancelCommand, model)
+	}
+	if !strings.Contains(model.View().Content, "Cancellation requested") {
+		t.Fatalf("cancelling view missing acknowledgement:\n%s", model.View().Content)
+	}
+	waitForTestSignal(t, fake.cancelled, "provider cancellation")
+
+	updated, quitCommand := model.Update(<-result)
+	model = updated.(digitalOceanProvisionModel)
+	if quitCommand == nil || !model.cancelled || model.cancelling || !model.remoteOutcomeUnknown || !strings.Contains(model.err, "remote outcome is unknown") {
+		t.Fatalf("acknowledged cancellation did not exit cleanly: command=%v model=%+v", quitCommand, model)
 	}
 }
 
@@ -697,7 +1048,8 @@ func assertProfileCloudHelpBindings(t *testing.T) {
 	if len((profileSetupHelp{screen: profileSetupScreenDashboard, hasProfile: true, hasCloud: true}).ShortHelp()) == 0 ||
 		len((profileSetupHelp{screen: profileSetupScreenCloud}).ShortHelp()) == 0 ||
 		len((profileSetupHelp{screen: profileSetupScreenCloudConfirm}).ShortHelp()) == 0 ||
-		len((profileSetupHelp{screen: profileSetupScreenCloudRunning}).ShortHelp()) == 0 {
+		len((profileSetupHelp{screen: profileSetupScreenCloudRunning}).ShortHelp()) == 0 ||
+		len((profileSetupHelp{screen: profileSetupScreenCloudSaveRecovery}).ShortHelp()) == 0 {
 		t.Fatal("cloud help bindings should be available")
 	}
 }
@@ -741,6 +1093,22 @@ func validateProfileCloudRestartConfirmation(t *testing.T, model profileSetupMod
 		t.Fatalf("wrong confirmation was not rejected: %q", model.err)
 	}
 	return model
+}
+
+func TestProfileCloudConfirmationRemovesUnicodeFormatCharacters(t *testing.T) {
+	model := newProfileSetupModel([]profileChoice{activeCloudProfileChoice()})
+	model.selectedIndex = 0
+	model = model.openProfileCloudConfirm("restart")
+	model.cloudTokenInput.SetValue("local-test-token")
+	model.cloudTokenInput.Blur()
+	model.cloudConfirmInput.SetValue("")
+	model.cloudConfirmInput.Focus()
+	model.focus = 1
+	updated, _ := model.updateProfileCloudConfirm(keyRunes("restart\u202e 84"))
+	model = updated.(profileSetupModel)
+	if model.cloudConfirmInput.Value() != "restart 84" || strings.Contains(model.cloudConfirmInput.View(), "\u202e") {
+		t.Fatalf("cloud confirmation retained a Unicode format control: value=%q view=%q", model.cloudConfirmInput.Value(), model.cloudConfirmInput.View())
+	}
 }
 
 func runProfileCloudRestart(t *testing.T, model profileSetupModel, fake *recordingCloudProvider) profileSetupModel {
@@ -795,7 +1163,7 @@ func TestProfileCloudDestroyMarksProfileWithoutDeleting(t *testing.T) {
 	model.profileStore = store
 	model.selectedIndex = 0
 	model.cloudAction = "destroy"
-	message := model.runProfileCloudAction("token")().(profileCloudActionMsg)
+	message := model.runProfileCloudAction(context.Background(), "token")().(profileCloudActionMsg)
 	result := model.applyProfileCloudAction(message)
 
 	if fake.destroyedID != "84" {
@@ -864,14 +1232,11 @@ func TestProfileCloudInactiveAndErrorPaths(t *testing.T) {
 	}
 }
 
-func TestProfileCloudActionErrors(t *testing.T) {
-	originalProvider := newProvisionCloudProvider
-	defer func() { newProvisionCloudProvider = originalProvider }()
-
+func TestProfileCloudActionRejectsMissingMetadataAndAppliesError(t *testing.T) {
 	model := newProfileSetupModel([]profileChoice{{Profile: Profile{ID: provisionTestProfileID}, State: ProfileState{Runs: map[string]SetupRun{}}}})
 	model.selectedIndex = 0
 	model.cloudAction = "restart"
-	message := model.runProfileCloudAction("token")().(profileCloudActionMsg)
+	message := model.runProfileCloudAction(context.Background(), "token")().(profileCloudActionMsg)
 	if message.err == nil || !strings.Contains(message.err.Error(), "no cloud metadata") {
 		t.Fatalf("missing cloud metadata error not returned: %v", message.err)
 	}
@@ -879,6 +1244,30 @@ func TestProfileCloudActionErrors(t *testing.T) {
 	if result.screen != profileSetupScreenCloudConfirm || result.err != "provider down" {
 		t.Fatalf("cloud action error was not applied: %+v", result)
 	}
+}
+
+func TestProfileCloudViewSanitizesProviderErrorsAndMetadata(t *testing.T) {
+	choice := activeCloudProfileChoice()
+	choice.Profile.Name = "production\x1b]0;owned\a"
+	choice.Profile.Cloud.Name = "droplet\x1b[31m-red"
+	model := newProfileSetupModel([]profileChoice{choice})
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenCloudConfirm
+	providerError := "provider\x1b]0;owned\a down"
+	model = model.applyProfileCloudAction(profileCloudActionMsg{action: "restart", err: errors.New(providerError)})
+
+	view := model.View().Content
+	if strings.Contains(view, "]0;owned") || strings.Contains(view, "\x1b[31m-red") {
+		t.Fatalf("profile cloud view rendered untrusted terminal controls:\n%s", view)
+	}
+	if !strings.Contains(view, "provider down") || !strings.Contains(model.profileCloudSummary(choice.Profile), "droplet-red") {
+		t.Fatalf("profile cloud view lost sanitized content:\n%s", view)
+	}
+}
+
+func TestProfileCloudProviderErrors(t *testing.T) {
+	originalProvider := newProvisionCloudProvider
+	defer func() { newProvisionCloudProvider = originalProvider }()
 
 	active := newProfileSetupModel([]profileChoice{activeCloudProfileChoice()})
 	active.selectedIndex = 0
@@ -886,7 +1275,7 @@ func TestProfileCloudActionErrors(t *testing.T) {
 	newProvisionCloudProvider = func(string) cloudProvider {
 		return &recordingCloudProvider{rebootErr: errors.New("reboot refused")}
 	}
-	message = active.runProfileCloudAction("token")().(profileCloudActionMsg)
+	message := active.runProfileCloudAction(context.Background(), "token")().(profileCloudActionMsg)
 	if message.err == nil || !strings.Contains(message.err.Error(), "restart DigitalOcean Droplet") {
 		t.Fatalf("unexpected reboot error: %v", message.err)
 	}
@@ -895,29 +1284,263 @@ func TestProfileCloudActionErrors(t *testing.T) {
 	newProvisionCloudProvider = func(string) cloudProvider {
 		return &recordingCloudProvider{destroyErr: errors.New("destroy refused")}
 	}
-	message = active.runProfileCloudAction("token")().(profileCloudActionMsg)
+	message = active.runProfileCloudAction(context.Background(), "token")().(profileCloudActionMsg)
 	if message.err == nil || !strings.Contains(message.err.Error(), "destroy DigitalOcean Droplet") {
 		t.Fatalf("unexpected destroy error: %v", message.err)
 	}
+}
 
-	active.profileStore = failingSaveProfileStore{ProfileStore: newFileProfileStore(t.TempDir()), err: errors.New("save failed")}
+func TestProfileCloudDestroySaveFailureEntersRecovery(t *testing.T) {
+	originalProvider := newProvisionCloudProvider
+	defer func() { newProvisionCloudProvider = originalProvider }()
+
+	active := newProfileSetupModel([]profileChoice{activeCloudProfileChoice()})
+	active.selectedIndex = 0
+	active.cloudAction = "destroy"
+	baseStore := newFileProfileStore(t.TempDir())
+	profile, err := baseStore.Create(active.profiles[0].Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active.profiles[0].Profile = profile
+	active.profileStore = failingSaveProfileStore{ProfileStore: baseStore, err: errors.New("save failed")}
 	newProvisionCloudProvider = func(string) cloudProvider { return &recordingCloudProvider{} }
-	message = active.runProfileCloudAction("token")().(profileCloudActionMsg)
+	message := active.runProfileCloudAction(context.Background(), "token")().(profileCloudActionMsg)
 	if message.err == nil || !strings.Contains(message.err.Error(), "save failed") {
 		t.Fatalf("unexpected save error: %v", message.err)
 	}
+	if !profileCloudMarkedDestroyed(message.profile) {
+		t.Fatalf("save failure lost the successful remote destroy state: %+v", message.profile)
+	}
+	result := active.applyProfileCloudAction(message)
+	if result.screen != profileSetupScreenCloudSaveRecovery || !strings.Contains(result.profileCloudSaveRecoveryView(), "DigitalOcean will not be called again") {
+		t.Fatalf("destroy save failure did not enter local recovery: screen=%d view=%q", result.screen, result.profileCloudSaveRecoveryView())
+	}
+}
 
+func TestProfileCloudUnknownActionAndDefaultNotice(t *testing.T) {
+	originalProvider := newProvisionCloudProvider
+	defer func() { newProvisionCloudProvider = originalProvider }()
+	newProvisionCloudProvider = func(string) cloudProvider { return &recordingCloudProvider{} }
+
+	active := newProfileSetupModel([]profileChoice{activeCloudProfileChoice()})
+	active.selectedIndex = 0
 	active.cloudAction = "resize"
-	message = active.runProfileCloudAction("token")().(profileCloudActionMsg)
+	message := active.runProfileCloudAction(context.Background(), "token")().(profileCloudActionMsg)
 	if message.err == nil || !strings.Contains(message.err.Error(), "unknown cloud action") {
 		t.Fatalf("unexpected unknown action error: %v", message.err)
 	}
-	result = active.applyProfileCloudAction(profileCloudActionMsg{action: "resize", profile: active.profiles[0].Profile})
+	result := active.applyProfileCloudAction(profileCloudActionMsg{action: "resize", profile: active.profiles[0].Profile})
 	if !strings.Contains(result.cloudNotice, "completed") {
 		t.Fatalf("default action notice missing: %q", result.cloudNotice)
 	}
 	if profileCloudConfirmPhrase("destroy", nil) != "" {
 		t.Fatal("nil cloud should have empty confirmation phrase")
+	}
+}
+
+func TestProfileCloudAmbiguousMutationRequiresReconciliation(t *testing.T) {
+	originalProvider := newProvisionCloudProvider
+	defer func() { newProvisionCloudProvider = originalProvider }()
+
+	model := newProfileSetupModel([]profileChoice{activeCloudProfileChoice()})
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenCloudRunning
+	model.cloudAction = "destroy"
+	newProvisionCloudProvider = func(string) cloudProvider {
+		return &recordingCloudProvider{destroyErr: errors.New("connection reset")}
+	}
+
+	message := model.runProfileCloudAction(context.Background(), "token")().(profileCloudActionMsg)
+	if !message.remoteOutcomeUnknown {
+		t.Fatalf("transport-like destroy error was treated as definitive: %+v", message)
+	}
+	result := model.applyProfileCloudAction(message)
+	if result.screen != profileSetupScreenCloud || result.cloudOutcomeUnknownID != provisionTestProfileID ||
+		!strings.Contains(result.cloudNotice, "remote outcome is unknown") {
+		t.Fatalf("ambiguous destroy did not enter reconciliation state: %+v", result)
+	}
+	updated, command := result.Update(keyRunes("d"))
+	blocked := updated.(profileSetupModel)
+	if command != nil || blocked.screen != profileSetupScreenCloud || !strings.Contains(blocked.err, "restart Servestead") {
+		t.Fatalf("ambiguous destroy permitted an immediate retry: command=%v model=%+v", command, blocked)
+	}
+}
+
+func TestProfileCloudDestroySaveRecoveryDoesNotRepeatProvider(t *testing.T) {
+	baseStore := newFileProfileStore(t.TempDir())
+	choice := activeCloudProfileChoice()
+	profile, err := baseStore.Create(choice.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{Runs: map[string]SetupRun{}}
+	if err := baseStore.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	store := &failOnceSaveProfileStore{
+		ProfileStore: baseStore,
+		err:          errors.New("disk full"),
+	}
+	fake := &recordingCloudProvider{}
+	restore := replaceProvisionCloudProvider(fake)
+	defer restore()
+
+	model := newProfileSetupModel([]profileChoice{{Profile: profile, State: state}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenCloudRunning
+	model.cloudAction = "destroy"
+	message := model.runProfileCloudAction(context.Background(), "token")().(profileCloudActionMsg)
+	updated, command := model.Update(message)
+	model = updated.(profileSetupModel)
+	if command != nil || fake.destroyCalls != 1 || store.calls != 1 || model.screen != profileSetupScreenCloudSaveRecovery {
+		t.Fatalf("remote success did not stop at local recovery: command=%v destroyCalls=%d saveCalls=%d screen=%d", command, fake.destroyCalls, store.calls, model.screen)
+	}
+	if !profileCloudMarkedDestroyed(model.profiles[0].Profile) {
+		t.Fatalf("in-memory profile did not retain destroyed state: %+v", model.profiles[0].Profile)
+	}
+
+	for _, key := range []tea.KeyMsg{keyRunes("q"), keyCtrl('c'), keyCode(tea.KeyEsc)} {
+		updated, command = model.Update(key)
+		result := updated.(profileSetupModel)
+		if command != nil || result.quit || result.cancelled || result.screen != profileSetupScreenCloudSaveRecovery {
+			t.Fatalf("%s escaped cloud save recovery: command=%v model=%+v", key.String(), command, result)
+		}
+	}
+
+	updated, command = model.Update(keyCode(tea.KeyEnter))
+	model = updated.(profileSetupModel)
+	if command == nil || !model.cloudRecoverySaving || fake.destroyCalls != 1 {
+		t.Fatalf("recovery did not start one local-only save: command=%v model=%+v destroyCalls=%d", command, model, fake.destroyCalls)
+	}
+	updated, nextCommand := model.Update(command())
+	model = updated.(profileSetupModel)
+	if nextCommand != nil || model.screen != profileSetupScreenCloud || model.cloudRecoverySaving || fake.destroyCalls != 1 || store.calls != 2 {
+		t.Fatalf("local recovery result = command=%v model=%+v destroyCalls=%d saveCalls=%d", nextCommand, model, fake.destroyCalls, store.calls)
+	}
+	loaded, _, err := baseStore.Load(profile.ID)
+	if err != nil || !profileCloudMarkedDestroyed(loaded) {
+		t.Fatalf("recovered profile state = %+v, err=%v", loaded, err)
+	}
+}
+
+func TestProfileCloudActionRespectsProfileLock(t *testing.T) {
+	root := t.TempDir()
+	store := newFileProfileStore(root)
+	choice := activeCloudProfileChoice()
+	profile, err := store.Create(choice.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherStore := newFileProfileStore(root)
+	lock, err := otherStore.TryLockProfile(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseProfileOperationLock(lock)
+
+	fake := &recordingCloudProvider{}
+	restore := replaceProvisionCloudProvider(fake)
+	defer restore()
+	model := newProfileSetupModel([]profileChoice{{Profile: profile, State: ProfileState{Runs: map[string]SetupRun{}}}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.cloudAction = "destroy"
+	message := model.runProfileCloudAction(context.Background(), "token")().(profileCloudActionMsg)
+	if !errors.Is(message.err, errProfileOperationLocked) || message.remoteOutcomeUnknown || fake.destroyCalls != 0 {
+		t.Fatalf("locked cloud action = %+v, destroy calls=%d", message, fake.destroyCalls)
+	}
+}
+
+func TestProfileCloudActionRecoversInterruptedRunAfterLockRelease(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	choice := activeCloudProfileChoice()
+	profile, err := store.Create(choice.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := ProfileState{ActiveRunID: "run-active", Runs: map[string]SetupRun{
+		"run-active": {ID: "run-active", Status: runStatusRunning},
+	}}
+	if err := store.Save(profile, state); err != nil {
+		t.Fatal(err)
+	}
+	fake := &recordingCloudProvider{}
+	restore := replaceProvisionCloudProvider(fake)
+	defer restore()
+	model := newProfileSetupModel([]profileChoice{{Profile: profile, State: ProfileState{Runs: map[string]SetupRun{}}}})
+	model.profileStore = store
+	model.selectedIndex = 0
+	model.cloudAction = "restart"
+	message := model.runProfileCloudAction(context.Background(), "token")().(profileCloudActionMsg)
+	if message.err != nil || fake.rebootCalls != 1 || message.state.ActiveRunID != "" || message.state.Runs["run-active"].Status != runStatusCancelled {
+		t.Fatalf("interrupted-run cloud action = %+v, reboot calls=%d", message, fake.rebootCalls)
+	}
+	_, persisted, err := store.Load(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.ActiveRunID != "" || persisted.Runs["run-active"].Status != runStatusCancelled {
+		t.Fatalf("cloud action did not persist interrupted-run recovery: %+v", persisted)
+	}
+}
+
+func TestProfileCloudRecoveryMergesLatestRunState(t *testing.T) {
+	store := newFileProfileStore(t.TempDir())
+	choice := activeCloudProfileChoice()
+	profile, err := store.Create(choice.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := ProfileState{ActiveRunID: "run-new", Runs: map[string]SetupRun{
+		"run-new": {ID: "run-new", Status: runStatusComplete},
+	}}
+	if err := store.Save(profile, latest); err != nil {
+		t.Fatal(err)
+	}
+	recovery := profile
+	cloud := *profile.Cloud
+	destroyedAt := time.Now().UTC()
+	cloud.DestroyedAt = &destroyedAt
+	recovery.Cloud = &cloud
+
+	savedProfile, savedState, err := saveProfileCloudRecovery(store, recovery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !profileCloudMarkedDestroyed(savedProfile) || savedState.ActiveRunID != "run-new" || savedState.Runs["run-new"].Status != runStatusComplete {
+		t.Fatalf("merged cloud recovery = profile %+v state %+v", savedProfile, savedState)
+	}
+}
+
+func TestProfileCloudParentContextCancellationReachesProvider(t *testing.T) {
+	fake := newDelayedCloudProvider("reboot")
+	restore := replaceProvisionCloudProvider(fake)
+	defer restore()
+	parentCtx, cancel := context.WithCancel(context.Background())
+
+	model := newProfileSetupModel([]profileChoice{activeCloudProfileChoice()})
+	model.tuiContext = parentCtx
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenCloudConfirm
+	model.cloudAction = "restart"
+	model.cloudTokenInput.SetValue("token")
+	model.cloudConfirmInput.SetValue("restart 84")
+	updated, command := model.Update(keyCode(tea.KeyEnter))
+	model = updated.(profileSetupModel)
+	if command == nil {
+		t.Fatal("cloud action did not start")
+	}
+	result := make(chan tea.Msg, 1)
+	go func() { result <- command() }()
+	waitForTestSignal(t, fake.started, "cloud action start")
+	cancel()
+	waitForTestSignal(t, fake.cancelled, "parent context cancellation")
+	updated, _ = model.Update(<-result)
+	model = updated.(profileSetupModel)
+	if model.screen != profileSetupScreenCloud || !strings.Contains(model.cloudNotice, "remote outcome is unknown") {
+		t.Fatalf("parent cancellation result = screen=%d notice=%q err=%q", model.screen, model.cloudNotice, model.err)
 	}
 }
 
@@ -931,6 +1554,68 @@ func TestProfileCloudConfirmUsesEnvTokenWhenAvailable(t *testing.T) {
 	}
 	if !strings.Contains(model.profileCloudConfirmView(), "permanently deletes") {
 		t.Fatalf("destroy confirm view missing warning:\n%s", model.profileCloudConfirmView())
+	}
+}
+
+func TestProfileCloudCancellationReachesDelayedProvider(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{name: "ctrl+c", key: keyCtrl('c')},
+		{name: "q", key: keyRunes("q")},
+		{name: "esc", key: keyCode(tea.KeyEsc)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runProfileCloudCancellationTest(t, test.name, test.key)
+		})
+	}
+}
+
+func runProfileCloudCancellationTest(t *testing.T, keyName string, cancelKey tea.KeyMsg) {
+	t.Helper()
+	fake := newDelayedCloudProvider("reboot")
+	restore := replaceProvisionCloudProvider(fake)
+	defer restore()
+
+	model := newProfileSetupModel([]profileChoice{activeCloudProfileChoice()})
+	model.selectedIndex = 0
+	model.screen = profileSetupScreenCloudConfirm
+	model.cloudAction = "restart"
+	model.cloudTokenInput.SetValue("token")
+	model.cloudConfirmInput.SetValue("restart 84")
+
+	updated, command := model.Update(keyCode(tea.KeyEnter))
+	model = updated.(profileSetupModel)
+	if model.screen != profileSetupScreenCloudRunning || model.cloudCancel == nil || command == nil {
+		t.Fatalf("cloud action did not start: screen=%d cancel=%v command=%v", model.screen, model.cloudCancel != nil, command)
+	}
+	result := make(chan tea.Msg, 1)
+	go func() { result <- command() }()
+	waitForTestSignal(t, fake.started, "cloud action start")
+
+	updated, duplicateCommand := model.Update(keyCode(tea.KeyEnter))
+	model = updated.(profileSetupModel)
+	if duplicateCommand != nil || fake.calls != 1 {
+		t.Fatalf("busy cloud action accepted a duplicate action: command=%v calls=%d", duplicateCommand, fake.calls)
+	}
+	updated, cancelCommand := model.Update(cancelKey)
+	model = updated.(profileSetupModel)
+	if cancelCommand != nil || model.cloudCancel != nil || model.cancelled {
+		t.Fatalf("%s should request cancellation without quitting setup: command=%v model=%+v", keyName, cancelCommand, model)
+	}
+	if !strings.Contains(model.profileCloudRunningView(), "Cancelling DigitalOcean restart action") {
+		t.Fatalf("cloud cancelling view missing acknowledgement:\n%s", model.profileCloudRunningView())
+	}
+	waitForTestSignal(t, fake.cancelled, "cloud action cancellation")
+
+	updated, _ = model.Update(<-result)
+	model = updated.(profileSetupModel)
+	if model.screen != profileSetupScreenCloud || model.err != "" || !strings.Contains(model.cloudNotice, "remote outcome is unknown") {
+		t.Fatalf("cancelled cloud action did not recover to cloud screen: screen=%d err=%q notice=%q", model.screen, model.err, model.cloudNotice)
+	}
+	if fake.calls != 1 {
+		t.Fatalf("cloud cancellation duplicated provider calls: %d", fake.calls)
 	}
 }
 
@@ -948,6 +1633,10 @@ type recordingCloudProvider struct {
 	rebootErr        error
 	destroyedID      string
 	rebootedID       string
+	createCalls      int
+	keyCalls         int
+	destroyCalls     int
+	rebootCalls      int
 }
 
 func (provider *recordingCloudProvider) Catalog(context.Context) (cloudCatalog, error) {
@@ -955,14 +1644,16 @@ func (provider *recordingCloudProvider) Catalog(context.Context) (cloudCatalog, 
 }
 
 func (provider *recordingCloudProvider) Create(_ context.Context, config provisionConfig) (server, error) {
+	provider.createCalls++
 	provider.createdConfig = config
 	if provider.createErr != nil {
-		return server{}, provider.createErr
+		return provider.created, provider.createErr
 	}
 	return provider.created, nil
 }
 
 func (provider *recordingCloudProvider) CreateSSHKey(_ context.Context, name, publicKey string) (cloudSSHKey, error) {
+	provider.keyCalls++
 	provider.createdKeyName = name
 	provider.createdPublicKey = publicKey
 	if provider.keyErr != nil {
@@ -972,13 +1663,67 @@ func (provider *recordingCloudProvider) CreateSSHKey(_ context.Context, name, pu
 }
 
 func (provider *recordingCloudProvider) Reboot(_ context.Context, id string) error {
+	provider.rebootCalls++
 	provider.rebootedID = id
 	return provider.rebootErr
 }
 
 func (provider *recordingCloudProvider) Destroy(_ context.Context, id string) error {
+	provider.destroyCalls++
 	provider.destroyedID = id
 	return provider.destroyErr
+}
+
+type delayedCloudProvider struct {
+	recordingCloudProvider
+	operation string
+	started   chan struct{}
+	cancelled chan struct{}
+	calls     int
+}
+
+func newDelayedCloudProvider(operation string) *delayedCloudProvider {
+	return &delayedCloudProvider{
+		operation: operation,
+		started:   make(chan struct{}),
+		cancelled: make(chan struct{}),
+	}
+}
+
+func (provider *delayedCloudProvider) Create(ctx context.Context, config provisionConfig) (server, error) {
+	if provider.operation != "create" {
+		return provider.recordingCloudProvider.Create(ctx, config)
+	}
+	return server{}, provider.waitForCancellation(ctx)
+}
+
+func (provider *delayedCloudProvider) Reboot(ctx context.Context, id string) error {
+	provider.rebootedID = id
+	if provider.operation != "reboot" {
+		return provider.recordingCloudProvider.Reboot(ctx, id)
+	}
+	return provider.waitForCancellation(ctx)
+}
+
+func (provider *delayedCloudProvider) waitForCancellation(ctx context.Context) error {
+	provider.calls++
+	if provider.calls == 1 {
+		close(provider.started)
+	}
+	<-ctx.Done()
+	if provider.calls == 1 {
+		close(provider.cancelled)
+	}
+	return ctx.Err()
+}
+
+func waitForTestSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
 }
 
 type listItemForTest struct {
@@ -989,27 +1734,39 @@ func (item listItemForTest) Title() string       { return "test" }
 func (item listItemForTest) Description() string { return "test" }
 func (item listItemForTest) FilterValue() string { return "test" }
 
-type failingCreateProfileStore struct {
-	err error
+type failOnceCreateProfileStore struct {
+	ProfileStore
+	err      error
+	calls    int
+	attempts []Profile
 }
 
-func (store failingCreateProfileStore) List() ([]ProfileSummary, error)              { return nil, nil }
-func (store failingCreateProfileStore) ResolveByIP(string) ([]ProfileSummary, error) { return nil, nil }
-func (store failingCreateProfileStore) Create(Profile) (Profile, error)              { return Profile{}, store.err }
-func (store failingCreateProfileStore) Load(string) (Profile, ProfileState, error) {
-	return Profile{}, ProfileState{}, nil
+func (store *failOnceCreateProfileStore) Create(profile Profile) (Profile, error) {
+	store.calls++
+	store.attempts = append(store.attempts, profile)
+	if store.calls == 1 {
+		return Profile{}, store.err
+	}
+	return store.ProfileStore.Create(profile)
 }
-func (store failingCreateProfileStore) Save(Profile, ProfileState) error { return nil }
-func (store failingCreateProfileStore) Delete(string) error              { return nil }
-func (store failingCreateProfileStore) LoadSecrets(string) (ProfileSecrets, error) {
-	return ProfileSecrets{}, nil
-}
-func (store failingCreateProfileStore) SaveSecrets(string, ProfileSecrets) error       { return nil }
-func (store failingCreateProfileStore) AppendRunEvent(string, string, TaskEvent) error { return nil }
 
 type failingSaveProfileStore struct {
 	ProfileStore
 	err error
+}
+
+type failOnceSaveProfileStore struct {
+	ProfileStore
+	err   error
+	calls int
+}
+
+func (store *failOnceSaveProfileStore) Save(profile Profile, state ProfileState) error {
+	store.calls++
+	if store.calls == 1 {
+		return store.err
+	}
+	return store.ProfileStore.Save(profile, state)
 }
 
 func (store failingSaveProfileStore) Save(Profile, ProfileState) error {
@@ -1089,5 +1846,4 @@ func containsAll(value string, expected ...string) bool {
 	return true
 }
 
-var _ ProfileStore = failingCreateProfileStore{}
 var _ ProfileStore = failingSaveProfileStore{}

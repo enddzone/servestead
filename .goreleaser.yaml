@@ -5,7 +5,6 @@ project_name: servestead
 before:
   hooks:
     - go mod tidy
-    - go tool templ generate
 
 builds:
   - id: servestead
