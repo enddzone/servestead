@@ -16,8 +16,8 @@ permissions:
   security-events: write
 
 env:
-  GOVULNCHECK_VERSION: v1.6.0
-  TRIVY_VERSION: v0.72.0
+  GOVULNCHECK_VERSION: v1.7.0
+  TRIVY_VERSION: v0.74.0
 
 jobs:
   govulncheck:
