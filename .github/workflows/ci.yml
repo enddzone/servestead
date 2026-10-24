@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Go
         uses: actions/setup-go@v7.0.0
@@ -61,7 +61,7 @@ jobs:
         run: go test -covermode=atomic -coverprofile=coverage.out ./...
 
       - name: Upload coverage
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: go-coverage
           path: coverage.out
@@ -77,12 +77,12 @@ jobs:
       SONAR_HOST_URL: https://sonarcloud.io
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
       - name: Download coverage
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: go-coverage
 
@@ -90,7 +90,7 @@ jobs:
         run: test -n "$SONAR_TOKEN"
 
       - name: Scan with SonarQube Cloud
-        uses: SonarSource/sonarqube-scan-action@v8.2.1
+        uses: SonarSource/sonarqube-scan-action@v8.3.0
         with:
           args: >
             -Dsonar.qualitygate.wait=true
