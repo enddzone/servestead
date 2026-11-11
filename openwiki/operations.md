@@ -18,7 +18,7 @@ All workflows are in `.github/workflows/`.
 **Triggers**: PR, push to main, manual.
 
 **Jobs**:
-1. **Test**: checkout → setup Go (from `go.mod`) → `templ generate` + verify clean diff → check frontend asset files exist → install golangci-lint v2.11.4 → `golangci-lint fmt` check → `golangci-lint lint` → `go vet` → `go test -race` → upload coverage profile as artifact
+1. **Test**: checkout → setup Go (from `go.mod`) → `templ generate` + verify clean diff → check frontend asset files exist → install golangci-lint v2.11.4 → `golangci-lint fmt --diff` → `golangci-lint run ./...` → `gofmt -l` check → `go vet` → `go test -race` → coverage profile (`-covermode=atomic`) uploaded as artifact
 2. **Sonar** (needs test): downloads coverage, runs SonarCloud analysis (gated to non-fork PRs)
 
 ### codeql.yml — CodeQL Static Analysis
@@ -51,7 +51,7 @@ Runs `googleapis/release-please-action@v5.0.0` with `release-please-config.json`
 
 **Triggers**: Daily cron (08:00 UTC), manual.
 
-Checks out the repo (Node.js 22), installs `openwiki` globally via npm, and runs `openwiki code --update --print` with an OpenRouter-backed model (`z-ai/glm-5.2`). Creates a pull request via `peter-evans/create-pull-request@v7` that includes `openwiki/`, `AGENTS.md`, `CLAUDE.md`, and the workflow file itself. LangSmith tracing is enabled.
+Checks out the repo, sets up Node.js 24, installs `openwiki` globally via npm, and runs `openwiki code --update --print` with a Fireworks-backed model (`accounts/fireworks/models/glm-5p2`). Creates a pull request via `peter-evans/create-pull-request@v8` scoped to `openwiki/` and `AGENTS.md` only — the workflow cannot edit its own file or `CLAUDE.md`. LangSmith tracing is enabled.
 
 ### renovate.yml — Dependency Updates
 
@@ -65,8 +65,8 @@ Runs Renovate bot (`renovatebot/github-action@v46.1.19`) against the repo using 
 
 **Jobs**:
 1. **govulncheck**: Go vulnerability scanner v1.6.0 + frontend asset check
-2. **Dependency review**: PR-only, `dependency-review-action`, fails on high-severity vulnerabilities
-3. **Trivy filesystem scan**: SARIF report upload + fail on HIGH/CRITICAL findings
+2. **Dependency review**: PR-only, `dependency-review-action` v5, fails on high-severity vulnerabilities
+3. **Trivy filesystem scan**: Trivy v0.72.0 — SARIF report upload + fail on HIGH/CRITICAL findings
 
 ## Linting
 
@@ -88,18 +88,17 @@ Per `AGENTS.md`, always run `golangci-lint` after making changes, in addition to
 
 **Config files**:
 - `release-please-config.json`: Go release type, package "servestead", changelog at `CHANGELOG.md`
-- `.release-please-manifest.json`: Current version `0.2.1`
+- `.release-please-manifest.json`: Current version `0.4.0`
 - `.goreleaser.yaml`: Build config, archive templates, checksums, SBOMs
 
-**Current version**: 0.2.1 (from `CHANGELOG.md`)
+**Current version**: 0.4.0 (from `CHANGELOG.md`)
 
 ## Renovate Configuration
 
 **`renovate.json`**:
-- Extends `config:recommended`
-- Semantic commits (`chore` type), America/Chicago timezone, morning schedule
-- Groups minor/patch updates as "non-major dependencies"; GitHub Actions updates grouped separately
-- Custom regex managers track `GOVULNCHECK_VERSION`, `GORELEASER_VERSION`, `SYFT_VERSION`, `TRIVY_VERSION` in workflow YAML
+- Extends `config:recommended`, `:dependencyDashboard`, `:semanticCommits`, `:semanticCommitTypeAll(chore)`; America/Chicago timezone, morning schedule
+- Groups minor/patch updates as "non-major dependencies"; GitHub Actions updates grouped separately; Docker-datasource images grouped as "container images"
+- Custom regex managers track `GOVULNCHECK_VERSION`, `GORELEASER_VERSION`, `SYFT_VERSION`, `TRIVY_VERSION` in workflow YAML (Trivy is matched across both `security.yml` and `release.yml`)
 - Go module updates include import path rewriting + `gomodTidy`
 - PR limits: 2/hour, 5 concurrent
 
@@ -108,25 +107,26 @@ Per `AGENTS.md`, always run `golangci-lint` after making changes, in addition to
 **`sonar-project.properties`**:
 - Project key: `enddzone_servestead`, organization: `enddzone`
 - Sources: `.`, tests: `backend/**/*_test.go`
-- Exclusions: `.git`, `.github`, `.lavish`, `bin`, `dist`, `coverage.out`, test files, `docs`, `mockups`, `openwiki`
+- Exclusions: `.git`, `.github`, `.lavish`, `bin`, `dist`, `coverage.out`, all `*_test.go`, generated `frontend/**/*_templ.go`, `docs`, `mockups`, `openwiki`
 - Coverage exclusions: `backend/setup.go`, `frontend/**`
 
 ## Documentation Site
 
-**`docs/`** — Astro Starlight documentation site (Astro `^7.0.3`, Starlight `^0.41.1`, Node ≥20.19).
+**`docs/`** — Astro Starlight documentation site (Astro `^7.0.3`, Starlight `^0.41.1`; `package.json` engines Node ≥20.19, CI builds with Node 24).
 
-**Structure** (`docs/src/content/docs/`):
-- `getting-started/` — overview, prerequisites, build, existing-VPS, provision-VPS
-- `guides/` — guided setup, DNS & proxy, observability, add stack
-- `reference/` — commands, security model
-- `troubleshooting/` — common issues
+**Structure** (`docs/src/content/docs/`) — the sidebar groups pages into five sections:
+- **Start Here** (`getting-started/`) — overview, prerequisites, build, existing-VPS, provision-VPS
+- **Servestead Web** (`guides/`) — command center, guided setup, profiles and diagnostics
+- **Deploy and Operate** (`guides/`) — DNS and proxy, add an application stack, GitOps review and sync, observability, access and secrets
+- **Reference** (`reference/`) — CLI commands, terminal UI, security model
+- **Troubleshooting** (`troubleshooting/`) — common issues
 
 **Config** (`docs/astro.config.mjs`):
-- Title: "Servestead", custom CSS
+- Title: "Servestead", logo, custom CSS, `theme-color` head meta
 - GitHub social link, edit link to repo `docs/` directory
 - `site` and `base` configurable via `DOCS_SITE_URL` and `DOCS_BASE_PATH` env vars (defaults: `https://docs.servestead.com` and `/`)
 
-**Deployment**: GitHub Pages via `docs.yml` workflow. Supports custom domain (`docs.servestead.com`) or project-path mode (`/servestead`).
+**Deployment**: GitHub Pages via `docs.yml`. The build job runs `npm ci` and `npm run build` with `DOCS_BASE_PATH=/`; on main pushes a separate `deploy` job (with `pages: write` + `id-token: write`) publishes via `actions/deploy-pages@v5`. A concurrency group cancels in-progress runs. Supports custom domain (`docs.servestead.com`) or project-path mode (`/servestead`).
 
 ## Docker Release Image
 
