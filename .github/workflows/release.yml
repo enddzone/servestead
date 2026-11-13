@@ -18,8 +18,8 @@ permissions:
   attestations: write
 
 env:
-  GORELEASER_VERSION: v2.20.0
-  SYFT_VERSION: v1.57.0
+  GORELEASER_VERSION: v2.20.2
+  SYFT_VERSION: v1.57.1
   TRIVY_VERSION: v0.76.2
 
 jobs:
